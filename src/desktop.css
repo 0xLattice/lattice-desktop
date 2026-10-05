@@ -1,0 +1,4 @@
+/* Desktop window over the wallet's popup styles: fill the window, keep the
+   column readable. */
+body { width: auto; min-height: 100vh; }
+main { max-width: 560px; margin: 0 auto; }

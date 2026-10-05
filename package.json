@@ -1,0 +1,25 @@
+{
+  "name": "lattice-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Lattice Desktop — a full Lattice node and the Nexus Wallet in one macOS app",
+  "license": "MIT",
+  "scripts": {
+    "postinstall": "npm ci --prefix vendor/nexus-wallet",
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.1",
+    "@types/node": "^22.19.21",
+    "esbuild": "^0.25.12",
+    "typescript": "^5.9.3"
+  }
+}

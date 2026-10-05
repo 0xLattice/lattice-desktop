@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window: core IPC only. App commands are the shell's own (lattice lifecycle, files under Lattice/, loopback node HTTP).",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
