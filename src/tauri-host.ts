@@ -13,11 +13,19 @@ export const hostOps: HostOps = {
   lattice: (verb: LifecycleVerb) => invoke<CommandResult>("lattice", { verb }),
   readTopology: () => invoke<Topology | null>("read_topology"),
   // Only the fields the app manages; the shell merges them and refuses others.
-  writeTopology: ({ rpc, listen, peers, hostedChains }: Topology) =>
+  writeTopology: ({ rpc, listen, peers, hostedChains, rpcAllowedOrigins }: Topology) =>
     invoke<void>("write_topology", {
-      topology: { rpc, listen, ...(peers ? { peers } : {}), ...(hostedChains ? { hostedChains } : {}) },
+      topology: {
+        rpc, listen,
+        ...(peers ? { peers } : {}),
+        ...(hostedChains ? { hostedChains } : {}),
+        ...(rpcAllowedOrigins ? { rpcAllowedOrigins } : {}),
+      },
     }),
 };
+
+/** The node's current loopback cookie, for pairing a browser extension (null when not running). */
+export const nodeCookie = () => invoke<string | null>("node_cookie");
 
 export const nodeHTTP: NodeHTTP = (method, path, body) =>
   invoke<LoopbackAnswer>("node_http", { method, path, body });

@@ -11,6 +11,8 @@ export interface Topology {
   /** Absent: the node's built-in bootstrap peers. []: none. */
   peers?: string[];
   hostedChains?: string[];
+  /** Browser origins allowed on the loopback operator port (e.g. a paired extension). */
+  rpcAllowedOrigins?: string[];
   [field: string]: unknown;
 }
 
@@ -89,6 +91,8 @@ export interface ChainStatus {
   /** "down", "unreachable", or the node's phase (e.g. "active"). */
   state: string;
   height?: bigint;
+  /** The best header chain the node knows (from its /health): sync progress is height of this. */
+  bestHeaderHeight?: bigint;
   tip?: string;
   mempool?: number;
 }
@@ -117,6 +121,17 @@ export function parseStatus(stdout: string): ChainStatus[] {
     }
   }
   return out;
+}
+
+/**
+ * A browser extension's origin as the node lists it: a Chrome extension id
+ * (32 letters a-p) becomes `chrome-extension://<id>`; an origin
+ * `<scheme>://<host>` is taken as given. Undefined when neither.
+ */
+export function extensionOrigin(text: string): string | undefined {
+  const t = text.trim();
+  if (/^[a-p]{32}$/.test(t)) return `chrome-extension://${t}`;
+  return /^[a-z][a-z0-9+.-]*-extension:\/\/[A-Za-z0-9._-]+$/.test(t) ? t : undefined;
 }
 
 /** First-run ports of the app's node; settable afterwards. */
@@ -169,10 +184,42 @@ export class NodeManager {
     const problem = checkPrefs(prefs);
     if (problem) throw new Error(problem);
     const topology = await this.ensureHost();
+    await this.#rewrite(withPrefs(topology, prefs));
+  }
+
+  /** Writes the topology; a running node restarts to take it. */
+  async #rewrite(topology: Topology): Promise<void> {
     const wasRunning = (await this.status()).some((c) => c.state !== "down");
     if (wasRunning) await this.#run("down");
-    await this.#host.writeTopology(withPrefs(topology, prefs));
+    await this.#host.writeTopology(topology);
     if (wasRunning) await this.#run("up");
+  }
+
+  /**
+   * The wallet's chain list: Nexus and the chains this node hosts. One list,
+   * kept in lattice.json, for the node and the wallet alike.
+   */
+  async chains(): Promise<string[]> {
+    return ["Nexus", ...((await this.ensureHost()).hostedChains ?? [])];
+  }
+
+  /** Hosts `chain` too (its parent must be hosted already); a running node restarts. */
+  async addHostedChain(chain: string): Promise<void> {
+    const prefs = await this.prefs();
+    if (chain === "Nexus" || prefs.hostedChains.includes(chain)) return;
+    await this.configure({ ...prefs, hostedChains: [...prefs.hostedChains, chain] });
+  }
+
+  /** Lets a browser extension's origin reach the operator port (it still needs the cookie). */
+  async allowOrigin(origin: string): Promise<void> {
+    const topology = await this.ensureHost();
+    const origins = topology.rpcAllowedOrigins ?? [];
+    if (origins.includes(origin)) return;
+    await this.#rewrite({ ...topology, rpcAllowedOrigins: [...origins, origin] });
+  }
+
+  async allowedOrigins(): Promise<string[]> {
+    return [...((await this.ensureHost()).rpcAllowedOrigins ?? [])];
   }
 
   async start(): Promise<void> {

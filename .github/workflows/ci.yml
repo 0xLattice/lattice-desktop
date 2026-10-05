@@ -32,3 +32,39 @@ jobs:
           for n in lattice lattice-node; do printf '#!/bin/sh\nexit 1\n' > "src-tauri/binaries/$n-$triple"; chmod +x "src-tauri/binaries/$n-$triple"; done
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: npx tauri build --bundles app --no-sign
+
+  # The headless e2e against REAL node binaries: lattice, lattice-node and
+  # lattice-mining-coordinator built (debug, as bundled) at NODE_COMMIT.
+  e2e:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - id: node
+        run: echo "commit=$(tr -d '[:space:]' < NODE_COMMIT)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: adalinxx/lattice-node
+          ref: ${{ steps.node.outputs.commit }}
+          path: .build-node
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+      - uses: actions/cache@v4
+        with:
+          path: .build-node/.build
+          key: node-debug-macos-${{ steps.node.outputs.commit }}
+          restore-keys: node-debug-macos-
+      - name: Build node binaries at NODE_COMMIT
+        working-directory: .build-node
+        run: |
+          for product in lattice lattice-node lattice-mining-coordinator; do
+            swift build -c debug --product "$product"
+          done
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci
+      - name: Headless e2e (real node, no peers, throwaway storage)
+        run: LATTICE_NODE_BIN="$PWD/.build-node/.build/debug" npm test

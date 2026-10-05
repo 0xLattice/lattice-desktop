@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { NodeManager, type HostOps, type Topology } from "../src/node-manager.ts";
+import { withSync } from "../src/node-panel.ts";
 import { loopbackFetch, type NodeHTTP } from "../src/loopback.ts";
 import { createSigner, type VaultStorage } from "../vendor/nexus-wallet/src/lib/wallet/signer.ts";
 import { walletClient } from "../vendor/nexus-wallet/src/lib/wallet/client.ts";
@@ -53,7 +54,7 @@ async function until<T>(probe: () => Promise<T | undefined>, what: string, ms = 
   throw new Error(`timed out waiting for ${what}${last ? `: ${last}` : ""}`);
 }
 
-/** The shell's commands, in Node: the same CLI, files, and loopback-only HTTP. */
+/** The shell's commands, in Node: the same CLI, files, and loopback-only HTTP with the node's cookie. */
 function harnessHost(root: string): HostOps & { nodeHTTP: NodeHTTP } {
   const topologyFile = join(root, "lattice.json");
   return {
@@ -79,7 +80,12 @@ function harnessHost(root: string): HostOps & { nodeHTTP: NodeHTTP } {
     async nodeHTTP(method, path, body) {
       const { rpc } = JSON.parse(readFileSync(topologyFile, "utf8")) as Topology;
       const response = await fetch(`http://127.0.0.1:${rpc}${path}`, {
-        method, ...(body === null ? {} : { body, headers: { "Content-Type": "application/json" } }),
+        method,
+        headers: {
+          Authorization: "Basic " + btoa(readFileSync(join(root, "chains", "Nexus", ".cookie"), "utf8").trim()),
+          ...(body === null ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(body === null ? {} : { body }),
       });
       return { status: response.status, body: await response.text() };
     },
@@ -105,10 +111,15 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
     assert.equal(active.height, 0n);
 
     const url = await manager.rpcURL();
-    const fetch = loopbackFetch(url, host.nodeHTTP);
-    const reads = reader(url, ["Nexus"], fetch);
+    const loopback = loopbackFetch(url, host.nodeHTTP);
+    const reads = reader(url, ["Nexus"], loopback);
     const info = await reads.chainInfo();
     assert.equal(info.acceptsSubmit, true, "the loopback operator route accepts the owner's submits");
+    // The operator port needs the cookie the shell attaches; without it, refused.
+    assert.equal((await fetch(`${url}/api/chain/info`)).status, 401);
+    // Sync progress: the node's best header height beside its executed height.
+    const [synced] = await withSync(await manager.status(), { health: (path) => reader(url, path.split("/"), loopback).health() });
+    assert.equal(synced?.bestHeaderHeight, 0n);
 
     // The wallet: the shared signer over an in-memory vault.
     let vault: Vault | null = null;
@@ -125,7 +136,7 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
       const target = ((await reads.chainInfo()).height ?? 0n) + BigInt(blocks);
       await until(async () => {
         await run(join(bin!, "lattice-mining-coordinator"), [
-          "--node", url, "--workers", "2", "--recipient", `Nexus=${from}`, "--once", "--no-stale-probe",
+          "--node", url, "--rpc-cookie-file", join(root, "chains", "Nexus", ".cookie"), "--workers", "2", "--recipient", `Nexus=${from}`, "--once", "--no-stale-probe",
         ]);
         return ((await reads.chainInfo()).height ?? 0n) >= target || undefined;
       }, `height ${target}`);
@@ -140,7 +151,7 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
       from, to, amount: "1000", fee: fee.toString(), nonce: funded.nonce.toString(), chainPath: ["Nexus"],
     });
     assert.ok(signed.ok);
-    const cid = await submitChecked(submitter(url, fetch), signed.signedSubmit);
+    const cid = await submitChecked(submitter(url, loopback), signed.signedSubmit);
     assert.deepEqual(await sentStatus(reads, cid), { kind: "pending" });
     const before = (await reads.chainInfo()).height!;
     await mine(1);
@@ -155,6 +166,22 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
 
     const [nexus] = await manager.status();
     assert.ok(nexus!.height! >= included.height, "status reports the synced height");
+
+    // Pairing an extension: its origin is allowed (the node restarts with a
+    // fresh cookie); with that cookie, requests from that origin are served,
+    // any other origin is refused.
+    const origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+    const oldCookie = readFileSync(join(root, "chains", "Nexus", ".cookie"), "utf8");
+    await manager.allowOrigin(origin);
+    const cookie = await until(async () => {
+      const c = readFileSync(join(root, "chains", "Nexus", ".cookie"), "utf8");
+      return c !== oldCookie && (await fetch(`${url}/health`)).ok ? c : undefined;
+    }, "restart with a new cookie");
+    const as = (o: string) => fetch(`${url}/api/chain/info`, { headers: { Origin: o, Authorization: "Basic " + btoa(cookie.trim()) } });
+    const paired = await as(origin);
+    assert.equal(paired.status, 200);
+    assert.equal(paired.headers.get("access-control-allow-origin"), origin);
+    assert.equal((await as("chrome-extension://someoneelseeeeeeeeeeeeeeeeeeeeeee")).status, 403);
     await manager.stop();
     assert.deepEqual(await manager.status(), [{ path: "Nexus", state: "down" }]);
   } catch (e) {

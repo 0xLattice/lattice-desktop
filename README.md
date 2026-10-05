@@ -24,15 +24,28 @@ A full Lattice node and the Nexus Wallet in one macOS app (Tauri v2).
   `lattice key generate` key files import as standalone accounts.
 - **Loopback only.** The webview has no network access: its CSP allows Tauri
   IPC only. Every node call goes through the shell's `node_http` command, which
-  connects only to `127.0.0.1` on the RPC port in `lattice.json`. Sends are
+  connects only to `127.0.0.1` on the RPC port the node was started on (read
+  from `lattice.json` at launch and at each `lattice up`, never what the page
+  writes later) and attaches the node's cookie: the node's operator port
+  requires its bitcoind-style cookie (`<root>/chains/Nexus/.cookie`, rewritten
+  at every node start) on everything but `/health`. Sends are
   signed in the app and submitted to the node's loopback operator route
   `POST /transactions`. The app checks the transaction CID the node returns
   against the CID it computed itself. There is no default endpoint and no relay.
 - **Fees** can be set per transaction, with a default per chain. The app warns
   when a fee is below the node's `minRelayFee` but never clamps it.
 - **Status** comes from an inclusion lookup (block height), and **balances**
-  are shown for Nexus and for any child chains you host (Node settings → Hosted
-  child chains) and add in the wallet's chain picker.
+  are shown for Nexus and for the child chains the node hosts. There is one
+  chain list, `hostedChains` in `lattice.json`: adding a chain in the wallet's
+  chain picker hosts it, and a chain added in Node settings appears in the
+  picker (a running node restarts to take either).
+- **Sync progress**: the node screen shows each chain's executed height
+  against the best header height the node knows (`/health`'s
+  `bestHeaderHeight`).
+- **Pair browser extension** (Node → Pair browser extension): allows the
+  Nexus Wallet extension's origin in `rpcAllowedOrigins` (the node restarts)
+  and copies the node's cookie for the extension's Node screen. The cookie
+  changes whenever the node restarts; pair again then.
 
 ## Build
 
