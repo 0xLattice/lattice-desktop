@@ -12,6 +12,9 @@
 //!   writes later), and nowhere else (the page's CSP gives it no network of
 //!   its own). It attaches the node's cookie: the operator port requires it.
 //! - `node_cookie`: that cookie, for pairing a browser extension.
+//! - `save_backup`: an encrypted wallet backup as a new 0600 text file in
+//!   ~/Downloads (the webview has no downloads of its own).
+//! - `print_page`: the webview's print dialog (it has no `window.print`).
 //!
 //! On quit the shell stops the node with `lattice down`.
 
@@ -23,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, RunEvent, State};
+use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow};
 
 /// The RPC port the node was started on: read from lattice.json at launch
 /// (a node left running by an earlier session) and at each successful
@@ -276,6 +279,52 @@ fn store_remove(app: AppHandle, key: String) -> Result<()> {
     }
 }
 
+/// A backup file name the page may ask for: a plain `.txt` name, no path.
+fn backup_name(name: &str) -> Result<&str> {
+    let ok = name.len() <= 100
+        && name.ends_with(".txt")
+        && !name.starts_with('.')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if ok {
+        Ok(name)
+    } else {
+        Err(format!("refused: file name {name}"))
+    }
+}
+
+/// Write `text` to a new file in `dir` (never over an existing one), 0600.
+fn write_new(dir: &Path, name: &str, text: &str) -> Result<PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "txt"));
+    for n in 0..100 {
+        let file = if n == 0 { name.to_string() } else { format!("{stem}-{n}.{ext}") };
+        let path = dir.join(file);
+        match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+            Ok(mut f) => {
+                f.write_all(text.as_bytes()).map_err(err)?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(err(e)),
+        }
+    }
+    Err("refused: too many files with that name".into())
+}
+
+#[tauri::command]
+fn save_backup(app: AppHandle, name: String, text: String) -> Result<String> {
+    if text.len() > 1024 * 1024 || !text.contains("ur:lattice-vault/") {
+        return Err("refused: not a wallet backup".into());
+    }
+    let dir = app.path().download_dir().map_err(err)?;
+    Ok(write_new(&dir, backup_name(&name)?, &text)?.display().to_string())
+}
+
+#[tauri::command]
+fn print_page(window: WebviewWindow) -> Result<()> {
+    window.print().map_err(err)
+}
+
 #[derive(Serialize, Debug)]
 struct NodeAnswer {
     status: u16,
@@ -390,7 +439,9 @@ pub fn run() {
             store_set,
             store_remove,
             node_http,
-            node_cookie
+            node_cookie,
+            save_backup,
+            print_page
         ])
         .build(tauri::generate_context!())
         .expect("error while building the app")
@@ -408,6 +459,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backups_save_as_new_plain_files_only() {
+        assert!(backup_name("lattice-wallet-backup-2026-10-05.txt").is_ok());
+        for bad in ["../x.txt", "a/b.txt", ".hidden.txt", "x.sh", "x .txt", ""] {
+            assert!(backup_name(bad).is_err(), "{bad}");
+        }
+        let dir = std::env::temp_dir().join(format!("lattice-save-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let a = write_new(&dir, "b.txt", "one").unwrap();
+        let b = write_new(&dir, "b.txt", "two").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(fs::read_to_string(&a).unwrap(), "one", "never overwritten");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&b).unwrap().permissions().mode() & 0o777, 0o600);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn only_lifecycle_verbs_run() {

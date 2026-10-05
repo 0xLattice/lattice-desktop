@@ -9,7 +9,7 @@ import { walletClient } from "../vendor/nexus-wallet/src/lib/wallet/client.ts";
 import { NodeManager } from "./node-manager.ts";
 import { loopbackFetch } from "./loopback.ts";
 import { nodeScreen } from "./node-panel.ts";
-import { hostOps, nodeHTTP, nodeCookie, vaultFile, settingsFile } from "./tauri-host.ts";
+import { hostOps, nodeHTTP, nodeCookie, vaultFile, settingsFile, saveBackup, printPage } from "./tauri-host.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 
 const AUTO_LOCK_MS = 10 * 60 * 1000;
@@ -48,6 +48,11 @@ async function boot() {
     ownNode,
     fetch,
     keyFilePicker: true,
+    // Backups: the webview may hold the camera (the shell's Info.plist asks
+    // macOS); files go to ~/Downloads and printing through the shell.
+    camera: true,
+    saveFile: saveBackup,
+    print: printPage,
     // One chain list: the chains this node hosts (lattice.json). Adding one in
     // the wallet hosts it (a running node restarts).
     chains: { list: () => manager.chains(), add: (chain) => manager.addHostedChain(chain) },
