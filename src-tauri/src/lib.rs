@@ -101,10 +101,11 @@ fn read_topology(app: AppHandle) -> Result<Option<Value>> {
 fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("tmp");
+    // A fresh file every time, so `mode` always applies (never a stale temp's).
+    let _ = fs::remove_file(&tmp);
     let mut file = fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(mode)
         .open(&tmp)
         .map_err(err)?;
@@ -113,13 +114,50 @@ fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     fs::rename(&tmp, path).map_err(err)
 }
 
+/// The lattice.json fields the page may set. Everything else (public
+/// listeners, external address, mining, ...) is the operator's, edited by
+/// hand: the page cannot expose the node or point `node_http` elsewhere
+/// beyond choosing the node's own loopback RPC port.
+const MANAGED: [&str; 4] = ["rpc", "listen", "peers", "hostedChains"];
+
+/// `current` with the page's managed fields applied (an absent `peers` or
+/// `hostedChains` removes it); anything else from the page is refused.
+fn merged_topology(current: Value, update: &Value) -> Result<Value> {
+    let update = update.as_object().ok_or("lattice.json must be an object")?;
+    if let Some(key) = update.keys().find(|k| !MANAGED.contains(&k.as_str())) {
+        return Err(format!("refused: lattice.json field {key}"));
+    }
+    for port in ["rpc", "listen"] {
+        rpc_port(&Some(serde_json::json!({ "rpc": update.get(port).cloned().unwrap_or(Value::Null) })))
+            .map_err(|_| format!("{port} must be a port"))?;
+    }
+    for list in ["peers", "hostedChains"] {
+        if let Some(v) = update.get(list) {
+            if !v.as_array().is_some_and(|a| a.iter().all(Value::is_string)) {
+                return Err(format!("{list} must be a list of strings"));
+            }
+        }
+    }
+    let mut out = current.as_object().cloned().ok_or("lattice.json is not an object")?;
+    for key in MANAGED {
+        match update.get(key) {
+            Some(v) => {
+                out.insert(key.to_string(), v.clone());
+            }
+            None => {
+                out.remove(key);
+            }
+        }
+    }
+    Ok(Value::Object(out))
+}
+
 #[tauri::command]
 fn write_topology(app: AppHandle, topology: Value) -> Result<()> {
-    if !topology.is_object() {
-        return Err("lattice.json must be an object".into());
-    }
     let path = topology_path(&app)?;
-    let bytes = serde_json::to_vec_pretty(&topology).map_err(err)?;
+    let current = read_topology_at(&path)?.ok_or("no lattice.json; run lattice init first")?;
+    let merged = merged_topology(current, &topology)?;
+    let bytes = serde_json::to_vec_pretty(&merged).map_err(err)?;
     write_atomically(&path, &bytes, 0o644)
 }
 
@@ -129,12 +167,9 @@ fn store_path(app: &AppHandle, key: &str) -> Result<PathBuf> {
     }
     let dir = app_root(app)?.join("wallet");
     {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dir)
-            .map_err(err)?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(&dir).map_err(err)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(err)?;
     }
     Ok(dir.join(format!("{key}.json")))
 }
@@ -278,6 +313,38 @@ mod tests {
             assert!(checked_path(bad).is_err(), "{bad}");
         }
         assert!(node_request(8080, "DELETE", "/health", None).unwrap_err().starts_with("refused"));
+    }
+
+    #[test]
+    fn the_page_sets_only_managed_topology_fields() {
+        let current = serde_json::json!({"listen": 4001, "rpc": 8080, "peers": ["a"], "minRelayFee": 5});
+        let merged = merged_topology(current.clone(), &serde_json::json!({"rpc": 18080, "listen": 14001})).unwrap();
+        assert_eq!(merged, serde_json::json!({"listen": 14001, "rpc": 18080, "minRelayFee": 5}));
+        for bad in [
+            serde_json::json!({"rpc": 18080, "listen": 14001, "publicRead": 80}),
+            serde_json::json!({"rpc": 18080, "listen": 14001, "publicSubmit": true}),
+            serde_json::json!({"rpc": 18080, "listen": 14001, "mine": {}}),
+            serde_json::json!({"rpc": 0, "listen": 14001}),
+            serde_json::json!({"listen": 14001}),
+            serde_json::json!({"rpc": 1, "listen": 2, "peers": "x"}),
+            serde_json::json!([]),
+        ] {
+            assert!(merged_topology(current.clone(), &bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn atomic_writes_take_their_mode_even_over_a_stale_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lattice-desktop-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vault.json");
+        fs::write(path.with_extension("tmp"), b"stale").unwrap();
+        fs::set_permissions(path.with_extension("tmp"), fs::Permissions::from_mode(0o666)).unwrap();
+        write_atomically(&path, b"{}", 0o600).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read(&path).unwrap(), b"{}");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

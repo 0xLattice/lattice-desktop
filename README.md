@@ -10,7 +10,11 @@ A full Lattice node and the Nexus Wallet in one macOS app (Tauri v2).
   so that it doesn't clash with a CLI-managed host on 8080/4001. Nexus bootstrap
   peers are the node's built-in defaults; you can change them in **Node →
   Node settings** (built-in, your own list, or none). Quitting the app stops the
-  node cleanly (`lattice down`).
+  node cleanly (`lattice down`, which can take a few seconds). If the app is
+  killed or crashes, the node keeps running; the next launch finds it by its
+  pidfile. The app may change only `rpc`, `listen`, `peers` and `hostedChains`
+  in `lattice.json`. Other fields, such as public listeners and mining, are
+  left to the operator.
 - **The Nexus Wallet, shared.** The UI and signer come from
   [nexus-wallet](https://github.com/adalinxx/nexus-wallet) (pinned submodule
   `vendor/nexus-wallet`, which pins the lattice-sdk). Keys use BIP39 +

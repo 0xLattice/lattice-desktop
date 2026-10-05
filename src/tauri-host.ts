@@ -12,7 +12,11 @@ import type { Vault } from "../vendor/nexus-wallet/src/lib/crypto/keystore.ts";
 export const hostOps: HostOps = {
   lattice: (verb: LifecycleVerb) => invoke<CommandResult>("lattice", { verb }),
   readTopology: () => invoke<Topology | null>("read_topology"),
-  writeTopology: (topology: Topology) => invoke<void>("write_topology", { topology }),
+  // Only the fields the app manages; the shell merges them and refuses others.
+  writeTopology: ({ rpc, listen, peers, hostedChains }: Topology) =>
+    invoke<void>("write_topology", {
+      topology: { rpc, listen, ...(peers ? { peers } : {}), ...(hostedChains ? { hostedChains } : {}) },
+    }),
 };
 
 export const nodeHTTP: NodeHTTP = (method, path, body) =>
