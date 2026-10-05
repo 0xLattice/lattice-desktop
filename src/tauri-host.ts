@@ -47,3 +47,9 @@ export const settingsFile: KeyValueStore = {
     if ("settings" in items) await set("settings", items.settings);
   },
 };
+
+/** Save an encrypted backup as a new file in ~/Downloads; resolves to its path. */
+export const saveBackup = (name: string, text: string) => invoke<string>("save_backup", { name, text });
+
+/** The webview's print dialog. */
+export const printPage = () => { invoke<void>("print_page").catch(() => {}); };
