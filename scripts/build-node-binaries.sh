@@ -32,7 +32,10 @@ if [ -n "$(git -C "$src" status --porcelain --untracked-files=no)" ]; then
   exit 1
 fi
 
-(cd "$src" && swift build -c debug --product lattice --product lattice-node)
+# SwiftPM honours only the last --product flag, so build each one.
+for product in lattice lattice-node; do
+  (cd "$src" && swift build -c debug --product "$product")
+done
 
 triple="$(rustc -vV | sed -n 's/^host: //p')"
 out="$here/src-tauri/binaries"
