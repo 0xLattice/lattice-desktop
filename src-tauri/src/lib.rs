@@ -85,14 +85,27 @@ fn run_lattice(root: &Path, verb: &str) -> Result<CommandResult> {
 #[tauri::command]
 async fn lattice(app: AppHandle, pinned: State<'_, PinnedPort>, verb: String) -> Result<CommandResult> {
     let root = host_root(&app)?;
-    let is_up = verb == "up";
+    let verb_name = verb.clone();
     let result = tauri::async_runtime::spawn_blocking(move || run_lattice(&root, &verb))
         .await
         .map_err(err)??;
-    if is_up && result.code == 0 {
-        *pinned.0.lock().map_err(err)? = rpc_port(&read_topology_at(&topology_path(&app)?)?).ok();
+    if result.code == 0 {
+        let mut pin = pinned.0.lock().map_err(err)?;
+        let configured = rpc_port(&read_topology_at(&topology_path(&app)?)?).ok();
+        *pin = next_pin(*pin, &verb_name, configured);
     }
     Ok(result)
+}
+
+/// The pin after a successful lifecycle verb. `lattice up` against a running
+/// node exits 0 without restarting it, so a pin is only taken while none is
+/// held: the port moves only across a `down` (which clears it) and `up`.
+fn next_pin(current: Option<u16>, verb: &str, configured: Option<u16>) -> Option<u16> {
+    match verb {
+        "down" => None,
+        "up" => current.or(configured),
+        _ => current,
+    }
 }
 
 /// The cookie the node writes at every start (`lattice up` gives it
@@ -163,7 +176,7 @@ const MANAGED: [&str; 5] = ["rpc", "listen", "peers", "hostedChains", "rpcAllowe
 fn is_origin(value: &str) -> bool {
     match value.split_once("://") {
         Some((scheme, rest)) => {
-            !scheme.is_empty()
+            scheme.ends_with("-extension")
                 && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
                 && !rest.is_empty()
                 && !rest.chars().any(|c| c == '/' || c.is_whitespace() || c.is_control() || c == '\\' || c == '?' || c == '#' || c == '@')
@@ -427,11 +440,20 @@ mod tests {
     }
 
     #[test]
+    fn the_pin_moves_only_across_down_then_up() {
+        assert_eq!(next_pin(None, "up", Some(18080)), Some(18080));
+        assert_eq!(next_pin(Some(18080), "up", Some(9999)), Some(18080), "up on a running node keeps the pin");
+        assert_eq!(next_pin(Some(18080), "status", Some(9999)), Some(18080));
+        assert_eq!(next_pin(Some(18080), "down", Some(9999)), None);
+        assert_eq!(next_pin(None, "up", Some(9999)), Some(9999));
+    }
+
+    #[test]
     fn allowed_origins_are_bare_origins() {
         let current = serde_json::json!({"listen": 4001, "rpc": 8080});
         let ok = serde_json::json!({"rpc": 8080, "listen": 4001, "rpcAllowedOrigins": ["chrome-extension://abcdefghijklmnopabcdefghijklmnop"]});
         assert_eq!(merged_topology(current.clone(), &ok).unwrap()["rpcAllowedOrigins"], ok["rpcAllowedOrigins"]);
-        for bad in ["*", "chrome-extension://x/y", "https://a.example/", "http://a b", "x://", "://x", "https://u@h", "a"] {
+        for bad in ["*", "null", "https://a.example", "chrome-extension://x/y", "https://a.example/", "http://a b", "x://", "://x", "https://u@h", "a"] {
             let update = serde_json::json!({"rpc": 8080, "listen": 4001, "rpcAllowedOrigins": [bad]});
             assert!(merged_topology(current.clone(), &update).is_err(), "{bad}");
         }
