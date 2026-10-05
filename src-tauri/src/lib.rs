@@ -302,6 +302,7 @@ fn write_new(dir: &Path, name: &str, text: &str) -> Result<PathBuf> {
         match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
             Ok(mut f) => {
                 f.write_all(text.as_bytes()).map_err(err)?;
+                f.sync_all().map_err(err)?;
                 return Ok(path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,

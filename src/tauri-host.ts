@@ -52,4 +52,4 @@ export const settingsFile: KeyValueStore = {
 export const saveBackup = (name: string, text: string) => invoke<string>("save_backup", { name, text });
 
 /** The webview's print dialog. */
-export const printPage = () => { invoke<void>("print_page"); };
+export const printPage = () => { invoke<void>("print_page").catch(() => {}); };
