@@ -126,6 +126,19 @@ fn cookie_authorization(root: &Path) -> Option<String> {
     read_cookie(root).map(|c| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(c)))
 }
 
+/// Whether the node on `port` answers an operator route with this root's cookie.
+fn node_accepts_cookie(port: u16, root: &Path) -> bool {
+    let Some(authorization) = cookie_authorization(root) else { return false };
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(2))
+        .redirects(0)
+        .build()
+        .get(&format!("http://127.0.0.1:{port}/status"))
+        .set("Authorization", &authorization)
+        .call()
+        .is_ok_and(|r| r.status() == 200)
+}
+
 #[tauri::command]
 fn node_cookie(app: AppHandle) -> Result<Option<String>> {
     Ok(read_cookie(&host_root(&app)?))
@@ -358,12 +371,14 @@ pub fn run() {
             let handle = app.handle();
             // Only a running node (it keeps a cookie; it removes it at exit)
             // is pinned at launch; otherwise the first `up` pins.
-            let running = host_root(handle).map(|r| cookie_path(&r).exists()).unwrap_or(false);
+            // A crash leaves a stale cookie, so the port is pinned only when
+            // the node there accepts that cookie on an operator route.
+            let root = host_root(handle).ok();
             let port = topology_path(handle)
                 .and_then(|p| read_topology_at(&p))
                 .ok()
                 .and_then(|t| rpc_port(&t).ok())
-                .filter(|_| running);
+                .filter(|p| root.as_deref().is_some_and(|r| node_accepts_cookie(*p, r)));
             app.manage(PinnedPort(Mutex::new(port)));
             Ok(())
         })
@@ -441,6 +456,16 @@ mod tests {
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(fs::read(&path).unwrap(), b"{}");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_stale_cookie_with_no_node_is_not_pinned() {
+        let root = std::env::temp_dir().join(format!("lattice-desktop-stale-{}", std::process::id()));
+        fs::create_dir_all(root.join("chains/Nexus")).unwrap();
+        fs::write(cookie_path(&root), "__cookie__:left-by-a-crash").unwrap();
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert!(!node_accepts_cookie(free, &root));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
