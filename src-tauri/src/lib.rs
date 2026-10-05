@@ -356,10 +356,14 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle();
+            // Only a running node (it keeps a cookie; it removes it at exit)
+            // is pinned at launch; otherwise the first `up` pins.
+            let running = host_root(handle).map(|r| cookie_path(&r).exists()).unwrap_or(false);
             let port = topology_path(handle)
                 .and_then(|p| read_topology_at(&p))
                 .ok()
-                .and_then(|t| rpc_port(&t).ok());
+                .and_then(|t| rpc_port(&t).ok())
+                .filter(|_| running);
             app.manage(PinnedPort(Mutex::new(port)));
             Ok(())
         })
