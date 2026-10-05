@@ -7,8 +7,11 @@
 //! - `read_topology` / `write_topology`: the host's `lattice.json`.
 //! - `store_get` / `store_set` / `store_remove`: the wallet's vault and
 //!   settings, as 0600 files.
-//! - `node_http`: HTTP to 127.0.0.1 on the RPC port in `lattice.json`, and
-//!   nowhere else (the page's CSP gives it no network of its own).
+//! - `node_http`: HTTP to 127.0.0.1 on the RPC port the node was started on
+//!   (pinned at app launch and at each `lattice up`, never whatever the page
+//!   writes later), and nowhere else (the page's CSP gives it no network of
+//!   its own). It attaches the node's cookie: the operator port requires it.
+//! - `node_cookie`: that cookie, for pairing a browser extension.
 //!
 //! On quit the shell stops the node with `lattice down`.
 
@@ -18,8 +21,15 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, RunEvent};
+use tauri::{AppHandle, Manager, RunEvent, State};
+
+/// The RPC port the node was started on: read from lattice.json at launch
+/// (a node left running by an earlier session) and at each successful
+/// `lattice up`. The page can rewrite lattice.json, but `node_http` and the
+/// cookie go only to this port.
+struct PinnedPort(Mutex<Option<u16>>);
 
 const VERBS: [&str; 4] = ["init", "up", "down", "status"];
 const STORE_KEYS: [&str; 2] = ["vault", "settings"];
@@ -73,11 +83,39 @@ fn run_lattice(root: &Path, verb: &str) -> Result<CommandResult> {
 }
 
 #[tauri::command]
-async fn lattice(app: AppHandle, verb: String) -> Result<CommandResult> {
+async fn lattice(app: AppHandle, pinned: State<'_, PinnedPort>, verb: String) -> Result<CommandResult> {
     let root = host_root(&app)?;
-    tauri::async_runtime::spawn_blocking(move || run_lattice(&root, &verb))
+    let is_up = verb == "up";
+    let result = tauri::async_runtime::spawn_blocking(move || run_lattice(&root, &verb))
         .await
-        .map_err(err)?
+        .map_err(err)??;
+    if is_up && result.code == 0 {
+        *pinned.0.lock().map_err(err)? = rpc_port(&read_topology_at(&topology_path(&app)?)?).ok();
+    }
+    Ok(result)
+}
+
+/// The cookie the node writes at every start (`lattice up` gives it
+/// `<root>/chains/Nexus` as its data directory), re-read on every use.
+fn cookie_path(root: &Path) -> PathBuf {
+    root.join("chains").join("Nexus").join(".cookie")
+}
+
+fn read_cookie(root: &Path) -> Option<String> {
+    let text = fs::read_to_string(cookie_path(root)).ok()?;
+    let cookie = text.trim();
+    (!cookie.is_empty()).then(|| cookie.to_string())
+}
+
+/// `Authorization: Basic base64(<cookie file content>)`, bitcoind-style.
+fn cookie_authorization(root: &Path) -> Option<String> {
+    use base64::Engine;
+    read_cookie(root).map(|c| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(c)))
+}
+
+#[tauri::command]
+fn node_cookie(app: AppHandle) -> Result<Option<String>> {
+    Ok(read_cookie(&host_root(&app)?))
 }
 
 fn topology_path(app: &AppHandle) -> Result<PathBuf> {
@@ -118,7 +156,21 @@ fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 /// listeners, external address, mining, ...) is the operator's, edited by
 /// hand: the page cannot expose the node or point `node_http` elsewhere
 /// beyond choosing the node's own loopback RPC port.
-const MANAGED: [&str; 4] = ["rpc", "listen", "peers", "hostedChains"];
+const MANAGED: [&str; 5] = ["rpc", "listen", "peers", "hostedChains", "rpcAllowedOrigins"];
+
+/// A browser origin as the node's `rpcAllowedOrigins` lists it:
+/// `scheme://host[:port]`, nothing after.
+fn is_origin(value: &str) -> bool {
+    match value.split_once("://") {
+        Some((scheme, rest)) => {
+            !scheme.is_empty()
+                && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+                && !rest.is_empty()
+                && !rest.chars().any(|c| c == '/' || c.is_whitespace() || c.is_control() || c == '\\' || c == '?' || c == '#' || c == '@')
+        }
+        None => false,
+    }
+}
 
 /// `current` with the page's managed fields applied (an absent `peers` or
 /// `hostedChains` removes it); anything else from the page is refused.
@@ -131,11 +183,16 @@ fn merged_topology(current: Value, update: &Value) -> Result<Value> {
         rpc_port(&Some(serde_json::json!({ "rpc": update.get(port).cloned().unwrap_or(Value::Null) })))
             .map_err(|_| format!("{port} must be a port"))?;
     }
-    for list in ["peers", "hostedChains"] {
+    for list in ["peers", "hostedChains", "rpcAllowedOrigins"] {
         if let Some(v) = update.get(list) {
             if !v.as_array().is_some_and(|a| a.iter().all(Value::is_string)) {
                 return Err(format!("{list} must be a list of strings"));
             }
+        }
+    }
+    if let Some(origins) = update.get("rpcAllowedOrigins").and_then(Value::as_array) {
+        if let Some(bad) = origins.iter().filter_map(Value::as_str).find(|o| !is_origin(o)) {
+            return Err(format!("not an origin: {bad}"));
         }
     }
     let mut out = current.as_object().cloned().ok_or("lattice.json is not an object")?;
@@ -222,7 +279,13 @@ fn rpc_port(topology: &Option<Value>) -> Result<u16> {
         .ok_or_else(|| "no rpc port in lattice.json".to_string())
 }
 
-fn node_request(port: u16, method: &str, path: &str, body: Option<String>) -> Result<NodeAnswer> {
+fn node_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    authorization: Option<String>,
+) -> Result<NodeAnswer> {
     let url = format!("http://127.0.0.1:{port}{}", checked_path(path)?);
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(20))
@@ -234,6 +297,10 @@ fn node_request(port: u16, method: &str, path: &str, body: Option<String>) -> Re
         other => return Err(format!("refused: {other}")),
     }
     .set("Accept", "application/json");
+    let request = match authorization {
+        Some(value) => request.set("Authorization", &value),
+        None => request,
+    };
     let response = match body {
         Some(body) if method == "POST" => request.send_string(&body),
         _ => request.call(),
@@ -259,12 +326,14 @@ fn node_request(port: u16, method: &str, path: &str, body: Option<String>) -> Re
 #[tauri::command]
 async fn node_http(
     app: AppHandle,
+    pinned: State<'_, PinnedPort>,
     method: String,
     path: String,
     body: Option<String>,
 ) -> Result<NodeAnswer> {
-    let port = rpc_port(&read_topology_at(&topology_path(&app)?)?)?;
-    tauri::async_runtime::spawn_blocking(move || node_request(port, &method, &path, body))
+    let port = (*pinned.0.lock().map_err(err)?).ok_or("node unreachable: start the node first")?;
+    let authorization = cookie_authorization(&host_root(&app)?);
+    tauri::async_runtime::spawn_blocking(move || node_request(port, &method, &path, body, authorization))
         .await
         .map_err(err)?
 }
@@ -272,6 +341,15 @@ async fn node_http(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let handle = app.handle();
+            let port = topology_path(handle)
+                .and_then(|p| read_topology_at(&p))
+                .ok()
+                .and_then(|t| rpc_port(&t).ok());
+            app.manage(PinnedPort(Mutex::new(port)));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             lattice,
             read_topology,
@@ -279,7 +357,8 @@ pub fn run() {
             store_get,
             store_set,
             store_remove,
-            node_http
+            node_http,
+            node_cookie
         ])
         .build(tauri::generate_context!())
         .expect("error while building the app")
@@ -312,7 +391,7 @@ mod tests {
         for bad in ["//evil.example/x", "http://evil/x", "x", "/a b", "/a\nb", "/a#b", "/a\\b", ""] {
             assert!(checked_path(bad).is_err(), "{bad}");
         }
-        assert!(node_request(8080, "DELETE", "/health", None).unwrap_err().starts_with("refused"));
+        assert!(node_request(8080, "DELETE", "/health", None, None).unwrap_err().starts_with("refused"));
     }
 
     #[test]
@@ -345,6 +424,29 @@ mod tests {
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(fs::read(&path).unwrap(), b"{}");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn allowed_origins_are_bare_origins() {
+        let current = serde_json::json!({"listen": 4001, "rpc": 8080});
+        let ok = serde_json::json!({"rpc": 8080, "listen": 4001, "rpcAllowedOrigins": ["chrome-extension://abcdefghijklmnopabcdefghijklmnop"]});
+        assert_eq!(merged_topology(current.clone(), &ok).unwrap()["rpcAllowedOrigins"], ok["rpcAllowedOrigins"]);
+        for bad in ["*", "chrome-extension://x/y", "https://a.example/", "http://a b", "x://", "://x", "https://u@h", "a"] {
+            let update = serde_json::json!({"rpc": 8080, "listen": 4001, "rpcAllowedOrigins": [bad]});
+            assert!(merged_topology(current.clone(), &update).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_cookie_is_read_fresh_as_basic_auth() {
+        let root = std::env::temp_dir().join(format!("lattice-desktop-cookie-{}", std::process::id()));
+        assert_eq!(cookie_authorization(&root), None);
+        fs::create_dir_all(root.join("chains/Nexus")).unwrap();
+        fs::write(cookie_path(&root), "__cookie__:abc\n").unwrap();
+        assert_eq!(cookie_authorization(&root).as_deref(), Some("Basic X19jb29raWVfXzphYmM="));
+        fs::write(cookie_path(&root), "__cookie__:def").unwrap();
+        assert_eq!(read_cookie(&root).as_deref(), Some("__cookie__:def"), "rotated: re-read");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -9,7 +9,8 @@ import { walletClient } from "../vendor/nexus-wallet/src/lib/wallet/client.ts";
 import { NodeManager } from "./node-manager.ts";
 import { loopbackFetch } from "./loopback.ts";
 import { nodeScreen } from "./node-panel.ts";
-import { hostOps, nodeHTTP, vaultFile, settingsFile } from "./tauri-host.ts";
+import { hostOps, nodeHTTP, nodeCookie, vaultFile, settingsFile } from "./tauri-host.ts";
+import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 
 const AUTO_LOCK_MS = 10 * 60 * 1000;
 
@@ -34,15 +35,23 @@ async function boot() {
     }
   });
 
+  const fetch = loopbackFetch(ownNode, nodeHTTP);
+  const reads = {
+    health: (path: string) => reader(ownNode, path.split("/"), fetch).health(),
+    cookie: nodeCookie,
+  };
   await startWallet({
     wallet,
     store: settingsFile,
     // No origin is ever reachable but the app's own node.
     requestOrigins: async () => false,
     ownNode,
-    fetch: loopbackFetch(ownNode, nodeHTTP),
+    fetch,
     keyFilePicker: true,
-    actions: [{ label: "Node", run: (back) => nodeScreen(manager, back, () => location.reload()) }],
+    // One chain list: the chains this node hosts (lattice.json). Adding one in
+    // the wallet hosts it (a running node restarts).
+    chains: { list: () => manager.chains(), add: (chain) => manager.addHostedChain(chain) },
+    actions: [{ label: "Node", run: (back) => nodeScreen(manager, reads, back, () => location.reload()) }],
   });
 }
 

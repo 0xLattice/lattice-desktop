@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loopbackFetch, type NodeHTTP } from "../src/loopback.ts";
 import { reader, submitter } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
-import { statusLine, parsePeersField } from "../src/node-panel.ts";
+import { statusLine, parsePeersField, withSync } from "../src/node-panel.ts";
 
 const BASE = "http://127.0.0.1:18080";
 
@@ -40,7 +40,21 @@ test("anything but the app's own node is refused before the shell is asked", asy
 test("node panel wording", () => {
   assert.equal(statusLine({ path: "Nexus", state: "down" }), "stopped");
   assert.equal(statusLine({ path: "Nexus", state: "active", height: 1234n, mempool: 2 }), `active · height ${(1234).toLocaleString()} · 2 pending`);
+  assert.equal(statusLine({ path: "Nexus", state: "active", height: 1234n, bestHeaderHeight: 5000n }), `syncing · ${(1234).toLocaleString()} of ${(5000).toLocaleString()}`);
+  assert.equal(statusLine({ path: "Nexus", state: "active", height: 5000n, bestHeaderHeight: 5000n }), `active · height ${(5000).toLocaleString()}`);
   assert.equal(parsePeersField("default", "x"), "default");
   assert.equal(parsePeersField("none", ""), "none");
   assert.deepEqual(parsePeersField("custom", " a@h:1\n b@h:2, "), ["a@h:1", "b@h:2"]);
+});
+
+test("sync progress reads each running chain's best header height; a stopped or failing one is left as is", async () => {
+  const chains = await withSync(
+    [{ path: "Nexus", state: "active", height: 10n }, { path: "Nexus/a", state: "active", height: 1n }, { path: "Nexus/b", state: "down" }],
+    { health: async (path) => { if (path === "Nexus/a") throw new Error("x"); return { height: 10n, bestHeaderHeight: 99n }; } },
+  );
+  assert.deepEqual(chains, [
+    { path: "Nexus", state: "active", height: 10n, bestHeaderHeight: 99n },
+    { path: "Nexus/a", state: "active", height: 1n },
+    { path: "Nexus/b", state: "down" },
+  ]);
 });

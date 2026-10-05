@@ -3,13 +3,21 @@
 // chains). Rendered with the wallet's own helpers and styles.
 
 import { h, render } from "../vendor/nexus-wallet/src/popup/app.ts";
-import { checkPrefs, type ChainStatus, type NodeManager, type NodePrefs } from "./node-manager.ts";
+import { checkPrefs, extensionOrigin, type ChainStatus, type NodeManager, type NodePrefs } from "./node-manager.ts";
+
+/** What the panel reads beyond `lattice status`: a chain's /health, and the node's cookie. */
+export interface NodeReads {
+  health(path: string): Promise<{ height?: bigint; bestHeaderHeight?: bigint }>;
+  cookie(): Promise<string | null>;
+}
 
 const POLL_MS = 3000;
 
 export function statusLine(s: ChainStatus): string {
   if (s.state === "down") return "stopped";
   if (s.state === "unreachable") return "starting (RPC not answering yet)";
+  const behind = s.height !== undefined && s.bestHeaderHeight !== undefined && s.bestHeaderHeight > s.height;
+  if (behind) return `syncing · ${s.height!.toLocaleString()} of ${s.bestHeaderHeight!.toLocaleString()}`;
   const height = s.height === undefined ? "" : ` · height ${s.height.toLocaleString()}`;
   const pool = s.mempool ? ` · ${s.mempool} pending` : "";
   return `${s.state}${height}${pool}`;
@@ -22,7 +30,20 @@ export function parsePeersField(mode: string, text: string): NodePrefs["peers"] 
   return text.split(/[\s,]+/).filter(Boolean);
 }
 
-export function nodeScreen(manager: NodeManager, back: () => void, onPrefsChanged: () => void) {
+/** Each running chain's status with its best header height from the node's /health. */
+export async function withSync(chains: ChainStatus[], reads: Pick<NodeReads, "health">): Promise<ChainStatus[]> {
+  return Promise.all(chains.map(async (c) => {
+    if (c.state === "down" || c.state === "unreachable") return c;
+    try {
+      const { bestHeaderHeight } = await reads.health(c.path);
+      return bestHeaderHeight === undefined ? c : { ...c, bestHeaderHeight };
+    } catch {
+      return c;
+    }
+  }));
+}
+
+export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void) {
   const table = h("div", { class: "kv" }, h("div", { class: "row" }, h("span", { class: "muted" }, "…")));
   const toast = h("div", { class: "toast" });
   let busy = false;
@@ -31,7 +52,7 @@ export function nodeScreen(manager: NodeManager, back: () => void, onPrefsChange
   const refresh = async () => {
     clearTimeout(timer);
     try {
-      const chains = await manager.status();
+      const chains = await withSync(await manager.status(), reads);
       table.replaceChildren(...chains.map((c) => h("div", { class: "row" },
         h("span", { class: "k mono" }, c.path),
         h("span", { class: "v" }, statusLine(c)),
@@ -68,7 +89,8 @@ export function nodeScreen(manager: NodeManager, back: () => void, onPrefsChange
         h("button", { class: "btn", onclick: () => refresh() }, "Refresh"),
       ),
       toast,
-      h("button", { class: "btn block", onclick: () => settingsScreen(manager, () => nodeScreen(manager, back, onPrefsChanged), onPrefsChanged) }, "Node settings"),
+      h("button", { class: "btn block", onclick: () => { clearTimeout(timer); settingsScreen(manager, () => nodeScreen(manager, reads, back, onPrefsChanged), onPrefsChanged); } }, "Node settings"),
+      h("button", { class: "btn block", onclick: () => { clearTimeout(timer); pairScreen(manager, reads, () => nodeScreen(manager, reads, back, onPrefsChanged)); } }, "Pair browser extension"),
       h("button", { class: "btn block", onclick: () => { clearTimeout(timer); back(); } }, "Back to wallet"),
     ),
   );
@@ -117,4 +139,46 @@ async function settingsScreen(manager: NodeManager, back: () => void, onPrefsCha
       h("button", { class: "btn block", onclick: back }, "Back"),
     ),
   );
+}
+
+/**
+ * Pairing the Nexus Wallet extension with this node: the node lets the
+ * extension's origin reach its loopback operator port (rpcAllowedOrigins,
+ * written here on request; the node restarts), and the extension holds the
+ * node's cookie, which the node rewrites at every start.
+ */
+async function pairScreen(manager: NodeManager, reads: NodeReads, back: () => void) {
+  const id = h("input", { type: "text", placeholder: "extension id (chrome://extensions) or chrome-extension://…", spellcheck: "false" }) as HTMLInputElement;
+  const toast = h("div", { class: "toast" });
+  const allowed = h("div", { class: "kv" });
+  const showAllowed = async () => {
+    const origins = await manager.allowedOrigins();
+    allowed.replaceChildren(...(origins.length
+      ? origins.map((o) => h("div", { class: "row" }, h("span", { class: "v mono" }, o)))
+      : [h("div", { class: "row" }, h("span", { class: "muted" }, "No browser origin is allowed yet."))]));
+  };
+  render(
+    h("div", { class: "stack" },
+      h("h1", {}, "Pair browser extension"),
+      h("p", { class: "muted" }, "1. Allow the extension's origin. Find its id on chrome://extensions. The node restarts to take it."),
+      id,
+      h("button", { class: "block", onclick: async () => {
+        const origin = extensionOrigin(id.value);
+        if (!origin) { toast.textContent = "Enter the extension's id (32 letters) or its chrome-extension:// origin."; return; }
+        toast.textContent = "allowing (a running node restarts)…";
+        try { await manager.allowOrigin(origin); toast.textContent = "Allowed " + origin; } catch (e) { toast.textContent = (e as Error).message; }
+        showAllowed();
+      } }, "Allow this extension"),
+      allowed,
+      h("p", { class: "muted" }, `2. In the extension's Node screen, enter ${await manager.rpcURL()} and paste the node's cookie. The node writes a new cookie each time it starts, so pair again after a restart.`),
+      h("button", { class: "btn block", onclick: async () => {
+        const cookie = await reads.cookie().catch(() => null);
+        if (!cookie) { toast.textContent = "The node is not running: start it first."; return; }
+        try { await navigator.clipboard.writeText(cookie); toast.textContent = "Cookie copied."; } catch { toast.textContent = cookie; }
+      } }, "Copy the node's cookie"),
+      toast,
+      h("button", { class: "btn block", onclick: back }, "Back"),
+    ),
+  );
+  showAllowed();
 }

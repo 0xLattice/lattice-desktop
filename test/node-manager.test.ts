@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  NodeManager, LifecycleError, checkPrefs, parseStatus, prefsOf, withPrefs,
+  NodeManager, LifecycleError, checkPrefs, parseStatus, prefsOf, withPrefs, extensionOrigin,
   type HostOps, type LifecycleVerb, type Topology, type NodePrefs,
 } from "../src/node-manager.ts";
 
@@ -103,4 +103,39 @@ test("`lattice status` lines parse into per-chain state and heights", () => {
     { path: "Nexus/other", state: "down" },
     { path: "Nexus/new", state: "syncing", mempool: 0 },
   ]);
+});
+
+test("one chain list: the wallet's chains are the node's hosted chains, and adding one hosts it", async () => {
+  const running = scripted({ listen: 4001, rpc: 8080, hostedChains: ["Nexus/a"] }, true);
+  const manager = new NodeManager(running.host);
+  assert.deepEqual(await manager.chains(), ["Nexus", "Nexus/a"]);
+  await manager.addHostedChain("Nexus/a/b");
+  assert.deepEqual(running.state.topology?.hostedChains, ["Nexus/a", "Nexus/a/b"]);
+  assert.deepEqual(running.calls.slice(-3), ["status", "down", "up"], "a running node restarts to host it");
+  assert.deepEqual(await manager.chains(), ["Nexus", "Nexus/a", "Nexus/a/b"]);
+  const before = running.calls.length;
+  await manager.addHostedChain("Nexus/a");
+  await manager.addHostedChain("Nexus");
+  assert.equal(running.calls.length, before, "already hosted: nothing to do");
+  await assert.rejects(manager.addHostedChain("Nexus/x/y"), /after its parent/);
+});
+
+test("pairing allows an extension origin in lattice.json (restarting a running node), once", async () => {
+  assert.equal(extensionOrigin("abcdefghijklmnopabcdefghijklmnop"), "chrome-extension://abcdefghijklmnopabcdefghijklmnop");
+  assert.equal(extensionOrigin(" chrome-extension://abcdefghijklmnopabcdefghijklmnop "), "chrome-extension://abcdefghijklmnopabcdefghijklmnop");
+  for (const bad of ["", "abc", "https://evil.example", "chrome-extension://x/y", "chrome-extension://"]) {
+    assert.equal(extensionOrigin(bad), undefined, bad);
+  }
+  const running = scripted({ listen: 4001, rpc: 8080, minRelayFee: 5 }, true);
+  const manager = new NodeManager(running.host);
+  const origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+  await manager.allowOrigin(origin);
+  assert.deepEqual(running.state.topology, { listen: 4001, rpc: 8080, minRelayFee: 5, rpcAllowedOrigins: [origin] });
+  assert.deepEqual(running.calls, ["status", "down", "up"]);
+  await manager.allowOrigin(origin);
+  assert.deepEqual(running.calls.length, 3, "already allowed");
+  assert.deepEqual(await manager.allowedOrigins(), [origin]);
+  // Node settings keep it.
+  await manager.configure({ ...(await manager.prefs()), peers: "none" });
+  assert.deepEqual(running.state.topology?.rpcAllowedOrigins, [origin]);
 });
