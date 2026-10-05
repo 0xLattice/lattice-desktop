@@ -1,0 +1,94 @@
+# Lattice Desktop
+
+A full Lattice node and the Nexus Wallet in one macOS app (Tauri v2).
+
+- **Your own full node.** The app runs the bundled, unmodified `lattice-node`
+  through the bundled `lattice` CLI (`init` / `up` / `down` / `status`), exactly
+  as an operator would. The host root is
+  `~/Library/Application Support/Lattice/host`. On first run the app scaffolds it
+  with `lattice init` and gives the node its own ports (RPC 18080, peers 14001)
+  so that it doesn't clash with a CLI-managed host on 8080/4001. Nexus bootstrap
+  peers are the node's built-in defaults; you can change them in **Node →
+  Node settings** (built-in, your own list, or none). Quitting the app stops the
+  node cleanly (`lattice down`).
+- **The Nexus Wallet, shared.** The UI and signer come from
+  [nexus-wallet](https://github.com/adalinxx/nexus-wallet) (pinned submodule
+  `vendor/nexus-wallet`, which pins the lattice-sdk). Keys use BIP39 +
+  SLIP-0010 `m/44'/7878'/n'`, the same as the extension. The vault uses the
+  extension's keystore format (Argon2id + AES-256-GCM), stored at
+  `~/Library/Application Support/Lattice/wallet/vault.json` with mode 0600.
+  `lattice key generate` key files import as standalone accounts.
+- **Loopback only.** The webview has no network access: its CSP allows Tauri
+  IPC only. Every node call goes through the shell's `node_http` command, which
+  connects only to `127.0.0.1` on the RPC port in `lattice.json`. Sends are
+  signed in the app and submitted to the node's loopback operator route
+  `POST /transactions`. The app checks the transaction CID the node returns
+  against the CID it computed itself. There is no default endpoint and no relay.
+- **Fees** can be set per transaction, with a default per chain. The app warns
+  when a fee is below the node's `minRelayFee` but never clamps it.
+- **Status** comes from an inclusion lookup (block height), and **balances**
+  are shown for Nexus and for any child chains you host (Node settings → Hosted
+  child chains) and add in the wallet's chain picker.
+
+## Build
+
+```sh
+git clone --recurse-submodules https://github.com/adalinxx/lattice-desktop.git
+cd lattice-desktop
+npm ci                                   # also installs + builds the pinned wallet/SDK
+scripts/build-node-binaries.sh           # builds lattice + lattice-node at NODE_COMMIT (debug)
+npx tauri build --bundles app --no-sign  # -> src-tauri/target/release/bundle/macos/Lattice.app
+npx tauri dev                            # or run in development
+```
+
+### Node binaries
+
+The app bundles the `lattice` and `lattice-node` binaries from
+[adalinxx/lattice-node](https://github.com/adalinxx/lattice-node) at the commit
+pinned in `NODE_COMMIT`. `scripts/build-node-binaries.sh` builds them from
+that commit and refuses a checkout that has local changes. It stages them as
+Tauri sidecars in `src-tauri/binaries/` and records the commit in
+`src-tauri/binaries/COMMIT`. They are built in the **debug** configuration on
+purpose: Swift 6.3's `-O` miscompiles the node on macOS (the bug is in
+`Task.sleep` loops), and the Mac Nexus node is built unoptimized for the same
+reason. macOS binaries have to be built on macOS. To bundle a newer node, bump
+`NODE_COMMIT` and rerun the script.
+
+## Signing and notarization (maintainer, Developer ID required)
+
+The repository produces an **unsigned** development build. To distribute it:
+
+1. Sign the nested binaries first, then the app, with the hardened runtime:
+   ```sh
+   APP=src-tauri/target/release/bundle/macos/Lattice.app
+   ID="Developer ID Application: <Name> (<TEAMID>)"
+   codesign --force --options runtime --timestamp --sign "$ID" "$APP/Contents/MacOS/lattice-node"
+   codesign --force --options runtime --timestamp --sign "$ID" "$APP/Contents/MacOS/lattice"
+   codesign --force --options runtime --timestamp --sign "$ID" "$APP"
+   ```
+   Alternatively, set `bundle.macOS.signingIdentity` (or `APPLE_SIGNING_IDENTITY`)
+   and run `npx tauri build --bundles app,dmg`. Tauri signs the sidecars too.
+2. Notarize and staple:
+   ```sh
+   ditto -c -k --keepParent "$APP" Lattice.zip
+   xcrun notarytool submit Lattice.zip --apple-id <id> --team-id <TEAMID> --password <app-specific-pw> --wait
+   xcrun stapler staple "$APP"
+   ```
+   With Tauri, you can instead set `APPLE_ID`, `APPLE_PASSWORD` and
+   `APPLE_TEAM_ID` and it notarizes during the build.
+3. Check the result with `spctl -a -vv "$APP"`.
+
+## Tests
+
+- `npm test`: unit tests for node management (first-run scaffolding, how
+  settings map to `lattice.json`, restart-to-apply, parsing `lattice status`),
+  the loopback-only fetch, and node panel wording. The keystore, fee and status
+  logic is tested in nexus-wallet.
+- `cargo test --manifest-path src-tauri/Cargo.toml`: the shell only runs the
+  lifecycle verbs, only accepts loopback paths, and only uses the RPC port from
+  `lattice.json`.
+- End-to-end test, headless:
+  `LATTICE_NODE_BIN=<lattice-node>/.build/debug npm test`. It drives the app's
+  node-management layer with the real CLI on throwaway storage and no peers:
+  init, start, fund by mining, send with a custom fee through the loopback
+  fetch, inclusion, stop.
