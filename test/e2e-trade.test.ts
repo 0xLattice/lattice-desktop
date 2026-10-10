@@ -88,6 +88,7 @@ test("the app: sell on the child chain, buy on the parent, withdraw", { skip: !b
     dropOrder(dom, sell);
     await shows(/Review sell order/);
     assert.match(pageText(), /You lock5,000You ask700 on Nexus/);
+    assert.doesNotMatch(pageText(), /reading account/);
     const sellerChildBefore = await balance(CHILD, seller);
     button("Lock funds & create order").click();
     await until(() => (/Review sell order/.test(pageText()) ? undefined : true), "the deposit to be sent");
@@ -153,9 +154,11 @@ test("the app: sell on the child chain, buy on the parent, withdraw", { skip: !b
     (document.querySelector(".chain-menu-item") as HTMLButtonElement).click();
     await shows(/Node reports withdrawal .* included/);
     button("Back").click();
-    await shows(/Pending purchases/);
+    // Six confirmations, and the node proves every bought deposit is spent:
+    // the purchase leaves the pending list for the confirmed archive.
+    await shows(/5,000 on Nexus\/testnetconfirmed archive/);
     button("Back").click();
-    await shows(/Pending sales \(1\)/);
+    await shows(/Purchase recovery \(0 pending, 1 confirmed\)Pending sales \(1\)/);
     button("Pending sales (1)").click();
     await shows(/5,000 on Nexus\/testnetfor 700 on Nexus/);
     button("Check payment").click();

@@ -34,7 +34,8 @@ jobs:
       - run: npx tauri build --bundles app --no-sign
 
   # The headless e2e against REAL node binaries: lattice, lattice-node and
-  # lattice-mining-coordinator built (debug, as bundled) at NODE_COMMIT.
+  # lattice-mining-coordinator built (debug, as bundled) at NODE_COMMIT, and
+  # the app bundled with them, launched.
   e2e:
     runs-on: macos-15
     timeout-minutes: 60
@@ -65,6 +66,17 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
-      - name: Headless e2e (real node, no peers, throwaway storage)
-        run: LATTICE_NODE_BIN="$PWD/.build-node/.build/debug" npm test
+      # The app as shipped: the real node binaries as its sidecars.
+      - name: Stage the node binaries as sidecars
+        run: |
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/binaries
+          for n in lattice lattice-node; do install -m 0755 ".build-node/.build/debug/$n" "src-tauri/binaries/$n-$triple"; done
+      - run: npx tauri build --bundles app --no-sign
+      - name: Headless e2e (real node, no peers, throwaway storage) and the packaged app
+        run: |
+          LATTICE_NODE_BIN="$PWD/.build-node/.build/debug" \
+          LATTICE_APP="$PWD/src-tauri/target/release/bundle/macos/Lattice.app" \
+          npm test
