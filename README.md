@@ -1,6 +1,6 @@
 # Lattice Desktop
 
-A full Lattice node and the Nexus Wallet in one macOS app (Tauri v2).
+A full Lattice node and the Lattice Wallet in one macOS app (Tauri v2).
 
 - **Your own full node.** The app runs the bundled, unmodified `lattice-node`
   through the bundled `lattice` CLI (`init` / `up` / `down` / `status`), exactly
@@ -15,8 +15,8 @@ A full Lattice node and the Nexus Wallet in one macOS app (Tauri v2).
   pidfile. The app may change only `rpc`, `listen`, `peers` and `hostedChains`
   in `lattice.json`. Other fields, such as public listeners and mining, are
   left to the operator.
-- **The Nexus Wallet, shared.** The UI and signer come from
-  [nexus-wallet](https://github.com/adalinxx/nexus-wallet) (pinned submodule
+- **The Lattice Wallet, shared.** The UI and signer come from
+  [lattice-wallet](https://github.com/adalinxx/lattice-wallet) (pinned submodule
   `vendor/nexus-wallet`, which pins the lattice-sdk). Keys use BIP39 +
   SLIP-0010 `m/44'/7878'/n'`, the same as the extension. The vault uses the
   extension's keystore format (Argon2id + AES-256-GCM), stored at
@@ -39,11 +39,21 @@ A full Lattice node and the Nexus Wallet in one macOS app (Tauri v2).
   chain list, `hostedChains` in `lattice.json`: adding a chain in the wallet's
   chain picker hosts it, and a chain added in Node settings appears in the
   picker (a running node restarts to take either).
+- **Settings** open from the mark at the top left. The chain name beside it
+  lists the current chain's child chains, and `↑` goes to its parent. A child
+  chain this node does not host yet is marked "add to node": choosing it hosts
+  it first (a running node restarts).
+- **Cross-chain orders** (Settings → Open cross-chain order): sell deposits,
+  purchases and their withdrawals, as in the extension. Both chains are read
+  and submitted through this node, so it must host the child chain as well as
+  its parent. The signed bytes of every unsettled transfer, deposit and
+  purchase are kept in the settings file for status checks and exact
+  resubmission (Settings → pending lists).
 - **Sync progress**: the node screen shows each chain's executed height
   against the best header height the node knows (`/health`'s
   `bestHeaderHeight`).
 - **Pair browser extension** (Node → Pair browser extension): allows the
-  Nexus Wallet extension's origin in `rpcAllowedOrigins` (the node restarts)
+  Lattice Wallet extension's origin in `rpcAllowedOrigins` (the node restarts)
   and copies the node's cookie for the extension's Node screen. The cookie
   changes whenever the node restarts; pair again then.
 
