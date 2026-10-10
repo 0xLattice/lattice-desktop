@@ -1,4 +1,4 @@
-// Lattice Desktop: the shared Nexus Wallet UI, bound to this app's own node.
+// Lattice Desktop: the shared Lattice Wallet UI, bound to this app's own node.
 // The signer runs in this page (there is no other context to hold it); keys
 // are encrypted at rest in the extension's vault format and the page's only
 // network reach is the shell's loopback-only node_http.

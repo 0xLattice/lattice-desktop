@@ -142,7 +142,7 @@ async function settingsScreen(manager: NodeManager, back: () => void, onPrefsCha
 }
 
 /**
- * Pairing the Nexus Wallet extension with this node: the node lets the
+ * Pairing the Lattice Wallet extension with this node: the node lets the
  * extension's origin reach its loopback operator port (rpcAllowedOrigins,
  * written here on request; the node restarts), and the extension holds the
  * node's cookie, which the node rewrites at every start.

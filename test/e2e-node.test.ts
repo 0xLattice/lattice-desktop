@@ -21,7 +21,7 @@ import { withSync } from "../src/node-panel.ts";
 import { loopbackFetch, type NodeHTTP } from "../src/loopback.ts";
 import { createSigner, type VaultStorage } from "../vendor/nexus-wallet/src/lib/wallet/signer.ts";
 import { walletClient } from "../vendor/nexus-wallet/src/lib/wallet/client.ts";
-import { reader, submitter, submitChecked, sentStatus, feeWarning } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
+import { reader, submitter, submitChecked, sentStatus, feeWarning, activeDeposits } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import { importPrivateKey } from "../vendor/nexus-wallet/src/lib/crypto/accounts.ts";
 import type { Vault } from "../vendor/nexus-wallet/src/lib/crypto/keystore.ts";
 
@@ -163,6 +163,9 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
     assert.equal((await reads.block(included.height)).hash, included.hash);
     assert.equal((await reads.account(to)).balance, 1000n);
     console.log(`[desktop e2e] ${cid} included at height ${included.height}, fee ${fee}`);
+    // Cross-chain orders read deposits with a state proof the wallet checks
+    // against the tip: the bundled node serves that read on the operator port.
+    assert.deepEqual(await activeDeposits(url, ["Nexus"], loopback), []);
 
     const [nexus] = await manager.status();
     assert.ok(nexus!.height! >= included.height, "status reports the synced height");
