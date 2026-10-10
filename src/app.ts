@@ -4,7 +4,7 @@
 // page's only network reach is the host's loopback-only node HTTP. The host
 // is the Tauri shell in the app, and a Node harness in the end-to-end tests.
 
-import { startWallet, refresh } from "../vendor/nexus-wallet/src/popup/app.ts";
+import { startWallet } from "../vendor/nexus-wallet/src/popup/app.ts";
 import { createSigner, type VaultStorage } from "../vendor/nexus-wallet/src/lib/wallet/signer.ts";
 import { walletClient } from "../vendor/nexus-wallet/src/lib/wallet/client.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
@@ -35,16 +35,21 @@ export async function startApp(host: AppHost) {
   // First run scaffolds the host root (`lattice init`); the node is started by the user.
   const ownNode = await manager.rpcURL();
 
-  // Idle auto-lock, re-armed by every signer request (as the extension's worker does).
+  // Idle auto-lock, re-armed by every signer request (as the extension's worker
+  // does). The page is left as it is: the wallet notices the lock, says so, and
+  // asks for the password over the current screen when a step needs keys, so a
+  // half-entered send is not thrown away.
   let idle: ReturnType<typeof setTimeout> | undefined;
   const arm = () => {
     clearTimeout(idle);
-    idle = setTimeout(() => { signer.lock(); refresh(); }, host.autoLockMs ?? AUTO_LOCK_MS);
+    idle = setTimeout(() => signer.lock(), host.autoLockMs ?? AUTO_LOCK_MS);
     (idle as unknown as { unref?: () => void }).unref?.(); // never keeps a headless host running
   };
   const signer = createSigner(host.vault, arm);
   const wallet = walletClient(async (msg) => {
-    arm();
+    // Passive reads are not use: the wallet checks in while it is in view, and
+    // that must not keep it unlocked forever.
+    if (msg.type !== "getState" && msg.type !== "nodeAuthorization") arm();
     try {
       return await signer.handle(msg);
     } catch (e) {

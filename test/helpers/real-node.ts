@@ -132,7 +132,7 @@ export async function installPage() {
   const { JSDOM } = await import("jsdom");
   const html = readFileSync(new URL("../../src/index.html", import.meta.url), "utf8");
   const dom = new JSDOM(html, { url: "https://tauri.localhost/" });
-  for (const name of ["window", "document", "navigator", "Node", "HTMLElement", "HTMLButtonElement", "HTMLInputElement", "HTMLTextAreaElement", "HTMLSelectElement", "KeyboardEvent", "Event"]) {
+  for (const name of ["window", "document", "navigator", "Node", "HTMLElement", "HTMLButtonElement", "HTMLInputElement", "HTMLTextAreaElement", "HTMLSelectElement", "KeyboardEvent", "Event", "DOMParser"]) {
     Object.defineProperty(globalThis, name, { configurable: true, value: (dom.window as unknown as Record<string, unknown>)[name] });
   }
   return dom;
