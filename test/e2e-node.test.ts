@@ -10,98 +10,29 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
-import { NodeManager, type HostOps, type Topology } from "../src/node-manager.ts";
+import { NodeManager } from "../src/node-manager.ts";
 import { withSync } from "../src/node-panel.ts";
-import { loopbackFetch, type NodeHTTP } from "../src/loopback.ts";
+import { loopbackFetch } from "../src/loopback.ts";
+import { bin, cookieFile, freePort, harnessHost, mine as mineBlocks, until } from "./helpers/real-node.ts";
 import { createSigner, type VaultStorage } from "../vendor/nexus-wallet/src/lib/wallet/signer.ts";
 import { walletClient } from "../vendor/nexus-wallet/src/lib/wallet/client.ts";
 import { reader, submitter, submitChecked, sentStatus, feeWarning, activeDeposits } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import { importPrivateKey } from "../vendor/nexus-wallet/src/lib/crypto/accounts.ts";
 import type { Vault } from "../vendor/nexus-wallet/src/lib/crypto/keystore.ts";
 
-const bin = process.env.LATTICE_NODE_BIN;
-const run = promisify(execFile);
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      server.close(() => resolve(typeof address === "object" && address ? address.port : 0));
-    });
-  });
-}
-
-async function until<T>(probe: () => Promise<T | undefined>, what: string, ms = 120_000): Promise<T> {
-  const deadline = Date.now() + ms;
-  let last: unknown;
-  while (Date.now() < deadline) {
-    try {
-      const value = await probe();
-      if (value !== undefined) return value;
-    } catch (e) {
-      last = e;
-    }
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  throw new Error(`timed out waiting for ${what}${last ? `: ${last}` : ""}`);
-}
-
-/** The shell's commands, in Node: the same CLI, files, and loopback-only HTTP with the node's cookie. */
-function harnessHost(root: string): HostOps & { nodeHTTP: NodeHTTP } {
-  const topologyFile = join(root, "lattice.json");
-  return {
-    async lattice(verb) {
-      try {
-        const { stdout, stderr } = await run(join(bin!, "lattice"), [verb, "--root", root]);
-        return { code: 0, stdout, stderr };
-      } catch (e) {
-        const failed = e as { code?: number; stdout?: string; stderr?: string };
-        return { code: typeof failed.code === "number" ? failed.code : 1, stdout: failed.stdout ?? "", stderr: failed.stderr ?? String(e) };
-      }
-    },
-    async readTopology() {
-      try {
-        return JSON.parse(readFileSync(topologyFile, "utf8")) as Topology;
-      } catch {
-        return null;
-      }
-    },
-    async writeTopology(topology) {
-      writeFileSync(topologyFile, JSON.stringify(topology, null, 2));
-    },
-    async nodeHTTP(method, path, body) {
-      const { rpc } = JSON.parse(readFileSync(topologyFile, "utf8")) as Topology;
-      const response = await fetch(`http://127.0.0.1:${rpc}${path}`, {
-        method,
-        headers: {
-          Authorization: "Basic " + btoa(readFileSync(join(root, "chains", "Nexus", ".cookie"), "utf8").trim()),
-          ...(body === null ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(body === null ? {} : { body }),
-      });
-      return { status: response.status, body: await response.text() };
-    },
-  };
-}
-
 test("the app's node layer: init, start, fund by mining, send with a custom fee, see inclusion, stop", { skip: !bin, timeout: 600_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "lattice-desktop-e2e-"));
   const host = harnessHost(root);
-  const manager = new NodeManager(host);
+  const manager = new NodeManager(host.ops);
   try {
     // First run: `lattice init`, then a private node (no peers) on free ports.
     const prefs = await manager.prefs();
     assert.equal(prefs.peers, "default", "init leaves the node's built-in peers");
     await manager.configure({ ...prefs, rpc: await freePort(), listen: await freePort(), peers: "none" });
-    assert.deepEqual((await host.readTopology())?.peers, [], "peers: [] = --no-default-peers");
+    assert.deepEqual((await host.ops.readTopology())?.peers, [], "peers: [] = --no-default-peers");
     assert.deepEqual(await manager.status(), [{ path: "Nexus", state: "down" }]);
     await manager.start();
     const active = await until(async () => {
@@ -132,15 +63,8 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
     const from = created.state.active!;
     const to = importPrivateKey("b0".repeat(32)).address;
 
-    const mine = async (blocks: number) => {
-      const target = ((await reads.chainInfo()).height ?? 0n) + BigInt(blocks);
-      await until(async () => {
-        await run(join(bin!, "lattice-mining-coordinator"), [
-          "--node", url, "--rpc-cookie-file", join(root, "chains", "Nexus", ".cookie"), "--workers", "2", "--recipient", `Nexus=${from}`, "--once", "--no-stale-probe",
-        ]);
-        return ((await reads.chainInfo()).height ?? 0n) >= target || undefined;
-      }, `height ${target}`);
-    };
+    const mine = (blocks: number) =>
+      mineBlocks(root, url, { Nexus: from }, blocks, async () => (await reads.chainInfo()).height ?? 0n);
     await mine(2);
     const funded = await reads.account(from);
     assert.ok(funded.balance > 0n, "mining funded the wallet");
@@ -174,10 +98,10 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
     // fresh cookie); with that cookie, requests from that origin are served,
     // any other origin is refused.
     const origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
-    const oldCookie = readFileSync(join(root, "chains", "Nexus", ".cookie"), "utf8");
+    const oldCookie = readFileSync(cookieFile(root), "utf8");
     await manager.allowOrigin(origin);
     const cookie = await until(async () => {
-      const c = readFileSync(join(root, "chains", "Nexus", ".cookie"), "utf8");
+      const c = readFileSync(cookieFile(root), "utf8");
       return c !== oldCookie && (await fetch(`${url}/health`)).ok ? c : undefined;
     }, "restart with a new cookie");
     const as = (o: string) => fetch(`${url}/api/chain/info`, { headers: { Origin: o, Authorization: "Basic " + btoa(cookie.trim()) } });
@@ -193,7 +117,7 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
     } catch {}
     throw e;
   } finally {
-    await host.lattice("down");
+    await host.ops.lattice("down");
     rmSync(root, { recursive: true, force: true });
   }
 });
