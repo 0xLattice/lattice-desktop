@@ -40,7 +40,9 @@ A full Lattice node and the Lattice Wallet in one macOS app (Tauri v2).
   chain picker hosts it, and a chain added in Node settings appears in the
   picker (a running node restarts to take either).
 - **Settings** open from the mark at the top left. The chain name beside it
-  lists the current chain's child chains, and `↑` goes to its parent.
+  lists the current chain's child chains, and `↑` goes to its parent. A child
+  chain this node does not host yet is marked "add to node": choosing it hosts
+  it first (a running node restarts).
 - **Cross-chain orders** (Settings → Open cross-chain order): sell deposits,
   purchases and their withdrawals, as in the extension. Both chains are read
   and submitted through this node, so it must host the child chain as well as
