@@ -13,8 +13,21 @@ A full Lattice node and the Lattice Wallet in one macOS app (Tauri v2).
   node cleanly (`lattice down`, which can take a few seconds). If the app is
   killed or crashes, the node keeps running; the next launch finds it by its
   pidfile. The app may change only `rpc`, `listen`, `peers` and `hostedChains`
-  in `lattice.json`. Other fields, such as public listeners and mining, are
-  left to the operator.
+  in `lattice.json`, and of `mine` only `workers`, `recipients`, and `worker`
+  as one of the two bundled workers. Other fields, such as public listeners
+  and mining's tuning, are left to the operator.
+- **Mining** (Node → Mining) runs the bundled `lattice mine` loop on this node,
+  searching on this Mac's graphics chip (the bundled Metal worker from
+  [lattice-miner-gpu](https://github.com/adalinxx/lattice-miner-gpu), the
+  default) or on its processor. One search covers Nexus and every chain the
+  node hosts (merged mining), so the chains mined are the chains hosted: to
+  mine another, or stop mining one, change what the node hosts (the screen
+  links to it). Each chain's reward and fees go to the account you choose, the
+  wallet's active account unless you change it, or to no one (they burn).
+  Saving while it runs restarts the loop. Stopping the node or quitting the app
+  stops mining first. The page can choose only between the two bundled workers:
+  a custom `mine.worker` set by hand in `lattice.json` is shown and kept, but
+  set only by hand.
 - **The Lattice Wallet, shared.** The UI and signer come from
   [lattice-wallet](https://github.com/adalinxx/lattice-wallet) (pinned submodule
   `vendor/nexus-wallet`, which pins the lattice-sdk). Keys use BIP39 +
@@ -66,14 +79,15 @@ A full Lattice node and the Lattice Wallet in one macOS app (Tauri v2).
 git clone --recurse-submodules https://github.com/adalinxx/lattice-desktop.git
 cd lattice-desktop
 npm ci                                   # also installs + builds the pinned wallet/SDK
-scripts/build-node-binaries.sh           # builds lattice + lattice-node at NODE_COMMIT (debug)
+scripts/build-node-binaries.sh           # builds the node, CLI and miner binaries at NODE_COMMIT (debug), and the GPU worker
 npx tauri build --bundles app --no-sign  # -> src-tauri/target/release/bundle/macos/Lattice.app
 npx tauri dev                            # or run in development
 ```
 
 ### Node binaries
 
-The app bundles the `lattice` and `lattice-node` binaries from
+The app bundles the `lattice`, `lattice-node`, `lattice-mining-coordinator` and
+`lattice-miner` binaries from
 [adalinxx/lattice-node](https://github.com/adalinxx/lattice-node) at the commit
 pinned in `NODE_COMMIT`. `scripts/build-node-binaries.sh` builds them from
 that commit and refuses a checkout that has local changes. It stages them as
@@ -84,6 +98,11 @@ purpose: Swift 6.3's `-O` miscompiles the node on macOS (the bug is in
 reason. macOS binaries have to be built on macOS. To bundle a newer node, bump
 `NODE_COMMIT` and rerun the script.
 
+The same script builds the GPU mining worker, `lattice-miner-gpu`, from
+[adalinxx/lattice-miner-gpu](https://github.com/adalinxx/lattice-miner-gpu) at
+the commit pinned in `MINER_GPU_COMMIT`, optimized: it is a plain compute
+program with no node code in it. It needs a Rust toolchain, as the shell does.
+
 ## Signing and notarization (maintainer, Developer ID required)
 
 The repository produces an **unsigned** development build. To distribute it:
@@ -92,8 +111,9 @@ The repository produces an **unsigned** development build. To distribute it:
    ```sh
    APP=src-tauri/target/release/bundle/macos/Lattice.app
    ID="Developer ID Application: <Name> (<TEAMID>)"
-   codesign --force --options runtime --timestamp --sign "$ID" "$APP/Contents/MacOS/lattice-node"
-   codesign --force --options runtime --timestamp --sign "$ID" "$APP/Contents/MacOS/lattice"
+   for binary in lattice-node lattice lattice-mining-coordinator lattice-miner lattice-miner-gpu; do
+     codesign --force --options runtime --timestamp --sign "$ID" "$APP/Contents/MacOS/$binary"
+   done
    codesign --force --options runtime --timestamp --sign "$ID" "$APP"
    ```
    Alternatively, set `bundle.macOS.signingIdentity` (or `APPLE_SIGNING_IDENTITY`)
@@ -130,6 +150,17 @@ The repository produces an **unsigned** development build. To distribute it:
     deposit, the purchase, the withdrawal, the purchase archived once it is
     proven settled, and the refusals on the way (wrong chain, an unmined
     receipt, a deposit bought twice).
+  - `e2e-mining`: mining from the Mining screen with no other miner: refused
+    while the node is stopped, the wallet's balance growing, a second account
+    paid after a save, the chain standing still once stopped, and the node's
+    Stop taking the miner with it. With `LATTICE_GPU_MINER=<a built
+    lattice-miner-gpu>` it mines on the graphics chip first, where the
+    machine has one it can use.
+  - `e2e-settings`: Node settings typed wrong (refused, nothing written) and
+    right, a port change that reloads the app, a child chain hosted from the
+    Mining screen, both chains mined to different accounts with one paying no
+    one, the node restarted under the miner, a chain dropped while mining
+    still paid it, and a relaunch showing what was saved.
   - `e2e-custody`: a `lattice key generate` key file, the idle lock firing
     in the middle of a send, a fee replacement, pairing an extension, and a
     backup file restored on a second host.

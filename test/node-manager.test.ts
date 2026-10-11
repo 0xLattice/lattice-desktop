@@ -4,15 +4,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  NodeManager, LifecycleError, checkPrefs, parseStatus, prefsOf, withPrefs, extensionOrigin,
+  NodeManager, LifecycleError, checkMining, checkPrefs, parseMiningStatus, parseStatus, prefsOf, searcherOf, withPrefs, extensionOrigin,
   type HostOps, type LifecycleVerb, type Topology, type NodePrefs,
 } from "../src/node-manager.ts";
+import { miningChoices } from "../src/node-panel.ts";
 
 const PEER = `${"ab".repeat(32)}@node.example.org:4001`;
 
 function scripted(initial: Topology | null = null, running = false) {
   const calls: LifecycleVerb[] = [];
-  const state = { topology: initial, running };
+  const state = { topology: initial, running, mining: false, gpuWorker: null as string | null };
   const host: HostOps = {
     async lattice(verb) {
       calls.push(verb);
@@ -22,13 +23,18 @@ function scripted(initial: Topology | null = null, running = false) {
       }
       if (verb === "up") state.running = true;
       if (verb === "down") state.running = false;
+      if (verb === "mine-start") state.mining = true;
+      if (verb === "mine-stop") state.mining = false;
       const stdout = verb === "status"
         ? (state.running ? "Nexus: active height=12 tip=bafyreiggtg4ezifboye… mempool=2\n" : "Nexus: down\n")
-        : "";
+        : verb === "mine-status"
+          ? `mining: ${state.mining ? "running (pid 4242)" : "stopped"}\nchain:  Nexus and configured hosted descendants\n`
+          : "";
       return { code: 0, stdout, stderr: "" };
     },
     readTopology: async () => (state.topology ? structuredClone(state.topology) : null),
     writeTopology: async (t) => { state.topology = structuredClone(t); },
+    gpuWorker: async () => state.gpuWorker,
   };
   return { host, calls, state };
 }
@@ -138,4 +144,105 @@ test("pairing allows an extension origin in lattice.json (restarting a running n
   // Node settings keep it.
   await manager.configure({ ...(await manager.prefs()), peers: "none" });
   assert.deepEqual(running.state.topology?.rpcAllowedOrigins, [origin]);
+});
+
+const MINER = "bafyreifrbp6x4ncfbqakwfcwfqkl7qhbsdeygsakjxixekwkdprbomyut4";
+const GPU = "/Applications/Lattice.app/Contents/MacOS/lattice-miner-gpu";
+
+test("mining settings are checked against the chains this node hosts", () => {
+  const chains = ["Nexus", "Nexus/testnet"];
+  const prefs = (workers: number, recipients: Record<string, string>) => ({ searcher: "cpu" as const, workers, recipients });
+  assert.equal(checkMining(prefs(2, { Nexus: MINER, "Nexus/testnet": MINER }), chains), undefined);
+  assert.equal(checkMining(prefs(1, {}), chains), undefined, "paying no one is allowed: it burns");
+  assert.match(checkMining(prefs(0, {}), chains)!, /Workers/);
+  assert.match(checkMining(prefs(1.5, {}), chains)!, /Workers/);
+  assert.match(checkMining(prefs(65, {}), chains)!, /Workers/);
+  assert.match(checkMining(prefs(1, { "Nexus/other": MINER }), chains)!, /does not host Nexus\/other/);
+  assert.match(checkMining(prefs(1, { Nexus: "someone" }), chains)!, /Not an address/);
+  // The screen's choices: a chain set to pay no one is left out, so it burns;
+  // the graphics chip is one worker whatever the field says.
+  assert.deepEqual(miningChoices("cpu", " 3 ", { Nexus: MINER, "Nexus/testnet": "" }), { searcher: "cpu", workers: 3, recipients: { Nexus: MINER } });
+  assert.deepEqual(miningChoices("gpu", "8", {}), { searcher: "gpu", workers: 1, recipients: {} });
+});
+
+test("what searches is read from lattice.json's worker: the processor, this app's GPU worker, or the operator's own", () => {
+  assert.equal(searcherOf(undefined, GPU), "cpu");
+  assert.equal(searcherOf("cpu", GPU), "cpu");
+  assert.equal(searcherOf(GPU, GPU), "gpu");
+  // Saved before the app was moved: still this app's worker, by its name.
+  assert.equal(searcherOf("/Users/me/Downloads/Lattice.app/Contents/MacOS/lattice-miner-gpu", GPU), "gpu");
+  assert.equal(searcherOf("/opt/custom-miner", GPU), "custom");
+  assert.equal(searcherOf(GPU, null), "custom", "a build without the GPU worker does not claim it");
+});
+
+test("`lattice mine status` says whether the loop runs", () => {
+  assert.deepEqual(parseMiningStatus("mining: running (pid 81)\nchain:  Nexus and configured hosted descendants\nrecipient: Nexus=bafy\n"), { running: true, pid: 81 });
+  assert.deepEqual(parseMiningStatus("mining: stopped\nrecipients: none configured (rewards and fees burn)\n"), { running: false });
+});
+
+test("mining: nothing to ask the CLI before it is set up; it needs the node; saving restarts a running loop and keeps the operator's fields", async () => {
+  const { host, calls, state } = scripted({ listen: 14001, rpc: 18080 });
+  const manager = new NodeManager(host);
+  // `lattice mine status` fails without a mine section, so it is not asked.
+  assert.deepEqual(await manager.miningStatus(), { running: false });
+  assert.equal(await manager.miningPrefs(), undefined);
+  assert.deepEqual(calls, []);
+  await assert.rejects(manager.startMining(), /Choose who mining pays first/);
+
+  // An operator's own worker and tuning are shown as such and kept.
+  state.topology!.mine = { worker: "/opt/custom-miner", batchSize: 7 };
+  assert.equal((await manager.miningPrefs())!.searcher, "custom");
+  await manager.configureMining({ searcher: "custom", workers: 2, recipients: { Nexus: MINER } });
+  assert.deepEqual(state.topology!.mine, { worker: "/opt/custom-miner", batchSize: 7, workers: 2, recipients: { Nexus: MINER } });
+  await assert.rejects(manager.startMining(), /Start the node first/);
+  assert.equal(state.mining, false);
+
+  // The graphics chip: only in a build that carries its worker, and as one worker.
+  assert.equal(await manager.canMineOnGPU(), false);
+  await assert.rejects(manager.configureMining({ searcher: "gpu", workers: 1, recipients: {} }), /no graphics-chip worker/);
+  state.gpuWorker = GPU;
+  assert.equal(await manager.canMineOnGPU(), true);
+  await manager.configureMining({ searcher: "gpu", workers: 4, recipients: { Nexus: MINER } });
+  assert.deepEqual(state.topology!.mine, { worker: GPU, batchSize: 7, workers: 1, recipients: { Nexus: MINER } });
+  assert.deepEqual(await manager.miningPrefs(), { searcher: "gpu", workers: 1, recipients: { Nexus: MINER } });
+
+  await manager.start();
+  await manager.startMining();
+  assert.deepEqual(await manager.miningStatus(), { running: true, pid: 4242 });
+  calls.length = 0;
+  await manager.configureMining({ searcher: "cpu", workers: 3, recipients: {} });
+  assert.deepEqual(calls, ["mine-status", "mine-stop", "mine-start"], "the loop reads its settings when it starts");
+  assert.deepEqual(state.topology!.mine, { worker: "cpu", batchSize: 7, workers: 3, recipients: {} });
+  await assert.rejects(manager.configureMining({ searcher: "cpu", workers: 1, recipients: { "Nexus/testnet": MINER } }), /does not host/);
+
+  // Stopping the node stops the loop first: it mines on the node.
+  calls.length = 0;
+  await manager.stop();
+  assert.deepEqual(calls, ["mine-status", "mine-stop", "down"]);
+  assert.equal(state.mining, false);
+});
+
+test("a chain no longer hosted is no longer paid: the CLI refuses a lattice.json whose mining names an unhosted chain", async () => {
+  const { host, calls, state } = scripted({
+    listen: 14001, rpc: 18080, hostedChains: ["Nexus/testnet"],
+    mine: { worker: "cpu", workers: 1, recipients: { Nexus: MINER, "Nexus/testnet": MINER } },
+  }, true);
+  state.mining = true;
+  const manager = new NodeManager(host);
+  const prefs = await manager.prefs();
+  await manager.configure({ ...prefs, hostedChains: [] });
+  assert.deepEqual(state.topology!.mine, { worker: "cpu", workers: 1, recipients: { Nexus: MINER } });
+  assert.equal(state.topology!.hostedChains, undefined);
+  // The loop was started with the old recipients, so it is restarted around the node's own restart.
+  assert.deepEqual(calls, ["mine-status", "mine-stop", "status", "down", "up", "mine-start"]);
+
+  // A change that drops no recipient leaves the miner alone.
+  calls.length = 0;
+  await manager.configure({ ...prefs, hostedChains: [], peers: "none" });
+  assert.deepEqual(calls, ["status", "down", "up"]);
+
+  // An operator's tuning entry for the chain is theirs to remove: say so, and write nothing.
+  state.topology = { listen: 14001, rpc: 18080, hostedChains: ["Nexus/testnet"], mine: { recipients: {}, minWork: { "Nexus/testnet": "2^20" } } };
+  await assert.rejects(manager.configure({ ...prefs, hostedChains: [] }), /mine\.minWork names Nexus\/testnet/);
+  assert.deepEqual(state.topology.hostedChains, ["Nexus/testnet"]);
 });

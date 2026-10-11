@@ -21,7 +21,7 @@ const app = process.env.LATTICE_APP;
 test("the packaged app boots and scaffolds its node through the bundled CLI", { skip: !app, timeout: 180_000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "lattice-desktop-home-"));
   const macOS = join(resolve(app!), "Contents", "MacOS");
-  for (const binary of ["lattice-desktop", "lattice", "lattice-node"]) assert.ok(existsSync(join(macOS, binary)), `${binary} is in the bundle`);
+  for (const binary of ["lattice-desktop", "lattice", "lattice-node", "lattice-mining-coordinator", "lattice-miner", "lattice-miner-gpu"]) assert.ok(existsSync(join(macOS, binary)), `${binary} is in the bundle`);
   const child = spawn(join(macOS, "lattice-desktop"), [], { env: { ...process.env, HOME: home }, stdio: "ignore" });
   const exited = new Promise<void>((done) => child.once("exit", () => done()));
   try {

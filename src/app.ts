@@ -61,6 +61,14 @@ export async function startApp(host: AppHost) {
   const reads = {
     health: (path: string) => reader(ownNode, path.split("/"), fetch).health(),
     cookie: host.nodeCookie,
+    // The active account first: it is who mining pays unless told otherwise.
+    accounts: async () => {
+      const answer = await wallet.getState();
+      if (!answer.ok || answer.state.locked) return [];
+      const { accounts, active } = answer.state;
+      return [...accounts].sort((a, b) => Number(b.address === active) - Number(a.address === active))
+        .map(({ label, address }) => ({ label, address }));
+    },
   };
   await startWallet({
     wallet,

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Build the bundled node binaries (`lattice`, `lattice-node`) from
+# Build the bundled node binaries (`lattice`, `lattice-node`, and the miner's
+# `lattice-mining-coordinator` and `lattice-miner`) from
 # adalinxx/lattice-node at the commit in NODE_COMMIT and stage them as Tauri
-# sidecars in src-tauri/binaries/<name>-<target-triple>.
+# sidecars in src-tauri/binaries/<name>-<target-triple>, with the GPU mining
+# worker from adalinxx/lattice-miner-gpu at MINER_GPU_COMMIT.
 #
 # DEBUG configuration on purpose: Swift 6.3's -O miscompiles the node on
 # macOS (Task.sleep loops), so the Mac node is built unoptimized, exactly
@@ -33,15 +35,34 @@ if [ -n "$(git -C "$src" status --porcelain --untracked-files=no)" ]; then
 fi
 
 # SwiftPM honours only the last --product flag, so build each one.
-for product in lattice lattice-node; do
+products="lattice lattice-node lattice-mining-coordinator lattice-miner"
+for product in $products; do
   (cd "$src" && swift build -c debug --product "$product")
 done
 
 triple="$(rustc -vV | sed -n 's/^host: //p')"
 out="$here/src-tauri/binaries"
 mkdir -p "$out"
-for name in lattice lattice-node; do
+for name in $products; do
   install -m 0755 "$src/.build/debug/$name" "$out/$name-$triple"
 done
 printf '%s\n' "$head" > "$out/COMMIT"
-echo "staged lattice + lattice-node ($head, debug, $triple) in $out"
+
+# The GPU mining worker (Metal on macOS), from adalinxx/lattice-miner-gpu at the
+# commit in MINER_GPU_COMMIT. A plain compute program with no node code in it,
+# so it is built optimized.
+gpu_commit="$(tr -d '[:space:]' < "$here/MINER_GPU_COMMIT")"
+gpu_src="$here/.build-miner-gpu"
+if [ ! -d "$gpu_src/.git" ]; then
+  git clone --quiet https://github.com/adalinxx/lattice-miner-gpu.git "$gpu_src"
+fi
+git -C "$gpu_src" fetch --quiet origin "$gpu_commit"
+git -C "$gpu_src" checkout --quiet --detach "$gpu_commit"
+if [ -n "$(git -C "$gpu_src" status --porcelain --untracked-files=no)" ]; then
+  echo "lattice-miner-gpu checkout has local changes; refusing to bundle it" >&2
+  exit 1
+fi
+(cd "$gpu_src" && cargo build --release --locked)
+install -m 0755 "$gpu_src/target/release/lattice-miner-gpu" "$out/lattice-miner-gpu-$triple"
+printf '%s\n' "$gpu_commit" > "$out/MINER_GPU_COMMIT"
+echo "staged $products ($head, debug, $triple) and lattice-miner-gpu ($gpu_commit, release) in $out"

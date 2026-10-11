@@ -1,5 +1,6 @@
 // The app's node: one host root scaffolded and driven through the bundled
-// `lattice` CLI (init / up / down / status), exactly as an operator would.
+// `lattice` CLI (init / up / down / status, and mine start / stop / status),
+// exactly as an operator would.
 // `lattice up` spawns the signed `lattice-node` as a child; the app talks to
 // it only over its loopback RPC. Pure logic over injected host operations,
 // so the same code runs in the app and in the headless e2e harness.
@@ -13,10 +14,15 @@ export interface Topology {
   hostedChains?: string[];
   /** Browser origins allowed on the loopback operator port (e.g. a paired extension). */
   rpcAllowedOrigins?: string[];
+  /**
+   * The mining loop's settings. The app sets `workers`, `recipients`, and
+   * `worker` to "cpu" or the bundled GPU worker's path; the rest is the operator's.
+   */
+  mine?: { worker?: string; workers?: number; recipients?: Record<string, string>; [field: string]: unknown };
   [field: string]: unknown;
 }
 
-export type LifecycleVerb = "init" | "up" | "down" | "status";
+export type LifecycleVerb = "init" | "up" | "down" | "status" | "mine-start" | "mine-stop" | "mine-status";
 
 export interface CommandResult {
   code: number;
@@ -30,6 +36,8 @@ export interface HostOps {
   lattice(verb: LifecycleVerb): Promise<CommandResult>;
   readTopology(): Promise<Topology | null>;
   writeTopology(topology: Topology): Promise<void>;
+  /** The bundled GPU mining worker's path, or null in a build without one. */
+  gpuWorker(): Promise<string | null>;
 }
 
 /** The node settings the app exposes. */
@@ -84,6 +92,55 @@ export function checkPrefs(prefs: NodePrefs): string | undefined {
     listed.add(chain);
   }
   return undefined;
+}
+
+/**
+ * What searches for blocks: this Mac's processor (the CLI's bundled worker),
+ * its graphics chip (the bundled GPU worker), or a worker the operator named
+ * in lattice.json by hand, which the app shows and keeps but cannot set.
+ */
+export type Searcher = "cpu" | "gpu" | "custom";
+
+/** The searcher lattice.json's `mine.worker` names, given this build's GPU worker. */
+export function searcherOf(worker: string | undefined, gpuWorker: string | null): Searcher {
+  if (worker === undefined || worker === "cpu") return "cpu";
+  // By name, not by path: the app may have moved since it was saved.
+  return gpuWorker !== null && worker.split("/").pop() === gpuWorker.split("/").pop() ? "gpu" : "custom";
+}
+
+/** The mining settings the app exposes. */
+export interface MiningPrefs {
+  searcher: Searcher;
+  /** Workers searching in parallel. The graphics chip is one worker: more would only contend for it. */
+  workers: number;
+  /** Who is paid each chain's block reward and fees, by chain path. A chain left out burns its payout. */
+  recipients: Record<string, string>;
+}
+
+export const MAX_WORKERS = 64;
+const ADDRESS = /^b[a-z0-9]{39,127}$/;
+
+/** The mining settings as chosen, or why not, for a node hosting `chains`. */
+export function checkMining(prefs: MiningPrefs, chains: string[]): string | undefined {
+  if (!Number.isInteger(prefs.workers) || prefs.workers < 1 || prefs.workers > MAX_WORKERS) {
+    return `Workers must be a whole number from 1 to ${MAX_WORKERS}.`;
+  }
+  for (const [chain, address] of Object.entries(prefs.recipients)) {
+    if (!chains.includes(chain)) return `This node does not host ${chain}.`;
+    if (!ADDRESS.test(address)) return `Not an address for ${chain}: ${address}`;
+  }
+  return undefined;
+}
+
+export interface MiningStatus {
+  running: boolean;
+  pid?: number;
+}
+
+/** Parses `lattice mine status`: its first line says whether the loop runs. */
+export function parseMiningStatus(stdout: string): MiningStatus {
+  const pid = /^mining: running \(pid (\d+)\)/m.exec(stdout);
+  return pid ? { running: true, pid: Number(pid[1]) } : { running: false };
 }
 
 export interface ChainStatus {
@@ -184,7 +241,22 @@ export class NodeManager {
     const problem = checkPrefs(prefs);
     if (problem) throw new Error(problem);
     const topology = await this.ensureHost();
-    await this.#rewrite(withPrefs(topology, prefs));
+    const next = withPrefs(topology, prefs);
+    // The CLI refuses a lattice.json whose mining names a chain it does not
+    // host: `up`, and `status` with it. A chain no longer hosted is no longer
+    // paid; a tuning entry for it is the operator's to remove.
+    const hosted = new Set(["Nexus", ...prefs.hostedChains]);
+    const tuned = Object.keys((topology.mine?.minWork as Record<string, unknown> | undefined) ?? {}).find((chain) => !hosted.has(chain));
+    if (tuned !== undefined) throw new Error(`lattice.json's mine.minWork names ${tuned}. Remove that entry there before you stop hosting it.`);
+    const paid = topology.mine?.recipients ?? {};
+    const dropped = Object.keys(paid).filter((chain) => !hosted.has(chain));
+    if (dropped.length === 0) return this.#rewrite(next);
+    next.mine = { ...topology.mine, recipients: Object.fromEntries(Object.entries(paid).filter(([chain]) => hosted.has(chain))) };
+    // A running loop was started with the old recipients: restart it with these.
+    const wasMining = (await this.miningStatus()).running;
+    if (wasMining) await this.#run("mine-stop");
+    await this.#rewrite(next);
+    if (wasMining) await this.#run("mine-start");
   }
 
   /** Writes the topology; a running node restarts to take it. */
@@ -227,8 +299,66 @@ export class NodeManager {
     await this.#run("up");
   }
 
+  /** Stops the node, and the mining loop with it: it mines on this node. */
   async stop(): Promise<void> {
+    if ((await this.miningStatus()).running) await this.#run("mine-stop");
     await this.#run("down");
+  }
+
+  /** The mining settings, or undefined before any were saved. */
+  async miningPrefs(): Promise<MiningPrefs | undefined> {
+    const mine = (await this.ensureHost()).mine;
+    if (!mine) return undefined;
+    return {
+      searcher: searcherOf(mine.worker, await this.#host.gpuWorker()),
+      workers: mine.workers ?? 1,
+      recipients: { ...(mine.recipients ?? {}) },
+    };
+  }
+
+  /** Whether this build can mine on the graphics chip. */
+  async canMineOnGPU(): Promise<boolean> {
+    return (await this.#host.gpuWorker()) !== null;
+  }
+
+  /** Whether the mining loop runs. Before any settings were saved it cannot. */
+  async miningStatus(): Promise<MiningStatus> {
+    if (!(await this.ensureHost()).mine) return { running: false };
+    return parseMiningStatus((await this.#run("mine-status")).stdout);
+  }
+
+  /**
+   * Saves the mining settings. The loop reads them when it starts, so a
+   * running one is restarted to take them.
+   */
+  async configureMining(prefs: MiningPrefs): Promise<void> {
+    const problem = checkMining(prefs, await this.chains());
+    if (problem) throw new Error(problem);
+    const gpuWorker = await this.#host.gpuWorker();
+    if (prefs.searcher === "gpu" && gpuWorker === null) throw new Error("This build has no graphics-chip worker.");
+    const wasMining = (await this.miningStatus()).running;
+    if (wasMining) await this.#run("mine-stop");
+    const topology = await this.ensureHost();
+    const mine: NonNullable<Topology["mine"]> = {
+      ...topology.mine,
+      workers: prefs.searcher === "gpu" ? 1 : prefs.workers,
+      recipients: { ...prefs.recipients },
+    };
+    if (prefs.searcher === "cpu") mine.worker = "cpu";
+    else if (prefs.searcher === "gpu") mine.worker = gpuWorker!;
+    await this.#host.writeTopology({ ...topology, mine });
+    if (wasMining) await this.#run("mine-start");
+  }
+
+  /** Starts the mining loop on this node, which must be running: the loop only retries a node that is not there. */
+  async startMining(): Promise<void> {
+    if (!(await this.ensureHost()).mine) throw new Error("Choose who mining pays first.");
+    if (!(await this.status()).some((c) => c.state !== "down")) throw new Error("Start the node first: mining runs on it.");
+    await this.#run("mine-start");
+  }
+
+  async stopMining(): Promise<void> {
+    await this.#run("mine-stop");
   }
 
   async status(): Promise<ChainStatus[]> {

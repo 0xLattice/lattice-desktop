@@ -9,19 +9,27 @@ import type { VaultStorage } from "../vendor/nexus-wallet/src/lib/wallet/signer.
 import type { KeyValueStore } from "../vendor/nexus-wallet/src/lib/wallet/settings.ts";
 import type { Vault } from "../vendor/nexus-wallet/src/lib/crypto/keystore.ts";
 
+const gpuWorker = () => invoke<string | null>("gpu_worker");
+
 export const hostOps: HostOps = {
   lattice: (verb: LifecycleVerb) => invoke<CommandResult>("lattice", { verb }),
   readTopology: () => invoke<Topology | null>("read_topology"),
   // Only the fields the app manages; the shell merges them and refuses others.
-  writeTopology: ({ rpc, listen, peers, hostedChains, rpcAllowedOrigins }: Topology) =>
-    invoke<void>("write_topology", {
+  writeTopology: async ({ rpc, listen, peers, hostedChains, rpcAllowedOrigins, mine }: Topology) => {
+    // Of mining: who is paid, the worker count, and the worker only when it is
+    // one bundled with the app (the shell refuses any other, and keeps the rest).
+    const bundledWorker = mine?.worker === "cpu" || (mine?.worker !== undefined && mine.worker === await gpuWorker());
+    await invoke<void>("write_topology", {
       topology: {
         rpc, listen,
         ...(peers ? { peers } : {}),
         ...(hostedChains ? { hostedChains } : {}),
         ...(rpcAllowedOrigins ? { rpcAllowedOrigins } : {}),
+        ...(mine ? { mine: { workers: mine.workers ?? 1, recipients: mine.recipients ?? {}, ...(bundledWorker ? { worker: mine.worker } : {}) } } : {}),
       },
-    }),
+    });
+  },
+  gpuWorker: () => gpuWorker(),
 };
 
 /** The node's current loopback cookie, for pairing a browser extension (null when not running). */
