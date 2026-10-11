@@ -18,8 +18,10 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.1",
+    "@types/jsdom": "^27.0.0",
     "@types/node": "^22.19.21",
     "esbuild": "^0.25.12",
+    "jsdom": "^27.4.0",
     "typescript": "^5.9.3"
   }
 }

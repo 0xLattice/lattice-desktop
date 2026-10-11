@@ -32,6 +32,9 @@ A full Lattice node and the Lattice Wallet in one macOS app (Tauri v2).
   signed in the app and submitted to the node's loopback operator route
   `POST /transactions`. The app checks the transaction CID the node returns
   against the CID it computed itself. There is no default endpoint and no relay.
+- **Idle lock.** The wallet locks after ten minutes without a request that
+  needs keys; looking at balances does not put it off. The screen stays as it
+  is, and the next step that needs keys asks for the password over it.
 - **Fees** can be set per transaction, with a default per chain. The app warns
   when a fee is below the node's `minRelayFee` but never clamps it.
 - **Status** comes from an inclusion lookup (block height), and **balances**
@@ -114,8 +117,27 @@ The repository produces an **unsigned** development build. To distribute it:
 - `cargo test --manifest-path src-tauri/Cargo.toml`: the shell only runs the
   lifecycle verbs, only accepts loopback paths, and only uses the RPC port from
   `lattice.json`.
-- End-to-end test, headless:
-  `LATTICE_NODE_BIN=<lattice-node>/.build/debug npm test`. It drives the app's
-  node-management layer with the real CLI on throwaway storage and no peers:
-  init, start, fund by mining, send with a custom fee through the loopback
-  fetch, inclusion, stop.
+- End-to-end tests, headless:
+  `LATTICE_NODE_BIN=<lattice-node>/.build/debug npm test`. They use the real
+  CLI and node on throwaway storage with no peers, and nothing touches a live
+  chain. `e2e-node` drives the node-management layer alone. The others run the
+  app itself (`src/app.ts` on its own page) with a Node harness standing in
+  for the shell, and click through it as a person would:
+  - `e2e-app`: first run with the node stopped, a send with a custom fee, a
+    wrong password, a relaunch, hosting a child chain from the chain menu, and
+    the node being killed under the app.
+  - `e2e-trade`: a private `Nexus/testnet` and a trade across it: the sell
+    deposit, the purchase, the withdrawal, the purchase archived once it is
+    proven settled, and the refusals on the way (wrong chain, an unmined
+    receipt, a deposit bought twice).
+  - `e2e-custody`: a `lattice key generate` key file, the idle lock firing
+    in the middle of a send, a fee replacement, pairing an extension, and a
+    backup file restored on a second host.
+- The packaged app: `LATTICE_APP=<path to Lattice.app> npm test` launches the
+  bundle with a throwaway home directory and checks that the page loaded,
+  reached the shell and ran the bundled CLI. It cannot see or click the
+  window, so the camera, printing and file drops on the real window are
+  checked by hand.
+- Live, opt-in: `LATTICE_LIVE=1 LATTICE_NODE_BIN=… npm test` starts the app's
+  node on the real network with its built-in peers and watches it sync. It is
+  read-only and needs the network, so CI does not run it.
