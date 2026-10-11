@@ -129,3 +129,5 @@ maintainer approval. Until then, project-signature verification is a release
 blocker; ad-hoc code signing is not its replacement.
 
 The bundled Swift runtime license is from the [Swift 6.3.3 release](https://github.com/swiftlang/swift/blob/swift-6.3.3-RELEASE/LICENSE.txt). Additional upstream license sources are recorded in `licenses/sources.json`. Notice collection fails closed when an upstream dependency supplies no license text; resolve the source notice before producing a releasable package.
+
+Source-scoped component grants are listed in `licenses/source-grants.json`. The notice collector checks each covered checkout against its exact clean revision before including the grant and preserves other dependency notices. These grants do not replace third-party rights.

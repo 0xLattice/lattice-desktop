@@ -11,7 +11,34 @@ spec = importlib.util.spec_from_file_location('release', Path(__file__).with_nam
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 
+notice_spec = importlib.util.spec_from_file_location('notices', Path(__file__).with_name('collect-release-notices.py'))
+notices = importlib.util.module_from_spec(notice_spec)
+notice_spec.loader.exec_module(notices)
+
 class ReleaseTests(unittest.TestCase):
+    def test_source_grant_requires_exact_clean_revision(self):
+        revision = notices.grants['Ivy']['revision']
+        with patch.object(notices.subprocess, 'check_output', side_effect=[revision + '\n', '']):
+            text = notices.source_grant(Path('Ivy'))
+            self.assertIn(revision, text)
+            self.assertIn('Copyright (c) Lattice contributors', text)
+        for result in [('0' * 40, ''), (revision, ' M Sources/example.swift')]:
+            with patch.object(notices.subprocess, 'check_output', side_effect=result):
+                with self.assertRaisesRegex(ValueError, 'exact clean pinned revision'):
+                    notices.source_grant(Path('Ivy'))
+        self.assertIsNone(notices.source_grant(Path('unlisted-component')))
+
+    def test_source_grant_preserves_existing_notices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / 'Ivy'
+            package.mkdir()
+            (package / 'LICENSE.third-party').write_text('Existing third-party terms')
+            with patch.object(notices, 'records', []), patch.object(notices, 'source_grant', return_value='Scoped component grant'):
+                notices.collect('Swift Ivy', package, recursive=True)
+                combined = ''.join(notices.records)
+                self.assertIn('Existing third-party terms', combined)
+                self.assertIn('Scoped component grant', combined)
+
     def test_archive_is_canonical_and_detects_tampering(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
