@@ -149,6 +149,17 @@ async fn lattice(app: AppHandle, pinned: State<'_, PinnedPort>, verb: String) ->
     let root = host_root(&app)?;
     let verb_name = verb.clone();
     if verb == "mine-start" {
+        let topology = topology_path(&app)?;
+        // Settings saved when the graphics chip worked (or copied from a
+        // machine where it did) must not start a loop that finds nothing.
+        let usable = tauri::async_runtime::spawn_blocking(move || -> Result<bool> {
+            Ok(!mines_on_gpu(&topology)? || gpu_searches())
+        })
+        .await
+        .map_err(err)??;
+        if !usable {
+            return Err(NO_GPU.into());
+        }
         repoint_gpu_worker(&topology_path(&app)?, gpu_worker_path().as_deref())?;
     }
     let result = tauri::async_runtime::spawn_blocking(move || run_lattice(&root, &verb))
@@ -195,40 +206,81 @@ fn gpu_worker_path() -> Option<String> {
 /// mining loop reaches it: from inside WSL, where Windows' drives are mounted.
 #[cfg(windows)]
 fn gpu_worker_path() -> Option<String> {
-    static MOUNTED: OnceLock<Option<String>> = OnceLock::new();
-    let file = gpu_worker_file()?;
-    let session = wsl::session().ok()?;
-    MOUNTED.get_or_init(|| wsl::mounted_path(&session, &file)).clone()
+    // Kept once found. A failure is asked again: the distribution may only
+    // have been starting.
+    static MOUNTED: Mutex<Option<String>> = Mutex::new(None);
+    let mut mounted = MOUNTED.lock().ok()?;
+    if mounted.is_none() {
+        *mounted = wsl::mounted_path(&wsl::session().ok()?, &gpu_worker_file()?);
+    }
+    mounted.clone()
 }
 
 /// Whether `worker` can search on this machine's graphics chip: it is given a
 /// small range every hash of which wins. A machine with no chip the worker
-/// can use, or no driver for it, fails here instead of mining nothing.
-fn gpu_worker_searches(worker: &Path) -> bool {
+/// can use, or no driver for it, fails here instead of mining nothing. A
+/// worker still silent after `patience` (a driver that hangs) is stopped and
+/// counts as one that cannot.
+fn gpu_worker_searches(worker: &Path, patience: Duration) -> bool {
+    use std::process::Stdio;
     let mut command = Command::new(worker);
     command.args(["--work-id", "probe", "--prefix-hex", "00", "--start-nonce", "0", "--count", "1024", "--target", &"ff".repeat(32)]);
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    command.output().is_ok_and(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).contains(r#""status":"found""#))
+    let Ok(mut child) = command.spawn() else { return false };
+    let deadline = std::time::Instant::now() + patience;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    };
+    // One short line: it fits the pipe, so reading after the exit cannot block.
+    let mut answer = String::new();
+    let _ = child.stdout.take().map(|mut out| out.read_to_string(&mut answer));
+    status.success() && answer.contains(r#""status":"found""#)
 }
 
-/// The bundled GPU worker, for the page to offer and to name back to
-/// `write_topology` (the only worker path it may name): None when this build
-/// carries none or this machine has no graphics chip it can search on, which
-/// is found out once per launch.
+const GPU_PROBE_PATIENCE: Duration = Duration::from_secs(30);
+const NO_GPU: &str = "This computer has no graphics chip Lattice can mine on: it needs a graphics driver that provides OpenCL. Choose the processor in Mining.";
+
+/// Whether the bundled GPU worker can search on this machine, found out once
+/// per launch.
+fn gpu_searches() -> bool {
+    static SEARCHES: OnceLock<bool> = OnceLock::new();
+    let Some(file) = gpu_worker_file() else { return false };
+    *SEARCHES.get_or_init(|| gpu_worker_searches(&file, GPU_PROBE_PATIENCE))
+}
+
+/// Whether lattice.json has mining search with a GPU worker (by file name:
+/// the path is repointed at this build's before it is used).
+fn mines_on_gpu(topology: &Path) -> Result<bool> {
+    let current = read_topology_at(topology)?;
+    let worker = current.as_ref().and_then(|t| t.pointer("/mine/worker")).and_then(Value::as_str);
+    Ok(worker.is_some_and(|worker| Path::new(worker).file_name().is_some_and(|name| name == GPU_WORKER)))
+}
+
+/// The bundled GPU worker's path, the only worker path the page may name
+/// back to `write_topology`: None in a build that carries none.
 #[tauri::command]
 async fn gpu_worker() -> Option<String> {
-    static SEARCHES: OnceLock<bool> = OnceLock::new();
-    tauri::async_runtime::spawn_blocking(|| {
-        let file = gpu_worker_file()?;
-        SEARCHES.get_or_init(|| gpu_worker_searches(&file)).then(gpu_worker_path).flatten()
-    })
-    .await
-    .ok()
-    .flatten()
+    tauri::async_runtime::spawn_blocking(gpu_worker_path).await.ok().flatten()
+}
+
+/// Whether the page may offer the graphics chip: this build carries the GPU
+/// worker and it finds a hash on this machine.
+#[tauri::command]
+async fn gpu_worker_usable() -> bool {
+    tauri::async_runtime::spawn_blocking(gpu_searches).await.unwrap_or(false)
 }
 
 /// The end of the mining loop's own log, for the page to say how it is going:
@@ -316,7 +368,7 @@ fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let _ = fs::remove_file(&tmp);
     let mut file = new_file(mode).open(&tmp).map_err(err)?;
     file.write_all(bytes).map_err(err)?;
-    synced(&file)?;
+    synced(&file, &tmp)?;
     fs::rename(&tmp, path).map_err(err)
 }
 
@@ -337,10 +389,10 @@ fn new_file(mode: u32) -> fs::OpenOptions {
 }
 
 /// Flushed to disk before it is renamed into place. The WSL file share does
-/// not take a flush request, so on Windows a refusal is not an error.
-fn synced(file: &fs::File) -> Result<()> {
+/// not take a flush request, so for a file there a refusal is not an error.
+fn synced(file: &fs::File, path: &Path) -> Result<()> {
     let flushed = file.sync_all();
-    if cfg!(windows) {
+    if cfg!(windows) && path.to_string_lossy().starts_with(r"\\wsl$\") {
         return Ok(());
     }
     flushed.map_err(err)
@@ -529,7 +581,7 @@ fn write_new(dir: &Path, name: &str, text: &str) -> Result<PathBuf> {
         match new_file(0o600).open(&path) {
             Ok(mut f) => {
                 f.write_all(text.as_bytes()).map_err(err)?;
-                synced(&f)?;
+                synced(&f, &path)?;
                 return Ok(path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -672,6 +724,7 @@ pub fn run() {
             node_http,
             node_cookie,
             gpu_worker,
+            gpu_worker_usable,
             mine_log,
             save_backup,
             print_page
@@ -778,13 +831,25 @@ mod tests {
         };
         // It is asked for a range it cannot miss in, and has to answer with a find.
         let asked = worker("asked", r#"[ "$*" = "--work-id probe --prefix-hex 00 --start-nonce 0 --count 1024 --target ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" ] && echo '{"workId":"probe","status":"found","nonce":0}'"#);
-        assert!(gpu_worker_searches(&asked));
+        let patient = Duration::from_secs(30);
+        assert!(gpu_worker_searches(&asked, patient));
         // No device: the worker says why and fails.
-        assert!(!gpu_worker_searches(&worker("no-device", "echo 'error: opencl backend failed' >&2; exit 1")));
+        assert!(!gpu_worker_searches(&worker("no-device", "echo 'error: opencl backend failed' >&2; exit 1"), patient));
         // A worker that searched nothing must not pass for one that works.
-        assert!(!gpu_worker_searches(&worker("exhausted", r#"echo '{"workId":"probe","status":"exhausted"}'"#)));
-        assert!(!gpu_worker_searches(&worker("found-but-failed", r#"echo '{"status":"found"}'; exit 3"#)));
-        assert!(!gpu_worker_searches(&dir.join("missing")));
+        assert!(!gpu_worker_searches(&worker("exhausted", r#"echo '{"workId":"probe","status":"exhausted"}'"#), patient));
+        assert!(!gpu_worker_searches(&worker("found-but-failed", r#"echo '{"status":"found"}'; exit 3"#), patient));
+        assert!(!gpu_worker_searches(&dir.join("missing"), patient));
+        // A driver that hangs is given up on, not waited for.
+        let began = std::time::Instant::now();
+        assert!(!gpu_worker_searches(&worker("hangs", "exec sleep 60"), Duration::from_millis(300)));
+        assert!(began.elapsed() < Duration::from_secs(10));
+        // Mining is on the graphics chip when lattice.json names a GPU worker, wherever it was.
+        let topology = dir.join("lattice.json");
+        assert!(!mines_on_gpu(&topology).unwrap(), "no settings yet");
+        for (worker, on_gpu) in [(format!("/moved/{GPU_WORKER}"), true), ("cpu".to_string(), false), ("/opt/custom-miner".to_string(), false)] {
+            fs::write(&topology, serde_json::to_vec(&serde_json::json!({ "rpc": 1, "mine": { "worker": worker } })).unwrap()).unwrap();
+            assert_eq!(mines_on_gpu(&topology).unwrap(), on_gpu, "{worker}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 

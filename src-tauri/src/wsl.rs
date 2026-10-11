@@ -58,6 +58,18 @@ pub fn session_from(distro: &str, home: &str) -> Option<Session> {
         .then(|| Session { distro: distro.to_string(), home: home.to_string() })
 }
 
+/// A Windows path as `wslpath` takes it: without the `\\?\` prefix a
+/// canonical path carries (the app's resource directory is one), and with
+/// forward slashes, which nothing on the way to `wslpath` reads as escapes.
+/// None for a path that is not on a lettered drive.
+pub fn for_wslpath(windows: &Path) -> Option<String> {
+    let text = windows.to_str()?;
+    let text = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let mut chars = text.chars();
+    let on_drive = chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.next() == Some(':') && matches!(chars.next(), Some('\\' | '/'));
+    on_drive.then(|| text.replace('\\', "/"))
+}
+
 /// Output as text: a Linux program's is UTF-8, wsl.exe's own messages are UTF-16.
 pub fn decode(bytes: &[u8]) -> String {
     if bytes.len() >= 2 && bytes.len() % 2 == 0 && bytes.iter().skip(1).step_by(2).all(|b| *b == 0) {
@@ -86,7 +98,8 @@ mod running {
     /// `wsl.exe`, without a console window flashing up for each call.
     pub fn command() -> Command {
         let mut command = Command::new("wsl.exe");
-        command.creation_flags(CREATE_NO_WINDOW);
+        // No input: on a PC without WSL, wsl.exe may offer to install it and wait for a key.
+        command.creation_flags(CREATE_NO_WINDOW).stdin(Stdio::null());
         command
     }
 
@@ -138,17 +151,21 @@ mod running {
     /// A Windows file as the distribution reaches it, through its mount of
     /// the drive (`/mnt/c/...` unless the distribution mounts drives elsewhere).
     pub fn mounted_path(session: &Session, windows: &Path) -> Option<String> {
-        // Forward slashes: nothing between here and wslpath reads them as escapes.
-        let windows = windows.to_str()?.replace('\\', "/");
-        let output = command().args(["-d", &session.distro, "-e", "wslpath", "-u", &windows]).output().ok()?;
+        let name = windows.file_name()?.to_str()?;
+        let output = command().args(["-d", &session.distro, "-e", "wslpath", "-u", &for_wslpath(windows)?]).output().ok()?;
         let linux = decode(&output.stdout).trim().to_string();
-        (output.status.success() && linux.starts_with('/')).then_some(linux)
+        // An absolute Linux path to the same file, or nothing.
+        (output.status.success() && linux.starts_with('/') && linux.ends_with(&format!("/{name}"))).then_some(linux)
     }
 
     /// The node binaries inside the distribution, copied there from the
     /// app's resources unless this version already was. Returns the Linux
     /// directory they are in.
     pub fn install(session: &Session, resources: &Path) -> Result<String, String> {
+        // One copy at a time: the page runs several verbs at once on a first
+        // launch, and a second copy would write over a binary the first is running.
+        static INSTALLING: Mutex<()> = Mutex::new(());
+        let _installing = INSTALLING.lock().map_err(|e| e.to_string())?;
         let source = resources.join("linux");
         let commit = fs::read_to_string(source.join("COMMIT")).map_err(|e| format!("this build carries no node binaries: {e}"))?;
         let commit = commit.trim();
@@ -185,6 +202,19 @@ pub use running::{command, install, mounted_path, release, session};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_windows_path_is_handed_to_wslpath_plain() {
+        let plain = Some("C:/Users/me/AppData/Local/Lattice/bin/lattice-miner-gpu.exe".to_string());
+        assert_eq!(for_wslpath(Path::new(r"C:\Users\me\AppData\Local\Lattice\bin\lattice-miner-gpu.exe")), plain);
+        // As a canonical path names it, which is how the resource directory arrives.
+        assert_eq!(for_wslpath(Path::new(r"\\?\C:\Users\me\AppData\Local\Lattice\bin\lattice-miner-gpu.exe")), plain);
+        assert_eq!(for_wslpath(Path::new(r"d:\Lat tice\worker.exe")), Some("d:/Lat tice/worker.exe".to_string()));
+        // Not on a lettered drive: a network share, or no drive at all.
+        for other in [r"\\?\UNC\server\share\worker.exe", r"\\server\share\worker.exe", r"worker.exe", ""] {
+            assert_eq!(for_wslpath(Path::new(other)), None, "{other}");
+        }
+    }
 
     #[test]
     fn a_host_root_has_a_windows_path_and_a_linux_path() {

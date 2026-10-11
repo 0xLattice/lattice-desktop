@@ -287,7 +287,8 @@ async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => 
     h("option", { value: "cpu" }, "This computer's processor"),
     ...(saved?.searcher === "custom" ? [h("option", { value: "custom" }, "The worker set in lattice.json")] : []),
   ) as HTMLSelectElement;
-  searcher.value = saved?.searcher ?? (gpu ? "gpu" : "cpu");
+  // Saved for a graphics chip this computer cannot use (now): the processor, until it is saved otherwise.
+  searcher.value = saved && (saved.searcher !== "gpu" || gpu) ? saved.searcher : gpu ? "gpu" : "cpu";
   const cores = Math.max(1, Math.min(MAX_WORKERS, globalThis.navigator?.hardwareConcurrency ?? 1));
   const workers = h("input", { type: "text", inputmode: "numeric", "aria-label": "Workers", value: String(saved?.workers ?? 1) }) as HTMLInputElement;
   const workersField = h("div", { class: "stack" }, h("label", { class: "k" }, `Processor workers (this computer has ${cores} cores)`), workers);

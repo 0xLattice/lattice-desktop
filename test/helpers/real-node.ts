@@ -78,6 +78,7 @@ export function harnessHost(root: string): AppHost {
         writeFileSync(topologyFile, JSON.stringify(topology, null, 2));
       },
       gpuWorker: async () => gpuMiner ?? null,
+      gpuWorkerUsable: async () => gpuMiner !== undefined,
       async miningLog() {
         try {
           return readFileSync(join(root, "log", "mine.log"), "utf8").slice(-64 * 1024);

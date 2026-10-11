@@ -34,7 +34,8 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   [lattice-miner-gpu](https://github.com/adalinxx/lattice-miner-gpu), the
   default) or on its processor. The graphics chip is offered only where the
   worker finds a hash on it when the app asks, once per launch: a machine
-  with no chip or driver it can use mines on the processor. One search covers Nexus and every chain the
+  with no chip or driver it can use mines on the processor, and settings
+  saved for a chip it cannot use are refused when mining starts. One search covers Nexus and every chain the
   node hosts (merged mining), so the chains mined are the chains hosted: to
   mine another, or stop mining one, change what the node hosts (the screen
   links to it). Each chain's reward and fees go to the account you choose, the

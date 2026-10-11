@@ -13,7 +13,7 @@ const PEER = `${"ab".repeat(32)}@node.example.org:4001`;
 
 function scripted(initial: Topology | null = null, running = false) {
   const calls: LifecycleVerb[] = [];
-  const state = { topology: initial, running, mining: false, gpuWorker: null as string | null, log: "" };
+  const state = { topology: initial, running, mining: false, gpuWorker: null as string | null, gpuUsable: true, log: "" };
   const host: HostOps = {
     async lattice(verb) {
       calls.push(verb);
@@ -35,6 +35,7 @@ function scripted(initial: Topology | null = null, running = false) {
     readTopology: async () => (state.topology ? structuredClone(state.topology) : null),
     writeTopology: async (t) => { state.topology = structuredClone(t); },
     gpuWorker: async () => state.gpuWorker,
+    gpuWorkerUsable: async () => state.gpuUsable,
     miningLog: async () => state.log,
   };
   return { host, calls, state };
@@ -202,12 +203,22 @@ test("mining: nothing to ask the CLI before it is set up; it needs the node; sav
   assert.equal(await manager.canMineOnGPU(), false);
   await assert.rejects(manager.configureMining({ searcher: "gpu", workers: 1, recipients: {} }), /no graphics-chip worker/);
   state.gpuWorker = GPU;
+  // And only where the worker finds a hash on this computer's chip.
+  state.gpuUsable = false;
+  assert.equal(await manager.canMineOnGPU(), false);
+  await assert.rejects(manager.configureMining({ searcher: "gpu", workers: 1, recipients: {} }), /no graphics chip Lattice can mine on/);
+  state.gpuUsable = true;
   assert.equal(await manager.canMineOnGPU(), true);
   await manager.configureMining({ searcher: "gpu", workers: 4, recipients: { Nexus: MINER } });
   assert.deepEqual(state.topology!.mine, { worker: GPU, batchSize: 7, workers: 1, recipients: { Nexus: MINER } });
   assert.deepEqual(await manager.miningPrefs(), { searcher: "gpu", workers: 1, recipients: { Nexus: MINER } });
 
   await manager.start();
+  // Settings saved for a graphics chip that cannot be used now do not start a loop that would find nothing.
+  state.gpuUsable = false;
+  await assert.rejects(manager.startMining(), /no graphics chip Lattice can mine on/);
+  assert.equal(state.mining, false);
+  state.gpuUsable = true;
   await manager.startMining();
   assert.deepEqual(await manager.miningStatus(), { running: true, pid: 4242 });
   calls.length = 0;
