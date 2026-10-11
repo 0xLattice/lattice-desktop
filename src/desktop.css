@@ -2,3 +2,11 @@
    column readable. */
 body { width: auto; min-height: 100vh; }
 main { max-width: 560px; margin: 0 auto; }
+
+/* An element that is hidden is hidden, whatever its display. */
+[hidden] { display: none !important; }
+/* A ticked row: the chain, and its box at the row's end. */
+.kv .row.check { align-items: center; cursor: pointer; }
+.kv .row.check input[type="checkbox"] { width: auto; margin: 0; }
+/* A chain's name is its path, and paths are case-sensitive: shown as written. */
+.kv .k.mono { text-transform: none; letter-spacing: 0; font-size: var(--fs-14); }

@@ -119,7 +119,7 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     await shows(/Enter the extension's id/);
     const extension = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
     const oldCookie = readFileSync(cookieFile(root), "utf8");
-    input("extension id (chrome://extensions) or chrome-extension://…").value = "abcdefghijklmnopabcdefghijklmnop";
+    input("the extension's id").value = "abcdefghijklmnopabcdefghijklmnop";
     button("Allow this extension").click();
     await shows(new RegExp("Allowed " + extension));
     await until(async () => (readFileSync(cookieFile(root), "utf8") !== oldCookie && (await fetch(`${ownNode}/health`)).ok ? true : undefined), "the node restarted with a new cookie");

@@ -9,8 +9,11 @@ A full Lattice node and the Lattice Wallet in one macOS app (Tauri v2).
   with `lattice init` and gives the node its own ports (RPC 18080, peers 14001)
   so that it doesn't clash with a CLI-managed host on 8080/4001. Nexus bootstrap
   peers are the node's built-in defaults; you can change them in **Node →
-  Node settings** (built-in, your own list, or none). Quitting the app stops the
-  node cleanly (`lattice down`, which can take a few seconds). If the app is
+  Node settings** (built-in, your own list, or none). Opening the app starts
+  the node, and the wallet's home screen says what it is doing until it is in
+  sync: stopped (with a Start button), starting, or how far along it is.
+  Quitting the app stops the node cleanly (`lattice down`, which can take a
+  few seconds). If the app is
   killed or crashes, the node keeps running; the next launch finds it by its
   pidfile. The app may change only `rpc`, `listen`, `peers` and `hostedChains`
   in `lattice.json`, and of `mine` only `workers`, `recipients`, and `worker`
@@ -24,7 +27,10 @@ A full Lattice node and the Lattice Wallet in one macOS app (Tauri v2).
   mine another, or stop mining one, change what the node hosts (the screen
   links to it). Each chain's reward and fees go to the account you choose, the
   wallet's active account unless you change it, or to no one (they burn).
-  Saving while it runs restarts the loop. Stopping the node or quitting the app
+  While it runs the screen shows the blocks found in this run and when the
+  last was, the Node screen and the wallet's home screen say that it is
+  mining, and a chain set to pay no one is warned about before it starts.
+  Applying a change while it runs restarts the loop. Stopping the node or quitting the app
   stops mining first. The page can choose only between the two bundled workers:
   a custom `mine.worker` set by hand in `lattice.json` is shown and kept, but
   set only by hand.
@@ -55,7 +61,10 @@ A full Lattice node and the Lattice Wallet in one macOS app (Tauri v2).
   chain list, `hostedChains` in `lattice.json`: adding a chain in the wallet's
   chain picker hosts it, and a chain added in Node settings appears in the
   picker (a running node restarts to take either).
-- **Settings** open from the mark at the top left. The chain name beside it
+- **Node settings** list the chains the node can see as boxes to tick (a path
+  is typed only for one it cannot), with the ports under Ports. Saving restarts
+  a running node.
+- **Settings** open from the mark at the top left, which says so. The chain name beside it
   lists the current chain's child chains, and `↑` goes to its parent. A child
   chain this node does not host yet is marked "add to node": choosing it hosts
   it first (a running node restarts).
@@ -161,12 +170,15 @@ The repository produces an **unsigned** development build. To distribute it:
     Mining screen, both chains mined to different accounts with one paying no
     one, the node restarted under the miner, a chain dropped while mining
     still paid it, and a relaunch showing what was saved.
+  - `e2e-first-run`: the app as it ships, starting its own node when it
+    opens: a new wallet lands on a balance with no one pressing Start.
   - `e2e-custody`: a `lattice key generate` key file, the idle lock firing
     in the middle of a send, a fee replacement, pairing an extension, and a
     backup file restored on a second host.
 - The packaged app: `LATTICE_APP=<path to Lattice.app> npm test` launches the
-  bundle with a throwaway home directory and checks that the page loaded,
-  reached the shell and ran the bundled CLI. It cannot see or click the
+  bundle with a throwaway home directory and a private host root, and checks
+  that the app itself brought its node up: the page loaded, reached the shell,
+  and the shell ran the bundled CLI and node. It cannot see or click the
   window, so the camera, printing and file drops on the real window are
   checked by hand.
 - Live, opt-in: `LATTICE_LIVE=1 LATTICE_NODE_BIN=… npm test` starts the app's

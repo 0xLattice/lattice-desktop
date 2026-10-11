@@ -15,7 +15,7 @@ import { NodeManager } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import { importPrivateKey } from "../vendor/nexus-wallet/src/lib/crypto/accounts.ts";
-import { bin, button, freePort, harnessHost, input, installPage, mine, pageText, run, shows, until } from "./helpers/real-node.ts";
+import { balanceShown, bin, button, freePort, funded, harnessHost, input, installPage, mine, pageText, press, run, shows, until } from "./helpers/real-node.ts";
 
 const PASSWORD = "correct horse battery";
 
@@ -43,15 +43,22 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await shows(/Balance/);
     const address = document.querySelector(".account-address")?.textContent ?? "";
 
+    // The node is stopped (this test leaves auto-start off to see that). The
+    // home screen says so in words, in ordinary type, and offers the way out.
+    await shows(/Your node is stopped, so nothing can be read or sent\.Start node/);
+    assert.equal(document.querySelector(".balance-value .v")!.classList.contains("unread"), true);
+    await press("Start node");
+    await until(() => (balanceShown() === "0" ? true : undefined), "a balance read from the started node");
+    await until(() => (document.querySelector(".notice") ? undefined : true), "the notice to clear once the node is in sync");
+    // The Node screen says the same in its own terms, with one button for the one thing to do.
     button("Node").click();
-    await shows(/Your node/);
-    button("Start").click();
-    await shows(/Nexusactive/);
+    await shows(/Nexusin sync · block 0Miningoff/);
+    assert.deepEqual([...document.querySelectorAll("#view button")].map((item) => item.textContent).slice(0, 2), ["Stop node", "Mining"]);
     button("Back to wallet").click();
     await shows(/Balance/);
     await mine(root, ownNode, { Nexus: address }, 2, height);
     button("Refresh balance").click();
-    await until(() => (/Balance[\d,]+/.test(pageText()) && !/Balance0/.test(pageText()) ? true : undefined), "a funded balance");
+    await until(() => (funded() ? true : undefined), "a funded balance");
     button("Send").click();
     await shows(/Review/);
     const bob = importPrivateKey("b0".repeat(32)).address;
@@ -60,7 +67,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     (document.querySelector("details.advanced input") as HTMLInputElement).value = "23";
     button("Review").click();
     await shows(/Sign & send/);
-    assert.match(pageText(), /Amount1,000Network fee23Total1,023/);
+    assert.match(pageText(), /Amount1,000 unitsNetwork fee23 unitsTotal1,023 units/);
     button("Sign & send").click();
     await shows(/Admitted to the node's pool/);
     await mine(root, ownNode, { Nexus: address }, 1, height);
@@ -105,15 +112,16 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await mine(root, ownNode, { Nexus: address, "Nexus/testnet": address }, 3, height);
     await until(async () => ((await manager.status()).every((c) => c.state === "active") ? true : undefined), "both chains active");
     button("Node").click();
-    await shows(/Nexus\/testnetactive/);
+    await shows(/Nexus\/testnetin sync/);
     button("Node settings").click();
-    await shows(/Hosted child chains/);
-    const hosted = document.querySelector('textarea[placeholder^="child chains to host"]') as HTMLTextAreaElement;
-    assert.equal(hosted.value, "Nexus/testnet");
-    hosted.value = "";
+    await shows(/Chains this node hosts/);
+    // The chain is listed with its box ticked: hosting it or not is a tick, not a typed path.
+    const hosted = document.querySelector('input[aria-label="Nexus/testnet"]') as HTMLInputElement;
+    assert.equal(hosted.checked, true);
+    hosted.checked = false;
     button("Save").click();
     await shows(/Your node/);
-    await shows(/Nexusactive/);
+    await shows(/Nexusin sync/);
     assert.deepEqual(await manager.chains(), ["Nexus"]);
     button("Back to wallet").click();
     await shows(/Balance/);
@@ -127,7 +135,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await until(() => (document.getElementById("net-badge")!.textContent === "Nexus/testnet ▾" ? true : undefined), "the wallet on Nexus/testnet");
     // The node restarted to take the chain: the balance reads once it is back.
     await until(() => {
-      if (/Balance[\d,]*[1-9]/.test(pageText())) return true;
+      if (funded()) return true;
       button("Refresh balance").click();
       return undefined;
     }, "the child-chain balance");
@@ -150,18 +158,18 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     button("Node").click();
     await shows(/Your node/);
     await until(() => (/Nexus(stopped|starting)/.test(pageText()) ? true : undefined), "the node screen to show it down");
-    button("Start").click();
-    await shows(/Nexusactive/);
+    await press("Start node");
+    await shows(/Nexusin sync/);
     button("Back to wallet").click();
     await until(() => {
-      if (/Balance[\d,]*[1-9]/.test(pageText())) return true;
+      if (funded()) return true;
       button("Refresh balance").click();
       return undefined;
     }, "the balance after the restart");
 
     button("Node").click();
     await shows(/Your node/);
-    button("Stop").click();
+    await press("Stop node");
     await shows(/Nexusstopped/);
   } catch (e) {
     try {

@@ -4,16 +4,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  NodeManager, LifecycleError, checkMining, checkPrefs, parseMiningStatus, parseStatus, prefsOf, searcherOf, withPrefs, extensionOrigin,
+  NodeManager, LifecycleError, checkMining, checkPrefs, parseMiningLog, parseMiningStatus, parseStatus, prefsOf, searcherOf, withPrefs, extensionOrigin,
   type HostOps, type LifecycleVerb, type Topology, type NodePrefs,
 } from "../src/node-manager.ts";
-import { miningChoices } from "../src/node-panel.ts";
+import { miningChoices, nodeNotices } from "../src/node-panel.ts";
 
 const PEER = `${"ab".repeat(32)}@node.example.org:4001`;
 
 function scripted(initial: Topology | null = null, running = false) {
   const calls: LifecycleVerb[] = [];
-  const state = { topology: initial, running, mining: false, gpuWorker: null as string | null };
+  const state = { topology: initial, running, mining: false, gpuWorker: null as string | null, log: "" };
   const host: HostOps = {
     async lattice(verb) {
       calls.push(verb);
@@ -35,6 +35,7 @@ function scripted(initial: Topology | null = null, running = false) {
     readTopology: async () => (state.topology ? structuredClone(state.topology) : null),
     writeTopology: async (t) => { state.topology = structuredClone(t); },
     gpuWorker: async () => state.gpuWorker,
+    miningLog: async () => state.log,
   };
   return { host, calls, state };
 }
@@ -245,4 +246,43 @@ test("a chain no longer hosted is no longer paid: the CLI refuses a lattice.json
   state.topology = { listen: 14001, rpc: 18080, hostedChains: ["Nexus/testnet"], mine: { recipients: {}, minWork: { "Nexus/testnet": "2^20" } } };
   await assert.rejects(manager.configure({ ...prefs, hostedChains: [] }), /mine\.minWork names Nexus\/testnet/);
   assert.deepEqual(state.topology.hostedChains, ["Nexus/testnet"]);
+});
+
+test("the mining log says how the current run is going", () => {
+  const log = [
+    "2026-10-11T01:00:00Z mining loop start",
+    "2026-10-11T01:00:05Z accepted tip=bafyold",
+    "2026-10-11T01:10:00Z mining loop start",
+    "2026-10-11T01:10:02Z accepted tip=bafya",
+    "2026-10-11T01:10:03Z the node refused this round's work; retrying",
+    "2026-10-11T01:10:09Z accepted tip=bafyb",
+    "",
+  ].join("\n");
+  // Only since the loop last started: an earlier run's blocks are not this one's.
+  assert.deepEqual(parseMiningLog(log), { found: 2, last: "2026-10-11T01:10:09Z" });
+  assert.deepEqual(parseMiningLog("2026-10-11T01:10:00Z mining loop start\n"), { found: 0 });
+  assert.deepEqual(parseMiningLog(""), { found: 0 });
+});
+
+test("the home screen is told what the node is doing, with the one thing to do about it", async () => {
+  const { host, state } = scripted({ listen: 14001, rpc: 18080 });
+  const manager = new NodeManager(host);
+  const reads = { health: async () => ({ height: 12n, bestHeaderHeight: 12n }) };
+  // Stopped: say so, and offer the way out.
+  const [stopped] = await nodeNotices(manager, reads, "Nexus");
+  assert.match(stopped!.text, /Your node is stopped/);
+  assert.equal(stopped!.action?.label, "Start node");
+  await stopped!.action!.run();
+  assert.equal(state.running, true);
+  // In sync and idle: nothing to say.
+  assert.deepEqual(await nodeNotices(manager, reads, "Nexus"), []);
+  // Behind: the numbers shown may be too.
+  const behind = { health: async () => ({ height: 12n, bestHeaderHeight: 5000n }) };
+  assert.deepEqual((await nodeNotices(manager, behind, "Nexus")).map((n) => n.text), [`Nexus is syncing · 12 of ${(5000).toLocaleString()}. Balances may be behind.`]);
+  // A chain this node does not host cannot be read at all.
+  assert.deepEqual((await nodeNotices(manager, reads, "Nexus/testnet")).map((n) => n.text), ["Your node does not host Nexus/testnet."]);
+  // Mining is said wherever the person is.
+  state.topology!.mine = { workers: 1, recipients: {} };
+  state.mining = true;
+  assert.deepEqual((await nodeNotices(manager, reads, "Nexus")).map((n) => n.text), ["Mining on this Mac."]);
 });

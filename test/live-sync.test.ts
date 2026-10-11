@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startApp } from "../src/app.ts";
 import { NodeManager } from "../src/node-manager.ts";
-import { bin, button, freePort, harnessHost, input, installPage, pageText, shows, until } from "./helpers/real-node.ts";
+import { balanceShown, bin, button, freePort, harnessHost, input, installPage, pageText, press, shows, until } from "./helpers/real-node.ts";
 
 const live = process.env.LATTICE_LIVE === "1" && !!bin;
 
@@ -37,7 +37,7 @@ test("live: the app's node syncs Nexus from its built-in peers, and the wallet r
 
     button("Node").click();
     await shows(/Your node/);
-    button("Start").click();
+    await press("Start node");
     // Headers arrive ahead of execution: the screen says how far along it is.
     await shows(/Nexussyncing · [\d,]+ of [\d,]+/, 300_000);
     const [early] = await manager.status();
@@ -50,14 +50,14 @@ test("live: the app's node syncs Nexus from its built-in peers, and the wallet r
     // A new account holds nothing on the real chain; the read is answered by this node.
     button("Back to wallet").click();
     await until(() => {
-      if (/Balance0Account 1/.test(pageText())) return true;
+      if (balanceShown() === "0") return true;
       button("Refresh balance").click();
       return undefined;
     }, "a balance read from the syncing node");
 
     button("Node").click();
     await shows(/Your node/);
-    button("Stop").click();
+    await press("Stop node");
     await shows(/Nexusstopped/);
   } catch (e) {
     try {

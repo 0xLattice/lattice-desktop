@@ -38,6 +38,8 @@ export interface HostOps {
   writeTopology(topology: Topology): Promise<void>;
   /** The bundled GPU mining worker's path, or null in a build without one. */
   gpuWorker(): Promise<string | null>;
+  /** The end of the mining loop's log (`<root>/log/mine.log`), "" when there is none. */
+  miningLog(): Promise<string>;
 }
 
 /** The node settings the app exposes. */
@@ -141,6 +143,17 @@ export interface MiningStatus {
 export function parseMiningStatus(stdout: string): MiningStatus {
   const pid = /^mining: running \(pid (\d+)\)/m.exec(stdout);
   return pid ? { running: true, pid: Number(pid[1]) } : { running: false };
+}
+
+/**
+ * What the mining loop's log says about its current run: the blocks the node
+ * accepted since the loop last started, and when the latest was.
+ */
+export function parseMiningLog(log: string): { found: number; last?: string } {
+  const run = log.slice(log.lastIndexOf("mining loop start") + 1);
+  const accepted = [...run.matchAll(/^(\S+) accepted tip=/gm)];
+  const last = accepted.at(-1)?.[1];
+  return { found: accepted.length, ...(last ? { last } : {}) };
 }
 
 export interface ChainStatus {
@@ -359,6 +372,11 @@ export class NodeManager {
 
   async stopMining(): Promise<void> {
     await this.#run("mine-stop");
+  }
+
+  /** The end of the mining loop's log. */
+  miningLog(): Promise<string> {
+    return this.#host.miningLog();
   }
 
   async status(): Promise<ChainStatus[]> {

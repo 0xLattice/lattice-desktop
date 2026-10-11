@@ -20,7 +20,7 @@ import { startApp } from "../src/app.ts";
 import { NodeManager, type Topology } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
-import { bin, button, freePort, gpuMiner, harnessHost, input, installPage, pageText, run, shows, until } from "./helpers/real-node.ts";
+import { bin, button, freePort, funded, gpuMiner, harnessHost, input, installPage, pageText, press, run, shows, until } from "./helpers/real-node.ts";
 
 /** Whether the GPU worker can search on this machine: a tiny range every hash of which wins. */
 async function gpuSearches(): Promise<boolean> {
@@ -70,31 +70,37 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     const searcher = () => document.querySelector('select[aria-label="Search with"]') as HTMLSelectElement;
     const workers = () => document.querySelector('input[aria-label="Workers"]') as HTMLInputElement;
     assert.equal(searcher().value, onGPU ? "gpu" : "cpu");
-    assert.equal(workers().disabled, onGPU);
+    // A worker count is a processor's setting: it is not shown for the graphics chip.
+    const workersShown = () => !(workers().parentElement as HTMLElement).hidden;
+    assert.equal(workersShown(), !onGPU);
     assert.match(pageText(), /Chains mined are the chains hosted: Nexus\./);
     button("Start mining").click();
     await shows(/Start the node first: mining runs on it/);
     assert.deepEqual(await manager.miningStatus(), { running: false });
     button("Back").click();
     await shows(/Your node/);
-    button("Start").click();
-    await shows(/Nexusactive/);
+    await press("Start node");
+    await shows(/Nexusin sync/);
 
     // ---- mine: the wallet's balance grows with no other miner ----
     button("Mining").click();
     await shows(/Statusnot mining/);
     button("Start mining").click();
-    await shows(/Statusmining \(pid \d+\)/);
+    await shows(/Statusmining on the (graphics chip|processor)/);
     assert.deepEqual(topology().mine, { worker: onGPU ? gpuMiner : "cpu", workers: 1, recipients: { Nexus: first } });
     console.log(`[desktop e2e] mining on the ${onGPU ? "graphics chip" : "processor"}`);
+    // Proof it is working, on the screen that started it: blocks found, and when.
+    await shows(/This run[\d,]+ blocks? found · last at /);
     button("Back").click();
-    await shows(/Your node/);
+    await shows(/Miningon/);
     button("Back to wallet").click();
     await until(() => {
-      if (/Balance[\d,]*[1-9]/.test(pageText())) return true;
+      if (funded()) return true;
       button("Refresh balance").click();
       return undefined;
     }, "mined funds in the wallet");
+    // And said wherever the person is.
+    await shows(/Mining on this Mac\./);
 
     // ---- pay a second account instead: saved while mining, the loop restarts ----
     const picker = document.querySelector("select.account-picker") as HTMLSelectElement;
@@ -116,11 +122,11 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     assert.equal(searcher().value, onGPU ? "gpu" : "cpu");
     searcher().value = "cpu";
     searcher().dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-    assert.equal(workers().disabled, false);
+    assert.equal(workersShown(), true);
     workers().value = "2";
-    button("Save").click();
+    button("Apply changes").click();
     await until(() => (topology().mine?.recipients?.Nexus === second ? true : undefined), "the new recipient saved");
-    await shows(/Statusmining \(pid \d+\)/);
+    await shows(/Statusmining on the (graphics chip|processor)/);
     assert.deepEqual(topology().mine, { worker: "cpu", workers: 2, recipients: { Nexus: second } });
     await until(async () => ((await balance(second)) > 0n ? true : undefined), "blocks paying the second account");
 
@@ -136,7 +142,7 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     await shows(/Statusmining/);
     button("Back").click();
     await shows(/Your node/);
-    button("Stop").click();
+    await press("Stop node");
     await shows(/Nexusstopped/);
     assert.deepEqual(await manager.miningStatus(), { running: false });
   } catch (e) {

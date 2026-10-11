@@ -15,7 +15,7 @@ import { startApp } from "../src/app.ts";
 import { NodeManager } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader, activeDeposits } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
-import { bin, button, freePort, harnessHost, input, installPage, mine, pageText, run, shows, until } from "./helpers/real-node.ts";
+import { bin, button, freePort, funded, harnessHost, input, installPage, mine, pageText, run, shows, until } from "./helpers/real-node.ts";
 
 const PASSWORD = "correct horse battery";
 const CHILD = "Nexus/testnet";
@@ -84,7 +84,7 @@ test("the app: sell on the child chain, buy on the parent, withdraw", { skip: !b
     await openMenu();
     ([...document.querySelectorAll(".chain-menu-item")].find((entry) => entry.firstChild?.textContent === "testnet") as HTMLButtonElement).click();
     await until(() => (document.getElementById("net-badge")!.textContent === `${CHILD} ▾` ? true : undefined), "the wallet on the child chain");
-    await shows(/Balance[\d,]*[1-9]/);
+    await until(() => (funded() ? true : undefined), "a funded balance");
     dropOrder(dom, sell);
     await shows(/Review sell order/);
     assert.match(pageText(), /You lock5,000You ask700 on Nexus/);
