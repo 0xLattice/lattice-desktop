@@ -63,11 +63,11 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await shows(/Review/);
     const bob = importPrivateKey("b0".repeat(32)).address;
     input("recipient address (bafy…)").value = bob;
-    input("amount (units)").value = "1000";
+    (document.querySelector('input[aria-label="Amount"]') as HTMLInputElement).value = "1000";
     (document.querySelector("details.advanced input") as HTMLInputElement).value = "23";
     button("Review").click();
     await shows(/Sign & send/);
-    assert.match(pageText(), /Amount1,000 unitsNetwork fee23 unitsTotal1,023 units/);
+    assert.match(pageText(), /Amount1,000 on NexusNetwork fee23 on NexusTotal1,023 on Nexus/);
     button("Sign & send").click();
     await shows(/Admitted to the node's pool/);
     await mine(root, ownNode, { Nexus: address }, 1, height);
