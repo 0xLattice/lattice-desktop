@@ -77,7 +77,7 @@ if [ -n "$(git -C "$gpu_src" status --porcelain --untracked-files=normal)" ]; th
   exit 1
 fi
 if [ "${LATTICE_RELEASE:-0}" = 1 ]; then
-  (cd "$gpu_src" && RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-reproducible" cargo build --release --locked)
+  (cd "$gpu_src" && RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-reproducible" cargo rustc --release --locked -- -C strip=debuginfo -C link-arg=-Wl,-S)
 else
   (cd "$gpu_src" && cargo build --release --locked)
 fi
