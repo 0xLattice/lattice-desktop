@@ -17,6 +17,11 @@
 //! - `print_page`: the webview's print dialog (it has no `window.print`).
 //!
 //! On quit the shell stops the node with `lattice down`.
+//!
+//! On Windows the node runs in WSL (see `wsl`): the host root is inside the
+//! default distribution, and the CLI is run there.
+
+mod wsl;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -64,15 +69,25 @@ fn app_root(app: &AppHandle) -> Result<PathBuf> {
     Ok(app.path().data_dir().map_err(err)?.join("Lattice"))
 }
 
+/// The node's host root, as this process reads and writes it.
+#[cfg(not(windows))]
 fn host_root(app: &AppHandle) -> Result<PathBuf> {
     Ok(app_root(app)?.join("host"))
 }
 
-/// Where a package keeps the bundled binaries when they are not beside the
-/// app's executable: `<resources>/bin`, set once at startup. A Linux package
-/// installs its executable into a shared directory (/usr/bin), where a
-/// `lattice` beside it may be someone else's.
-static RESOURCE_BIN: OnceLock<PathBuf> = OnceLock::new();
+/// The node's host root, as this process reads and writes it: inside the
+/// WSL distribution the node runs in.
+#[cfg(windows)]
+fn host_root(_app: &AppHandle) -> Result<PathBuf> {
+    let session = wsl::session()?;
+    Ok(wsl::windows_path(&session.distro, &format!("{}/host", wsl::data_dir(&session))))
+}
+
+/// The package's resource directory, set once at startup. A package may keep
+/// the bundled binaries there instead of beside the app's executable, in
+/// `<resources>/bin`: a Linux package installs its executable into a shared
+/// directory (/usr/bin), where a `lattice` beside it may be someone else's.
+static RESOURCES: OnceLock<PathBuf> = OnceLock::new();
 
 /// A bundled binary: in the package's own `<resources>/bin` when it has one,
 /// otherwise beside the app's executable (Contents/MacOS in the .app,
@@ -80,7 +95,7 @@ static RESOURCE_BIN: OnceLock<PathBuf> = OnceLock::new();
 fn bundled(name: &str) -> Result<PathBuf> {
     let exe = std::env::current_exe().map_err(err)?;
     let beside = exe.parent().ok_or("no executable directory")?.join(name);
-    Ok(bundled_in(RESOURCE_BIN.get().map(PathBuf::as_path), name).unwrap_or(beside))
+    Ok(bundled_in(RESOURCES.get().map(|dir| dir.join("bin")).as_deref(), name).unwrap_or(beside))
 }
 
 fn bundled_in(resources: Option<&Path>, name: &str) -> Option<PathBuf> {
@@ -94,10 +109,29 @@ struct CommandResult {
     stderr: String,
 }
 
+/// The bundled CLI, ready for a verb's arguments, against `root`.
+#[cfg(not(windows))]
+fn lattice_command(root: &Path) -> Result<(Command, std::ffi::OsString)> {
+    Ok((Command::new(bundled("lattice")?), root.as_os_str().to_owned()))
+}
+
+/// The bundled CLI, ready for a verb's arguments, against `root`: the Linux
+/// binary inside the WSL distribution, told the root's Linux path.
+#[cfg(windows)]
+fn lattice_command(root: &Path) -> Result<(Command, std::ffi::OsString)> {
+    let session = wsl::session()?;
+    let linux_root = wsl::linux_path(&session.distro, root).ok_or("the host root is not inside WSL")?;
+    let binaries = wsl::install(&session, RESOURCES.get().ok_or("no resource directory")?)?;
+    let mut command = wsl::command();
+    command.args(["-d", &session.distro, "-e", &format!("{binaries}/lattice")]);
+    Ok((command, linux_root.into()))
+}
+
 fn run_lattice(root: &Path, verb: &str) -> Result<CommandResult> {
     let arguments = verb_arguments(verb).ok_or_else(|| format!("refused: lattice {verb}"))?;
     fs::create_dir_all(root).map_err(err)?;
-    let output = Command::new(bundled("lattice")?)
+    let (mut command, root) = lattice_command(root)?;
+    let output = command
         .args(arguments)
         .arg("--root")
         .arg(root)
@@ -105,8 +139,8 @@ fn run_lattice(root: &Path, verb: &str) -> Result<CommandResult> {
         .map_err(|e| format!("could not run the bundled lattice: {e}"))?;
     Ok(CommandResult {
         code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout: wsl::decode(&output.stdout),
+        stderr: wsl::decode(&output.stderr),
     })
 }
 
@@ -234,19 +268,39 @@ fn read_topology(app: AppHandle) -> Result<Option<Value>> {
 
 /// Writes `bytes` to `path` via a same-directory temp file and rename, with `mode`.
 fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("tmp");
     // A fresh file every time, so `mode` always applies (never a stale temp's).
     let _ = fs::remove_file(&tmp);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(&tmp)
-        .map_err(err)?;
+    let mut file = new_file(mode).open(&tmp).map_err(err)?;
     file.write_all(bytes).map_err(err)?;
-    file.sync_all().map_err(err)?;
+    synced(&file)?;
     fs::rename(&tmp, path).map_err(err)
+}
+
+/// Options for a file that must not exist yet, private to `mode` where the
+/// platform has file modes. On Windows a file is as private as its
+/// directory: the user's own profile, or their home inside WSL.
+fn new_file(mode: u32) -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    options
+}
+
+/// Flushed to disk before it is renamed into place. The WSL file share does
+/// not take a flush request, so on Windows a refusal is not an error.
+fn synced(file: &fs::File) -> Result<()> {
+    let flushed = file.sync_all();
+    if cfg!(windows) {
+        return Ok(());
+    }
+    flushed.map_err(err)
 }
 
 /// The lattice.json fields the page may set. Everything else (public
@@ -382,9 +436,10 @@ fn store_path(app: &AppHandle, key: &str) -> Result<PathBuf> {
         return Err(format!("refused: store key {key}"));
     }
     let dir = app_root(app)?.join("wallet");
+    fs::create_dir_all(&dir).map_err(err)?;
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::create_dir_all(&dir).map_err(err)?;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(err)?;
     }
     Ok(dir.join(format!("{key}.json")))
@@ -424,15 +479,14 @@ fn backup_name(name: &str) -> Result<&str> {
 
 /// Write `text` to a new file in `dir` (never over an existing one), 0600.
 fn write_new(dir: &Path, name: &str, text: &str) -> Result<PathBuf> {
-    use std::os::unix::fs::OpenOptionsExt;
     let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "txt"));
     for n in 0..100 {
         let file = if n == 0 { name.to_string() } else { format!("{stem}-{n}.{ext}") };
         let path = dir.join(file);
-        match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+        match new_file(0o600).open(&path) {
             Ok(mut f) => {
                 f.write_all(text.as_bytes()).map_err(err)?;
-                f.sync_all().map_err(err)?;
+                synced(&f)?;
                 return Ok(path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -550,7 +604,7 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle();
             if let Ok(resources) = handle.path().resource_dir() {
-                let _ = RESOURCE_BIN.set(resources.join("bin"));
+                let _ = RESOURCES.set(resources);
             }
             // Only a running node (it keeps a cookie; it removes it at exit)
             // is pinned at launch; otherwise the first `up` pins.
@@ -590,6 +644,8 @@ pub fn run() {
                     let _ = run_lattice(&root, "mine-stop");
                     let _ = run_lattice(&root, "down");
                 }
+                #[cfg(windows)]
+                wsl::release();
             }
         });
 }
@@ -610,8 +666,11 @@ mod tests {
         let b = write_new(&dir, "b.txt", "two").unwrap();
         assert_ne!(a, b);
         assert_eq!(fs::read_to_string(&a).unwrap(), "one", "never overwritten");
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(fs::metadata(&b).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&b).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -744,6 +803,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn atomic_writes_take_their_mode_even_over_a_stale_temp() {
         use std::os::unix::fs::PermissionsExt;
