@@ -49,10 +49,12 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     assert.equal(document.querySelector(".balance-value .v")!.classList.contains("unread"), true);
     await press("Start node");
     await until(() => (balanceShown() === "0" ? true : undefined), "a balance read from the started node");
-    await until(() => (document.querySelector(".notice") ? undefined : true), "the notice to clear once the node is in sync");
+    // This node has no peers (the test's own choice): running, the home screen says so, and nothing else.
+    await until(() => (/^Your node is set to connect to no one/.test(document.querySelector(".notices")?.textContent ?? "") ? true : undefined), "the stopped notice to give way");
+    assert.equal(document.querySelectorAll(".notice").length, 1);
     // The Node screen says the same in its own terms, with one button for the one thing to do.
     button("Node").click();
-    await shows(/Nexusin sync · block 0Miningoff/);
+    await shows(/Nexusrunning · block 0PeersnoneMiningoff/);
     assert.deepEqual([...document.querySelectorAll("#view button")].map((item) => item.textContent).slice(0, 2), ["Stop node", "Mining"]);
     button("Back to wallet").click();
     await shows(/Balance/);
@@ -112,7 +114,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await mine(root, ownNode, { Nexus: address, "Nexus/testnet": address }, 3, height);
     await until(async () => ((await manager.status()).every((c) => c.state === "active") ? true : undefined), "both chains active");
     button("Node").click();
-    await shows(/Nexus\/testnetin sync/);
+    await shows(/Nexus\/testnetrunning/);
     button("Node settings").click();
     await shows(/Chains this node hosts/);
     // The chain is listed with its box ticked: hosting it or not is a tick, not a typed path.
@@ -121,7 +123,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     hosted.checked = false;
     button("Save").click();
     await shows(/Your node/);
-    await shows(/Nexusin sync/);
+    await shows(/Nexusrunning/);
     assert.deepEqual(await manager.chains(), ["Nexus"]);
     button("Back to wallet").click();
     await shows(/Balance/);
@@ -159,7 +161,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await shows(/Your node/);
     await until(() => (/Nexus(stopped|starting)/.test(pageText()) ? true : undefined), "the node screen to show it down");
     await press("Start node");
-    await shows(/Nexusin sync/);
+    await shows(/Nexusrunning/);
     button("Back to wallet").click();
     await until(() => {
       if (funded()) return true;

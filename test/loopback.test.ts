@@ -44,6 +44,8 @@ test("a chain's state is said in a user's words, not the node's", () => {
   assert.equal(statusLine({ path: "Nexus", state: "active", height: 1234n, mempool: 2 }), `in sync · block ${(1234).toLocaleString()} · 2 pending`);
   assert.equal(statusLine({ path: "Nexus", state: "active", height: 1234n, bestHeaderHeight: 5000n }), `syncing · ${(1234).toLocaleString()} of ${(5000).toLocaleString()}`);
   assert.equal(statusLine({ path: "Nexus", state: "active", height: 5000n, bestHeaderHeight: 5000n }), `in sync · block ${(5000).toLocaleString()}`);
+  // "In sync" is a claim about the network: without peers the node is only running.
+  assert.equal(statusLine({ path: "Nexus", state: "active", height: 0n }, false), "running · block 0");
   assert.equal(parsePeersField("default", "x"), "default");
   assert.equal(parsePeersField("none", ""), "none");
   assert.deepEqual(parsePeersField("custom", " a@h:1\n b@h:2, "), ["a@h:1", "b@h:2"]);

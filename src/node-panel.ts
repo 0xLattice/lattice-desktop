@@ -10,6 +10,8 @@ export interface NodeReads {
   health(path: string): Promise<{ height?: bigint; bestHeaderHeight?: bigint }>;
   /** The child chains `path`'s latest block carries, as full paths. */
   children(path: string): Promise<string[]>;
+  /** How many peers the node is connected to. */
+  peers(): Promise<number>;
   cookie(): Promise<string | null>;
   /** The wallet's accounts, the active one first: who mining can pay. Empty while locked. */
   accounts(): Promise<{ label: string; address: string }[]>;
@@ -18,7 +20,7 @@ export interface NodeReads {
 const POLL_MS = 3000;
 
 /** A chain's state in the words of someone using the app, not running the node. */
-export function statusLine(s: ChainStatus): string {
+export function statusLine(s: ChainStatus, connected = true): string {
   if (s.state === "down") return "stopped";
   if (s.state === "unreachable") return "starting…";
   if (s.state === "awaitingGenesis") return "waiting for its first block";
@@ -27,7 +29,8 @@ export function statusLine(s: ChainStatus): string {
   if (s.state !== "active") return s.state;
   const height = s.height === undefined ? "" : ` · block ${s.height.toLocaleString()}`;
   const pool = s.mempool ? ` · ${s.mempool} pending` : "";
-  return `in sync${height}${pool}`;
+  // "In sync" is a claim about the network; a node with no peers cannot make it.
+  return `${connected ? "in sync" : "running"}${height}${pool}`;
 }
 
 /** The peers field as typed: blank = the node's built-in peers. */
@@ -61,7 +64,14 @@ export interface Notice {
  * starting, waiting, or syncing; and that it is mining, when it is. Nothing
  * when the node is in sync and idle.
  */
-export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "health">, chain: string): Promise<Notice[]> {
+/** What a node with no peers should say: it runs, and sees only itself. */
+export function alone(peers: NodePrefs["peers"]): string {
+  return peers === "none"
+    ? "Your node is set to connect to no one, so it sees only its own blocks. To join the network, choose its peers in Node settings."
+    : "Your node has no peers yet, so it cannot see the network. It keeps trying.";
+}
+
+export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "health" | "peers">, chain: string): Promise<Notice[]> {
   const chains = await withSync(await manager.status(), reads);
   if (chains.every((c) => c.state === "down")) {
     return [{ text: "Your node is stopped, so nothing can be read or sent.", action: { label: "Start node", run: () => manager.start() } }];
@@ -75,6 +85,11 @@ export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "
   else if (shown.state === "awaitingGenesis") notices.push({ text: `${chain} is waiting for its first block on your node.` });
   else if (line(shown).startsWith("syncing")) notices.push({ text: `${chain} is ${line(shown)}. Balances may be behind.` });
   else if (root && root !== shown && line(root).startsWith("syncing")) notices.push({ text: `${root.path} is ${line(root)}. ${chain} follows it.` });
+  // Running is not the same as connected: a node with no peers answers every
+  // read, at whatever height it has, and would otherwise look in sync.
+  if (!chains.some((c) => c.state === "unreachable") && (await reads.peers().catch(() => undefined)) === 0) {
+    notices.push({ text: alone((await manager.prefs()).peers) });
+  }
   if ((await manager.miningStatus().catch(() => ({ running: false }))).running) notices.push({ text: "Mining on this Mac." });
   return notices;
 }
@@ -84,6 +99,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
   const toast = h("div", { class: "toast", role: "status" });
   // One button, saying the one thing it will do: the node is either running or it is not.
   const toggle = h("button", { class: "block" }, "…") as HTMLButtonElement;
+  const lonely = h("p", { class: "warn", role: "status", hidden: "true" });
   let running = false;
   let busy = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -93,16 +109,21 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
   const refresh = async () => {
     clearTimeout(timer);
     try {
-      const [chains, mining] = await Promise.all([
+      const [chains, mining, prefs] = await Promise.all([
         manager.status().then((status) => withSync(status, reads)),
         manager.miningStatus().catch(() => ({ running: false })),
+        manager.prefs(),
       ]);
       running = chains.some((c) => c.state !== "down");
+      const peers = running ? await reads.peers().catch(() => undefined) : undefined;
+      lonely.hidden = peers !== 0;
+      lonely.textContent = peers === 0 ? alone(prefs.peers) : "";
       table.replaceChildren(
         ...chains.map((c) => h("div", { class: "row" },
           h("span", { class: "k mono" }, c.path),
-          h("span", { class: "v" }, statusLine(c)),
+          h("span", { class: "v" }, statusLine(c, peers !== 0)),
         )),
+        ...(peers === undefined ? [] : [h("div", { class: "row" }, h("span", { class: "k" }, "Peers"), h("span", { class: "v" }, peers === 0 ? "none" : peers.toLocaleString()))]),
         h("div", { class: "row" }, h("span", { class: "k" }, "Mining"), h("span", { class: "v" }, mining.running ? "on" : "off")),
       );
     } catch (e) {
@@ -138,6 +159,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
       h("h1", {}, "Your node"),
       h("p", { class: "muted" }, "A full Lattice node on this Mac. The wallet reads and sends only through it."),
       table,
+      lonely,
       toggle,
       toast,
       h("button", { class: "btn block", onclick: leave(() => miningScreen(manager, reads, again, onPrefsChanged)) }, "Mining"),

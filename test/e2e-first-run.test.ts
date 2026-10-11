@@ -38,6 +38,7 @@ test("the app starts its node when it opens: a new wallet lands on a balance, no
     }, "a balance read with no one starting the node");
     assert.equal((await manager.status())[0]?.state, "active");
     assert.doesNotMatch(pageText(), /Your node is stopped/);
+    await shows(/Your node is set to connect to no one, so it sees only its own blocks/);
     assert.equal(document.querySelector("#settings-button .brand-label")?.textContent, "Settings");
   } catch (e) {
     try {

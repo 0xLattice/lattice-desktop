@@ -7,7 +7,7 @@ import {
   NodeManager, LifecycleError, checkMining, checkPrefs, parseMiningLog, parseMiningStatus, parseStatus, prefsOf, searcherOf, withPrefs, extensionOrigin,
   type HostOps, type LifecycleVerb, type Topology, type NodePrefs,
 } from "../src/node-manager.ts";
-import { miningChoices, nodeNotices } from "../src/node-panel.ts";
+import { alone, miningChoices, nodeNotices } from "../src/node-panel.ts";
 
 const PEER = `${"ab".repeat(32)}@node.example.org:4001`;
 
@@ -267,7 +267,8 @@ test("the mining log says how the current run is going", () => {
 test("the home screen is told what the node is doing, with the one thing to do about it", async () => {
   const { host, state } = scripted({ listen: 14001, rpc: 18080 });
   const manager = new NodeManager(host);
-  const reads = { health: async () => ({ height: 12n, bestHeaderHeight: 12n }) };
+  let peers = 3;
+  const reads = { health: async () => ({ height: 12n, bestHeaderHeight: 12n }), peers: async () => peers };
   // Stopped: say so, and offer the way out.
   const [stopped] = await nodeNotices(manager, reads, "Nexus");
   assert.match(stopped!.text, /Your node is stopped/);
@@ -277,10 +278,18 @@ test("the home screen is told what the node is doing, with the one thing to do a
   // In sync and idle: nothing to say.
   assert.deepEqual(await nodeNotices(manager, reads, "Nexus"), []);
   // Behind: the numbers shown may be too.
-  const behind = { health: async () => ({ height: 12n, bestHeaderHeight: 5000n }) };
+  const behind = { health: async () => ({ height: 12n, bestHeaderHeight: 5000n }), peers: async () => 3 };
   assert.deepEqual((await nodeNotices(manager, behind, "Nexus")).map((n) => n.text), [`Nexus is syncing · 12 of ${(5000).toLocaleString()}. Balances may be behind.`]);
   // A chain this node does not host cannot be read at all.
   assert.deepEqual((await nodeNotices(manager, reads, "Nexus/testnet")).map((n) => n.text), ["Your node does not host Nexus/testnet."]);
+  // Running is not connected: with no peers it sees only itself, and says which kind of alone it is.
+  peers = 0;
+  assert.deepEqual((await nodeNotices(manager, reads, "Nexus")).map((n) => n.text), [alone("default")]);
+  assert.match(alone("default"), /no peers yet/);
+  state.topology!.peers = [];
+  assert.deepEqual((await nodeNotices(manager, reads, "Nexus")).map((n) => n.text), [alone("none")]);
+  assert.match(alone("none"), /set to connect to no one.*Node settings/);
+  peers = 3;
   // Mining is said wherever the person is.
   state.topology!.mine = { workers: 1, recipients: {} };
   state.mining = true;

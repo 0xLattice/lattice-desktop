@@ -67,6 +67,10 @@ export async function startApp(host: AppHost) {
   const reads = {
     health: (path: string) => reader(ownNode, path.split("/"), fetch).health(),
     cookie: host.nodeCookie,
+    peers: async () => {
+      const answer = await fetch(`${ownNode}/api/peers`);
+      return Number(((await answer.json()) as { count?: number }).count ?? 0);
+    },
     children: async (path: string) => {
       const chain = reader(ownNode, path.split("/"), fetch);
       const latest = await chain.latestBlock();

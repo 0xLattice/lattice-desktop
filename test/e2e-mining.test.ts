@@ -80,7 +80,7 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     button("Back").click();
     await shows(/Your node/);
     await press("Start node");
-    await shows(/Nexusin sync/);
+    await shows(/Nexusrunning/);
 
     // ---- mine: the wallet's balance grows with no other miner ----
     button("Mining").click();

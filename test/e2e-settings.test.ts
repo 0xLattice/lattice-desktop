@@ -55,7 +55,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     button("Node").click();
     await shows(/Your node/);
     await press("Start node");
-    await shows(/Nexusin sync/);
+    await shows(/Nexusrunning/);
     button("Node settings").click();
     await shows(/Chains this node hosts/);
     const before = readFileSync(join(root, "lattice.json"), "utf8");
@@ -109,7 +109,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
       return undefined;
     }, "a balance read on the new port");
     button("Node").click();
-    await shows(/Nexusin sync/);
+    await shows(/Nexusrunning/);
     button("Node settings").click();
     await shows(/Chains this node hosts/);
     assert.deepEqual([rpc().value, peerMode().value, peerList().value], [newRPC, "custom", peer]);
@@ -119,7 +119,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await shows(/Your node/);
     assert.deepEqual(topology().peers, []);
     assert.equal(reloads, 1, "only a port change reloads");
-    await shows(/Nexusin sync/);
+    await shows(/Nexusrunning/);
 
     // ---- a child chain exists (made with the CLI), and mining is set up while only Nexus is hosted ----
     await run(join(bin!, "lattice"), ["child", "create", CHILD, "--root", root, "--reward", "100000"]);
@@ -130,7 +130,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     hostBox(CHILD)!.checked = false;
     button("Save").click();
     await shows(/Your node/);
-    await shows(/Nexusin sync/);
+    await shows(/Nexusrunning/);
     button("Mining").click();
     await shows(/Chains mined are the chains hosted: Nexus\./);
     const recipient = (chain: string) => document.querySelector(`select[aria-label="Recipient on ${chain}"]`) as HTMLSelectElement | null;
@@ -205,7 +205,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     button("Unlock").click();
     await shows(/Balance/);
     button("Node").click();
-    await shows(/Nexusin sync/);
+    await shows(/Nexusrunning/);
     button("Node settings").click();
     await shows(/Chains this node hosts/);
     assert.deepEqual([rpc().value, peerMode().value, peerList().value, hostBox(CHILD)?.checked ?? false], [newRPC, "custom", peer, false]);
