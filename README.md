@@ -176,6 +176,20 @@ publish artifacts or create a project signing key.
   and the shell ran the bundled CLI and node. It cannot see or click the
   window, so the camera, printing and file drops on the real window are
   checked by hand.
+- The app in its own window, on Linux and Windows:
+  `LATTICE_UI_APP=<the app's executable> node --test test/ui/desktop.ui.test.mjs`
+  drives the packaged app through WebDriver
+  ([tauri-driver](https://tauri.app/develop/tests/webdriver/)) with real
+  clicks and keys, and nothing standing in for the shell or the node. It
+  makes a wallet (a password too short, two that differ), reads a balance
+  from the node the app started, fails to send four ways (a bad address, the
+  account's own, a bad amount, more than there is), is refused mining while
+  the node is stopped, mines, sends a transfer and sees it confirmed, locks
+  and is refused a wrong password, has node settings refuse bad ports, and
+  relaunches to find everything as it was left. The Linux and Windows
+  repositories run it in CI against the installed package. macOS has no
+  WebDriver for its webview, so there the page is covered by the headless
+  tests above and the window by hand.
 - Live, opt-in: `LATTICE_LIVE=1 LATTICE_NODE_BIN=… npm test` starts the app's
   node on the real network with its built-in peers and watches it sync. It is
   read-only and needs the network, so CI does not run it.
