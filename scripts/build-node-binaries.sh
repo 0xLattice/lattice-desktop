@@ -16,11 +16,15 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 commit="$(tr -d '[:space:]' < "$here/NODE_COMMIT")"
 src="${1:-$here/.build-node}"
+if [ "${LATTICE_RELEASE:-0}" = 1 ]; then
+  src="${LATTICE_NODE_SOURCE:-/tmp/lattice-release-node}"
+  case "$src" in /tmp/lattice-release-*|/private/tmp/lattice-release-*) ;; *) echo 'Release node source must use a neutral /tmp/lattice-release-* path' >&2; exit 1;; esac
+fi
 
 if [ ! -d "$src/.git" ] && [ ! -f "$src/.git" ]; then
   git clone --quiet https://github.com/adalinxx/lattice-node.git "$src"
 fi
-if [ -z "${1:-}" ]; then
+if [ -z "${1:-}" ] || [ "${LATTICE_RELEASE:-0}" = 1 ]; then
   git -C "$src" fetch --quiet origin "$commit"
   git -C "$src" checkout --quiet --detach "$commit"
 fi
@@ -29,15 +33,24 @@ if [ "$head" != "$commit" ] && [ "${ALLOW_OTHER_COMMIT:-0}" != 1 ]; then
   echo "lattice-node checkout is at $head, not NODE_COMMIT $commit" >&2
   exit 1
 fi
-if [ -n "$(git -C "$src" status --porcelain --untracked-files=no)" ]; then
+if [ -n "$(git -C "$src" status --porcelain --untracked-files=normal)" ]; then
   echo "lattice-node checkout has local changes; refusing to bundle it" >&2
   exit 1
 fi
 
 # SwiftPM honours only the last --product flag, so build each one.
 products="lattice lattice-node lattice-mining-coordinator lattice-miner"
+flags=(--force-resolved-versions)
+if [ "${LATTICE_RELEASE:-0}" = 1 ]; then
+  flags+=(--disable-index-store
+    -Xswiftc -file-prefix-map -Xswiftc "$src=/src/lattice-node"
+    -Xswiftc -debug-prefix-map -Xswiftc "$src=/src/lattice-node"
+    -Xswiftc -prefix-serialized-debugging-options
+    -Xcc "-ffile-prefix-map=$src=/src/lattice-node"
+    -Xcxx "-ffile-prefix-map=$src=/src/lattice-node")
+fi
 for product in $products; do
-  (cd "$src" && swift build -c debug --product "$product")
+  (cd "$src" && swift build -c debug "${flags[@]}" --product "$product")
 done
 
 triple="$(rustc -vV | sed -n 's/^host: //p')"
@@ -58,11 +71,16 @@ if [ ! -d "$gpu_src/.git" ]; then
 fi
 git -C "$gpu_src" fetch --quiet origin "$gpu_commit"
 git -C "$gpu_src" checkout --quiet --detach "$gpu_commit"
-if [ -n "$(git -C "$gpu_src" status --porcelain --untracked-files=no)" ]; then
+if [ -n "$(git -C "$gpu_src" status --porcelain --untracked-files=normal)" ]; then
   echo "lattice-miner-gpu checkout has local changes; refusing to bundle it" >&2
   exit 1
 fi
 (cd "$gpu_src" && cargo build --release --locked)
 install -m 0755 "$gpu_src/target/release/lattice-miner-gpu" "$out/lattice-miner-gpu-$triple"
 printf '%s\n' "$gpu_commit" > "$out/MINER_GPU_COMMIT"
+if [ "${LATTICE_RELEASE:-0}" = 1 ]; then
+  for name in $products lattice-miner-gpu; do
+    strip -S "$out/$name-$triple"
+  done
+fi
 echo "staged $products ($head, debug, $triple) and lattice-miner-gpu ($gpu_commit, release) in $out"

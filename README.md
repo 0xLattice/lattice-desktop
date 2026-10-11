@@ -112,30 +112,12 @@ The same script builds the GPU mining worker, `lattice-miner-gpu`, from
 the commit pinned in `MINER_GPU_COMMIT`, optimized: it is a plain compute
 program with no node code in it. It needs a Rust toolchain, as the shell does.
 
-## Signing and notarization (maintainer, Developer ID required)
+## Direct-download macOS releases
 
-The repository produces an **unsigned** development build. To distribute it:
-
-1. Sign the nested binaries first, then the app, with the hardened runtime:
-   ```sh
-   APP=src-tauri/target/release/bundle/macos/Lattice.app
-   ID="Developer ID Application: <Name> (<TEAMID>)"
-   for binary in lattice-node lattice lattice-mining-coordinator lattice-miner lattice-miner-gpu; do
-     codesign --force --options runtime --timestamp --sign "$ID" "$APP/Contents/MacOS/$binary"
-   done
-   codesign --force --options runtime --timestamp --sign "$ID" "$APP"
-   ```
-   Alternatively, set `bundle.macOS.signingIdentity` (or `APPLE_SIGNING_IDENTITY`)
-   and run `npx tauri build --bundles app,dmg`. Tauri signs the sidecars too.
-2. Notarize and staple:
-   ```sh
-   ditto -c -k --keepParent "$APP" Lattice.zip
-   xcrun notarytool submit Lattice.zip --apple-id <id> --team-id <TEAMID> --password <app-specific-pw> --wait
-   xcrun stapler staple "$APP"
-   ```
-   With Tauri, you can instead set `APPLE_ID`, `APPLE_PASSWORD` and
-   `APPLE_TEAM_ID` and it notarizes during the build.
-3. Check the result with `spctl -a -vv "$APP"`.
+See [macOS release instructions](docs/macos-release.md) for the ad-hoc-signed
+Apple Silicon build, checksum verification, per-app Gatekeeper exception,
+repeat-build comparison, and publication gates. Release preparation does not
+publish artifacts or create a project signing key.
 
 ## Tests
 

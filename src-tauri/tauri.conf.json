@@ -30,7 +30,7 @@
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.png"],
     "externalBin": ["binaries/lattice", "binaries/lattice-node", "binaries/lattice-mining-coordinator", "binaries/lattice-miner", "binaries/lattice-miner-gpu"],
     "macOS": {
-      "minimumSystemVersion": "13.0",
+      "minimumSystemVersion": "15.0",
       "entitlements": "Entitlements.plist"
     }
   }
