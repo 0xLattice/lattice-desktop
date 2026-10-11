@@ -34,7 +34,20 @@ use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow};
 /// cookie go only to this port.
 struct PinnedPort(Mutex<Option<u16>>);
 
-const VERBS: [&str; 4] = ["init", "up", "down", "status"];
+/// The CLI invocations the page may ask for, by name: the node's lifecycle,
+/// and the mining loop's (`lattice mine start|stop|status`).
+fn verb_arguments(verb: &str) -> Option<&'static [&'static str]> {
+    match verb {
+        "init" => Some(&["init"]),
+        "up" => Some(&["up"]),
+        "down" => Some(&["down"]),
+        "status" => Some(&["status"]),
+        "mine-start" => Some(&["mine", "start"]),
+        "mine-stop" => Some(&["mine", "stop"]),
+        "mine-status" => Some(&["mine", "status"]),
+        _ => None,
+    }
+}
 const STORE_KEYS: [&str; 2] = ["vault", "settings"];
 const MAX_NODE_BODY: u64 = 8 * 1024 * 1024;
 
@@ -68,12 +81,10 @@ struct CommandResult {
 }
 
 fn run_lattice(root: &Path, verb: &str) -> Result<CommandResult> {
-    if !VERBS.contains(&verb) {
-        return Err(format!("refused: lattice {verb}"));
-    }
+    let arguments = verb_arguments(verb).ok_or_else(|| format!("refused: lattice {verb}"))?;
     fs::create_dir_all(root).map_err(err)?;
     let output = Command::new(bundled("lattice")?)
-        .arg(verb)
+        .args(arguments)
         .arg("--root")
         .arg(root)
         .output()
@@ -182,10 +193,54 @@ fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 }
 
 /// The lattice.json fields the page may set. Everything else (public
-/// listeners, external address, mining, ...) is the operator's, edited by
-/// hand: the page cannot expose the node or point `node_http` elsewhere
-/// beyond choosing the node's own loopback RPC port.
+/// listeners, external address, ...) is the operator's, edited by hand: the
+/// page cannot expose the node or point `node_http` elsewhere beyond choosing
+/// the node's own loopback RPC port. Of `mine` it may set only who is paid
+/// and how many workers search (see `merged_mine`).
 const MANAGED: [&str; 5] = ["rpc", "listen", "peers", "hostedChains", "rpcAllowedOrigins"];
+
+/// The most CPU workers the page may ask for.
+const MAX_WORKERS: u64 = 64;
+
+/// A chain path as lattice.json keys mining maps: `Nexus` or `Nexus/a/b`.
+fn is_chain_path(value: &str) -> bool {
+    let mut parts = value.split('/');
+    parts.next() == Some("Nexus")
+        && parts.all(|p| !p.is_empty() && p.len() <= 64 && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+}
+
+/// An account address: a base32 CID, as the wallet shows it.
+fn is_address(value: &str) -> bool {
+    (40..=128).contains(&value.len())
+        && value.starts_with('b')
+        && value.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// `current`'s mining section with the page's choices applied: the worker
+/// count and each chain's recipient, nothing else. The worker executable
+/// (`mine.worker`), which the CLI runs, and every tuning field stay as the
+/// operator left them: the page can never name a program to run.
+fn merged_mine(current: Option<&Value>, update: &Value) -> Result<Value> {
+    let update = update.as_object().ok_or("mine must be an object")?;
+    if let Some(key) = update.keys().find(|k| !["workers", "recipients"].contains(&k.as_str())) {
+        return Err(format!("refused: lattice.json field mine.{key}"));
+    }
+    let workers = update.get("workers").and_then(Value::as_u64).filter(|n| (1..=MAX_WORKERS).contains(n))
+        .ok_or(format!("mine.workers must be a whole number from 1 to {MAX_WORKERS}"))?;
+    let recipients = update.get("recipients").and_then(Value::as_object).ok_or("mine.recipients must map chain paths to addresses")?;
+    for (chain, address) in recipients {
+        if !is_chain_path(chain) {
+            return Err(format!("not a chain path: {chain}"));
+        }
+        if !address.as_str().is_some_and(is_address) {
+            return Err(format!("not an address for {chain}"));
+        }
+    }
+    let mut out = current.and_then(Value::as_object).cloned().unwrap_or_default();
+    out.insert("workers".into(), Value::from(workers));
+    out.insert("recipients".into(), Value::Object(recipients.clone()));
+    Ok(Value::Object(out))
+}
 
 /// A browser origin as the node's `rpcAllowedOrigins` lists it:
 /// `scheme://host[:port]`, nothing after.
@@ -205,7 +260,7 @@ fn is_origin(value: &str) -> bool {
 /// `hostedChains` removes it); anything else from the page is refused.
 fn merged_topology(current: Value, update: &Value) -> Result<Value> {
     let update = update.as_object().ok_or("lattice.json must be an object")?;
-    if let Some(key) = update.keys().find(|k| !MANAGED.contains(&k.as_str())) {
+    if let Some(key) = update.keys().find(|k| !MANAGED.contains(&k.as_str()) && k.as_str() != "mine") {
         return Err(format!("refused: lattice.json field {key}"));
     }
     for port in ["rpc", "listen"] {
@@ -234,6 +289,11 @@ fn merged_topology(current: Value, update: &Value) -> Result<Value> {
                 out.remove(key);
             }
         }
+    }
+    // Mining is left as it is unless the page sends its part of it.
+    if let Some(mine) = update.get("mine") {
+        let merged = merged_mine(out.get("mine"), mine)?;
+        out.insert("mine".into(), merged);
     }
     Ok(Value::Object(out))
 }
@@ -448,9 +508,11 @@ pub fn run() {
         .expect("error while building the app")
         .run(|app, event| {
             if let RunEvent::Exit = event {
-                // A clean stop for the node this app runs (SIGTERM, then the
-                // CLI's own grace); a no-op when it is not running.
+                // A clean stop for the mining loop and the node this app
+                // runs (SIGTERM, then the CLI's own grace); each is a no-op
+                // when it is not running. Mining first: it mines on the node.
                 if let Ok(root) = host_root(app) {
+                    let _ = run_lattice(&root, "mine-stop");
                     let _ = run_lattice(&root, "down");
                 }
             }
@@ -479,11 +541,42 @@ mod tests {
     }
 
     #[test]
+    fn the_page_sets_only_who_mining_pays_and_how_many_workers() {
+        let address = "bafyreifrbp6x4ncfbqakwfcwfqkl7qhbsdeygsakjxixekwkdprbomyut4";
+        let current = serde_json::json!({ "rpc": 1, "listen": 2, "mine": { "worker": "/opt/gpu-miner", "batchSize": 5, "workers": 9, "recipients": { "Nexus": "old" } } });
+        let update = serde_json::json!({ "rpc": 1, "listen": 2, "mine": { "workers": 2, "recipients": { "Nexus": address, "Nexus/testnet": address } } });
+        let merged = merged_topology(current.clone(), &update).unwrap();
+        assert_eq!(merged["mine"], serde_json::json!({
+            "worker": "/opt/gpu-miner", "batchSize": 5, "workers": 2,
+            "recipients": { "Nexus": address, "Nexus/testnet": address },
+        }));
+        // Left out, mining is untouched.
+        let untouched = merged_topology(current.clone(), &serde_json::json!({ "rpc": 1, "listen": 2 })).unwrap();
+        assert_eq!(untouched["mine"], current["mine"]);
+        // The page never names the program the CLI runs, nor tunes the search.
+        for bad in [
+            serde_json::json!({ "workers": 1, "recipients": {}, "worker": "/tmp/evil" }),
+            serde_json::json!({ "workers": 1, "recipients": {}, "minWork": { "Nexus": "1" } }),
+            serde_json::json!({ "workers": 0, "recipients": {} }),
+            serde_json::json!({ "workers": 65, "recipients": {} }),
+            serde_json::json!({ "workers": 1 }),
+            serde_json::json!({ "workers": 1, "recipients": { "Nexus": "not an address" } }),
+            serde_json::json!({ "workers": 1, "recipients": { "../etc": address } }),
+            serde_json::json!({ "workers": 1, "recipients": { "Other": address } }),
+        ] {
+            let update = serde_json::json!({ "rpc": 1, "listen": 2, "mine": bad });
+            assert!(merged_topology(current.clone(), &update).is_err(), "{update}");
+        }
+    }
+
+    #[test]
     fn only_lifecycle_verbs_run() {
         let root = std::env::temp_dir().join("lattice-desktop-test-verbs");
-        for verb in ["mine", "tx", "wipe", "key", "--help", "init; rm -rf /"] {
+        for verb in ["mine", "mine-run", "mine run", "child", "tx", "wipe", "key", "--help", "init; rm -rf /"] {
             assert!(run_lattice(&root, verb).unwrap_err().starts_with("refused"));
         }
+        assert_eq!(verb_arguments("mine-start"), Some(&["mine", "start"][..]));
+        assert_eq!(verb_arguments("mine-stop"), Some(&["mine", "stop"][..]));
     }
 
     #[test]

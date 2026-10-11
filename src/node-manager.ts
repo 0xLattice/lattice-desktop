@@ -1,5 +1,6 @@
 // The app's node: one host root scaffolded and driven through the bundled
-// `lattice` CLI (init / up / down / status), exactly as an operator would.
+// `lattice` CLI (init / up / down / status, and mine start / stop / status),
+// exactly as an operator would.
 // `lattice up` spawns the signed `lattice-node` as a child; the app talks to
 // it only over its loopback RPC. Pure logic over injected host operations,
 // so the same code runs in the app and in the headless e2e harness.
@@ -13,10 +14,12 @@ export interface Topology {
   hostedChains?: string[];
   /** Browser origins allowed on the loopback operator port (e.g. a paired extension). */
   rpcAllowedOrigins?: string[];
+  /** The mining loop's settings. The app sets `workers` and `recipients`; the rest is the operator's. */
+  mine?: { workers?: number; recipients?: Record<string, string>; [field: string]: unknown };
   [field: string]: unknown;
 }
 
-export type LifecycleVerb = "init" | "up" | "down" | "status";
+export type LifecycleVerb = "init" | "up" | "down" | "status" | "mine-start" | "mine-stop" | "mine-status";
 
 export interface CommandResult {
   code: number;
@@ -84,6 +87,40 @@ export function checkPrefs(prefs: NodePrefs): string | undefined {
     listed.add(chain);
   }
   return undefined;
+}
+
+/** The mining settings the app exposes. */
+export interface MiningPrefs {
+  /** CPU workers searching in parallel. */
+  workers: number;
+  /** Who is paid each chain's block reward and fees, by chain path. A chain left out burns its payout. */
+  recipients: Record<string, string>;
+}
+
+export const MAX_WORKERS = 64;
+const ADDRESS = /^b[a-z0-9]{39,127}$/;
+
+/** The mining settings as chosen, or why not, for a node hosting `chains`. */
+export function checkMining(prefs: MiningPrefs, chains: string[]): string | undefined {
+  if (!Number.isInteger(prefs.workers) || prefs.workers < 1 || prefs.workers > MAX_WORKERS) {
+    return `Workers must be a whole number from 1 to ${MAX_WORKERS}.`;
+  }
+  for (const [chain, address] of Object.entries(prefs.recipients)) {
+    if (!chains.includes(chain)) return `This node does not host ${chain}.`;
+    if (!ADDRESS.test(address)) return `Not an address for ${chain}: ${address}`;
+  }
+  return undefined;
+}
+
+export interface MiningStatus {
+  running: boolean;
+  pid?: number;
+}
+
+/** Parses `lattice mine status`: its first line says whether the loop runs. */
+export function parseMiningStatus(stdout: string): MiningStatus {
+  const pid = /^mining: running \(pid (\d+)\)/m.exec(stdout);
+  return pid ? { running: true, pid: Number(pid[1]) } : { running: false };
 }
 
 export interface ChainStatus {
@@ -227,8 +264,48 @@ export class NodeManager {
     await this.#run("up");
   }
 
+  /** Stops the node, and the mining loop with it: it mines on this node. */
   async stop(): Promise<void> {
+    if ((await this.miningStatus()).running) await this.#run("mine-stop");
     await this.#run("down");
+  }
+
+  /** The mining settings, or undefined before any were saved. */
+  async miningPrefs(): Promise<MiningPrefs | undefined> {
+    const mine = (await this.ensureHost()).mine;
+    if (!mine) return undefined;
+    return { workers: mine.workers ?? 1, recipients: { ...(mine.recipients ?? {}) } };
+  }
+
+  /** Whether the mining loop runs. Before any settings were saved it cannot. */
+  async miningStatus(): Promise<MiningStatus> {
+    if (!(await this.ensureHost()).mine) return { running: false };
+    return parseMiningStatus((await this.#run("mine-status")).stdout);
+  }
+
+  /**
+   * Saves the mining settings. The loop reads them when it starts, so a
+   * running one is restarted to take them.
+   */
+  async configureMining(prefs: MiningPrefs): Promise<void> {
+    const problem = checkMining(prefs, await this.chains());
+    if (problem) throw new Error(problem);
+    const wasMining = (await this.miningStatus()).running;
+    if (wasMining) await this.#run("mine-stop");
+    const topology = await this.ensureHost();
+    await this.#host.writeTopology({ ...topology, mine: { ...topology.mine, workers: prefs.workers, recipients: { ...prefs.recipients } } });
+    if (wasMining) await this.#run("mine-start");
+  }
+
+  /** Starts the mining loop on this node, which must be running: the loop only retries a node that is not there. */
+  async startMining(): Promise<void> {
+    if (!(await this.ensureHost()).mine) throw new Error("Choose who mining pays first.");
+    if (!(await this.status()).some((c) => c.state !== "down")) throw new Error("Start the node first: mining runs on it.");
+    await this.#run("mine-start");
+  }
+
+  async stopMining(): Promise<void> {
+    await this.#run("mine-stop");
   }
 
   async status(): Promise<ChainStatus[]> {

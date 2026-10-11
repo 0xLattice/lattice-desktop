@@ -4,15 +4,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  NodeManager, LifecycleError, checkPrefs, parseStatus, prefsOf, withPrefs, extensionOrigin,
+  NodeManager, LifecycleError, checkMining, checkPrefs, parseMiningStatus, parseStatus, prefsOf, withPrefs, extensionOrigin,
   type HostOps, type LifecycleVerb, type Topology, type NodePrefs,
 } from "../src/node-manager.ts";
+import { miningChoices } from "../src/node-panel.ts";
 
 const PEER = `${"ab".repeat(32)}@node.example.org:4001`;
 
 function scripted(initial: Topology | null = null, running = false) {
   const calls: LifecycleVerb[] = [];
-  const state = { topology: initial, running };
+  const state = { topology: initial, running, mining: false };
   const host: HostOps = {
     async lattice(verb) {
       calls.push(verb);
@@ -22,9 +23,13 @@ function scripted(initial: Topology | null = null, running = false) {
       }
       if (verb === "up") state.running = true;
       if (verb === "down") state.running = false;
+      if (verb === "mine-start") state.mining = true;
+      if (verb === "mine-stop") state.mining = false;
       const stdout = verb === "status"
         ? (state.running ? "Nexus: active height=12 tip=bafyreiggtg4ezifboye… mempool=2\n" : "Nexus: down\n")
-        : "";
+        : verb === "mine-status"
+          ? `mining: ${state.mining ? "running (pid 4242)" : "stopped"}\nchain:  Nexus and configured hosted descendants\n`
+          : "";
       return { code: 0, stdout, stderr: "" };
     },
     readTopology: async () => (state.topology ? structuredClone(state.topology) : null),
@@ -138,4 +143,57 @@ test("pairing allows an extension origin in lattice.json (restarting a running n
   // Node settings keep it.
   await manager.configure({ ...(await manager.prefs()), peers: "none" });
   assert.deepEqual(running.state.topology?.rpcAllowedOrigins, [origin]);
+});
+
+const MINER = "bafyreifrbp6x4ncfbqakwfcwfqkl7qhbsdeygsakjxixekwkdprbomyut4";
+
+test("mining settings are checked against the chains this node hosts", () => {
+  const chains = ["Nexus", "Nexus/testnet"];
+  assert.equal(checkMining({ workers: 2, recipients: { Nexus: MINER, "Nexus/testnet": MINER } }, chains), undefined);
+  assert.equal(checkMining({ workers: 1, recipients: {} }, chains), undefined, "paying no one is allowed: it burns");
+  assert.match(checkMining({ workers: 0, recipients: {} }, chains)!, /Workers/);
+  assert.match(checkMining({ workers: 1.5, recipients: {} }, chains)!, /Workers/);
+  assert.match(checkMining({ workers: 65, recipients: {} }, chains)!, /Workers/);
+  assert.match(checkMining({ workers: 1, recipients: { "Nexus/other": MINER } }, chains)!, /does not host Nexus\/other/);
+  assert.match(checkMining({ workers: 1, recipients: { Nexus: "someone" } }, chains)!, /Not an address/);
+  // The screen's choices: a chain set to pay no one is left out, so it burns.
+  assert.deepEqual(miningChoices(" 3 ", { Nexus: MINER, "Nexus/testnet": "" }), { workers: 3, recipients: { Nexus: MINER } });
+});
+
+test("`lattice mine status` says whether the loop runs", () => {
+  assert.deepEqual(parseMiningStatus("mining: running (pid 81)\nchain:  Nexus and configured hosted descendants\nrecipient: Nexus=bafy\n"), { running: true, pid: 81 });
+  assert.deepEqual(parseMiningStatus("mining: stopped\nrecipients: none configured (rewards and fees burn)\n"), { running: false });
+});
+
+test("mining: nothing to ask the CLI before it is set up; it needs the node; saving restarts a running loop and keeps the operator's fields", async () => {
+  const { host, calls, state } = scripted({ listen: 14001, rpc: 18080, mine: undefined });
+  delete state.topology!.mine;
+  const manager = new NodeManager(host);
+  // `lattice mine status` fails without a mine section, so it is not asked.
+  assert.deepEqual(await manager.miningStatus(), { running: false });
+  assert.equal(await manager.miningPrefs(), undefined);
+  assert.deepEqual(calls, []);
+  await assert.rejects(manager.startMining(), /Choose who mining pays first/);
+
+  state.topology!.mine = { worker: "/opt/gpu-miner", batchSize: 7 };
+  await manager.configureMining({ workers: 2, recipients: { Nexus: MINER } });
+  assert.deepEqual(state.topology!.mine, { worker: "/opt/gpu-miner", batchSize: 7, workers: 2, recipients: { Nexus: MINER } });
+  assert.deepEqual(await manager.miningPrefs(), { workers: 2, recipients: { Nexus: MINER } });
+  await assert.rejects(manager.startMining(), /Start the node first/);
+  assert.equal(state.mining, false);
+
+  await manager.start();
+  await manager.startMining();
+  assert.deepEqual(await manager.miningStatus(), { running: true, pid: 4242 });
+  calls.length = 0;
+  await manager.configureMining({ workers: 3, recipients: {} });
+  assert.deepEqual(calls, ["mine-status", "mine-stop", "mine-start"], "the loop reads its settings when it starts");
+  assert.equal(state.topology!.mine!.workers, 3);
+  await assert.rejects(manager.configureMining({ workers: 1, recipients: { "Nexus/testnet": MINER } }), /does not host/);
+
+  // Stopping the node stops the loop first: it mines on the node.
+  calls.length = 0;
+  await manager.stop();
+  assert.deepEqual(calls, ["mine-status", "mine-stop", "down"]);
+  assert.equal(state.mining, false);
 });

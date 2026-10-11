@@ -13,13 +13,15 @@ export const hostOps: HostOps = {
   lattice: (verb: LifecycleVerb) => invoke<CommandResult>("lattice", { verb }),
   readTopology: () => invoke<Topology | null>("read_topology"),
   // Only the fields the app manages; the shell merges them and refuses others.
-  writeTopology: ({ rpc, listen, peers, hostedChains, rpcAllowedOrigins }: Topology) =>
+  writeTopology: ({ rpc, listen, peers, hostedChains, rpcAllowedOrigins, mine }: Topology) =>
     invoke<void>("write_topology", {
       topology: {
         rpc, listen,
         ...(peers ? { peers } : {}),
         ...(hostedChains ? { hostedChains } : {}),
         ...(rpcAllowedOrigins ? { rpcAllowedOrigins } : {}),
+        // Of mining, only who is paid and the worker count: the shell keeps the rest.
+        ...(mine ? { mine: { workers: mine.workers ?? 1, recipients: mine.recipients ?? {} } } : {}),
       },
     }),
 };

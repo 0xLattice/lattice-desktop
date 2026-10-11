@@ -57,7 +57,8 @@ export function harnessHost(root: string): AppHost {
     ops: {
       async lattice(verb) {
         try {
-          const { stdout, stderr } = await run(join(bin!, "lattice"), [verb, "--root", root]);
+          // "mine-start" is `lattice mine start`, as the shell maps it.
+          const { stdout, stderr } = await run(join(bin!, "lattice"), [...verb.split("-"), "--root", root]);
           return { code: 0, stdout, stderr };
         } catch (e) {
           const failed = e as { code?: number; stdout?: string; stderr?: string };

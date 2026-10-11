@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the bundled node binaries (`lattice`, `lattice-node`) from
+# Build the bundled node binaries (`lattice`, `lattice-node`, and the miner's
+# `lattice-mining-coordinator` and `lattice-miner`) from
 # adalinxx/lattice-node at the commit in NODE_COMMIT and stage them as Tauri
 # sidecars in src-tauri/binaries/<name>-<target-triple>.
 #
@@ -33,15 +34,16 @@ if [ -n "$(git -C "$src" status --porcelain --untracked-files=no)" ]; then
 fi
 
 # SwiftPM honours only the last --product flag, so build each one.
-for product in lattice lattice-node; do
+products="lattice lattice-node lattice-mining-coordinator lattice-miner"
+for product in $products; do
   (cd "$src" && swift build -c debug --product "$product")
 done
 
 triple="$(rustc -vV | sed -n 's/^host: //p')"
 out="$here/src-tauri/binaries"
 mkdir -p "$out"
-for name in lattice lattice-node; do
+for name in $products; do
   install -m 0755 "$src/.build/debug/$name" "$out/$name-$triple"
 done
 printf '%s\n' "$head" > "$out/COMMIT"
-echo "staged lattice + lattice-node ($head, debug, $triple) in $out"
+echo "staged $products ($head, debug, $triple) in $out"
