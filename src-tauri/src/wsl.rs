@@ -10,6 +10,11 @@
 //! - The node's host root is `~/.local/share/Lattice/host` there, on the
 //!   distribution's own filesystem. This process reads and writes it through
 //!   `\\wsl$\<distribution>\...`; the CLI is told the Linux path.
+//! - The GPU mining worker is the exception: a Windows program, left where
+//!   the app is installed. WSL passes Linux programs no graphics chip the
+//!   worker could use, but it runs a Windows program a Linux one starts, so
+//!   the mining loop is given the worker's path under the distribution's
+//!   mount of the drive.
 //! - The node's loopback RPC port reaches Windows through WSL's localhost
 //!   forwarding, so `node_http` connects to 127.0.0.1 as on every platform.
 //! - WSL stops a distribution once nothing started from Windows is running
@@ -130,6 +135,16 @@ mod running {
         }
     }
 
+    /// A Windows file as the distribution reaches it, through its mount of
+    /// the drive (`/mnt/c/...` unless the distribution mounts drives elsewhere).
+    pub fn mounted_path(session: &Session, windows: &Path) -> Option<String> {
+        // Forward slashes: nothing between here and wslpath reads them as escapes.
+        let windows = windows.to_str()?.replace('\\', "/");
+        let output = command().args(["-d", &session.distro, "-e", "wslpath", "-u", &windows]).output().ok()?;
+        let linux = decode(&output.stdout).trim().to_string();
+        (output.status.success() && linux.starts_with('/')).then_some(linux)
+    }
+
     /// The node binaries inside the distribution, copied there from the
     /// app's resources unless this version already was. Returns the Linux
     /// directory they are in.
@@ -165,7 +180,7 @@ mod running {
 }
 
 #[cfg(windows)]
-pub use running::{command, install, release, session};
+pub use running::{command, install, mounted_path, release, session};
 
 #[cfg(test)]
 mod tests {

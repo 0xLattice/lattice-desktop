@@ -97,7 +97,7 @@ export function checkPrefs(prefs: NodePrefs): string | undefined {
 }
 
 /**
- * What searches for blocks: this Mac's processor (the CLI's bundled worker),
+ * What searches for blocks: this computer's processor (the CLI's bundled worker),
  * its graphics chip (the bundled GPU worker), or a worker the operator named
  * in lattice.json by hand, which the app shows and keeps but cannot set.
  */

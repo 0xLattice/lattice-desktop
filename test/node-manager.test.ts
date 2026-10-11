@@ -293,5 +293,5 @@ test("the home screen is told what the node is doing, with the one thing to do a
   // Mining is said wherever the person is.
   state.topology!.mine = { workers: 1, recipients: {} };
   state.mining = true;
-  assert.deepEqual((await nodeNotices(manager, reads, "Nexus")).map((n) => n.text), ["Mining on this Mac."]);
+  assert.deepEqual((await nodeNotices(manager, reads, "Nexus")).map((n) => n.text), ["Mining on this computer."]);
 });

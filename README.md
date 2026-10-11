@@ -9,7 +9,8 @@ for Windows in
 Both pin this repository and add only their packaging, so the code here runs
 on all three: the paths below are the macOS ones, a Linux package keeps the
 node binaries in its own resources, and on Windows the shell runs the Linux
-node in WSL (`src-tauri/src/wsl.rs`).
+node in WSL (`src-tauri/src/wsl.rs`). The graphics-chip mining worker is each
+platform's own: Metal on macOS, OpenCL on Linux and Windows.
 
 - **Your own full node.** The app runs the bundled, unmodified `lattice-node`
   through the bundled `lattice` CLI (`init` / `up` / `down` / `status`), exactly
@@ -29,9 +30,11 @@ node in WSL (`src-tauri/src/wsl.rs`).
   as one of the two bundled workers. Other fields, such as public listeners
   and mining's tuning, are left to the operator.
 - **Mining** (Node → Mining) runs the bundled `lattice mine` loop on this node,
-  searching on this Mac's graphics chip (the bundled Metal worker from
+  searching on this computer's graphics chip (the bundled worker from
   [lattice-miner-gpu](https://github.com/adalinxx/lattice-miner-gpu), the
-  default) or on its processor. One search covers Nexus and every chain the
+  default) or on its processor. The graphics chip is offered only where the
+  worker finds a hash on it when the app asks, once per launch: a machine
+  with no chip or driver it can use mines on the processor. One search covers Nexus and every chain the
   node hosts (merged mining), so the chains mined are the chains hosted: to
   mine another, or stop mining one, change what the node hosts (the screen
   links to it). Each chain's reward and fees go to the account you choose, the

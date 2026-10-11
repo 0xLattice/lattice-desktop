@@ -26,8 +26,7 @@ test("the packaged app opens and starts its own node through the bundled CLI", {
   const executable = bundle ? join(resolve(app!), "Contents", "MacOS", "lattice-desktop") : resolve(app!);
   const binaries = bundle ? dirname(executable) : resolve(process.env.LATTICE_APP_BINARIES ?? dirname(executable));
   assert.ok(existsSync(executable), "the app's executable is there");
-  // The graphics-chip worker ships where there is one for the platform: macOS.
-  for (const binary of ["lattice", "lattice-node", "lattice-mining-coordinator", "lattice-miner", ...(bundle ? ["lattice-miner-gpu"] : [])]) {
+  for (const binary of ["lattice", "lattice-node", "lattice-mining-coordinator", "lattice-miner", "lattice-miner-gpu"]) {
     assert.ok(existsSync(join(binaries, binary)), `${binary} is in the bundle`);
   }
   // Where the platform keeps a user's application data, under the throwaway home.

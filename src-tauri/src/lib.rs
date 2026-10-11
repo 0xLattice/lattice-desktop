@@ -173,19 +173,62 @@ fn next_pin(current: Option<u16>, verb: &str, configured: Option<u16>) -> Option
     }
 }
 
-const GPU_WORKER: &str = "lattice-miner-gpu";
+/// The GPU mining worker is this platform's own program everywhere: Metal on
+/// macOS, OpenCL on Linux and on Windows, where it is the one bundled binary
+/// that is not a Linux one (WSL offers Linux programs no graphics chip the
+/// worker could use, but runs a Windows program the mining loop names).
+const GPU_WORKER: &str = if cfg!(windows) { "lattice-miner-gpu.exe" } else { "lattice-miner-gpu" };
 
-/// The bundled GPU mining worker's path, if this build carries one.
+/// The bundled GPU mining worker, if this build carries one.
+fn gpu_worker_file() -> Option<PathBuf> {
+    bundled(GPU_WORKER).ok().filter(|path| path.is_file())
+}
+
+/// The bundled GPU worker's path as lattice.json names it, which is how the
+/// mining loop reaches it.
+#[cfg(not(windows))]
 fn gpu_worker_path() -> Option<String> {
-    let path = bundled(GPU_WORKER).ok()?;
-    path.is_file().then(|| path.to_string_lossy().into_owned())
+    gpu_worker_file().map(|path| path.to_string_lossy().into_owned())
+}
+
+/// The bundled GPU worker's path as lattice.json names it, which is how the
+/// mining loop reaches it: from inside WSL, where Windows' drives are mounted.
+#[cfg(windows)]
+fn gpu_worker_path() -> Option<String> {
+    static MOUNTED: OnceLock<Option<String>> = OnceLock::new();
+    let file = gpu_worker_file()?;
+    let session = wsl::session().ok()?;
+    MOUNTED.get_or_init(|| wsl::mounted_path(&session, &file)).clone()
+}
+
+/// Whether `worker` can search on this machine's graphics chip: it is given a
+/// small range every hash of which wins. A machine with no chip the worker
+/// can use, or no driver for it, fails here instead of mining nothing.
+fn gpu_worker_searches(worker: &Path) -> bool {
+    let mut command = Command::new(worker);
+    command.args(["--work-id", "probe", "--prefix-hex", "00", "--start-nonce", "0", "--count", "1024", "--target", &"ff".repeat(32)]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    command.output().is_ok_and(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).contains(r#""status":"found""#))
 }
 
 /// The bundled GPU worker, for the page to offer and to name back to
-/// `write_topology` (the only worker path it may name).
+/// `write_topology` (the only worker path it may name): None when this build
+/// carries none or this machine has no graphics chip it can search on, which
+/// is found out once per launch.
 #[tauri::command]
-fn gpu_worker() -> Option<String> {
-    gpu_worker_path()
+async fn gpu_worker() -> Option<String> {
+    static SEARCHES: OnceLock<bool> = OnceLock::new();
+    tauri::async_runtime::spawn_blocking(|| {
+        let file = gpu_worker_file()?;
+        SEARCHES.get_or_init(|| gpu_worker_searches(&file)).then(gpu_worker_path).flatten()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The end of the mining loop's own log, for the page to say how it is going:
@@ -719,6 +762,30 @@ mod tests {
             assert!(choose(bad, Some(gpu)).is_err(), "{bad}");
         }
         assert!(choose(gpu, None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_gpu_worker_is_offered_only_where_it_finds_a_hash() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lattice-gpu-probe-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let worker = |name: &str, script: &str| {
+            let path = dir.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        // It is asked for a range it cannot miss in, and has to answer with a find.
+        let asked = worker("asked", r#"[ "$*" = "--work-id probe --prefix-hex 00 --start-nonce 0 --count 1024 --target ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" ] && echo '{"workId":"probe","status":"found","nonce":0}'"#);
+        assert!(gpu_worker_searches(&asked));
+        // No device: the worker says why and fails.
+        assert!(!gpu_worker_searches(&worker("no-device", "echo 'error: opencl backend failed' >&2; exit 1")));
+        // A worker that searched nothing must not pass for one that works.
+        assert!(!gpu_worker_searches(&worker("exhausted", r#"echo '{"workId":"probe","status":"exhausted"}'"#)));
+        assert!(!gpu_worker_searches(&worker("found-but-failed", r#"echo '{"status":"found"}'; exit 3"#)));
+        assert!(!gpu_worker_searches(&dir.join("missing")));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
