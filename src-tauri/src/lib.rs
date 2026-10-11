@@ -24,7 +24,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow};
 
@@ -57,7 +57,9 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-/// ~/Library/Application Support/Lattice
+/// The platform's per-user data directory, then `Lattice`:
+/// ~/Library/Application Support/Lattice on macOS, ~/.local/share/Lattice
+/// (or $XDG_DATA_HOME/Lattice) on Linux.
 fn app_root(app: &AppHandle) -> Result<PathBuf> {
     Ok(app.path().data_dir().map_err(err)?.join("Lattice"))
 }
@@ -66,11 +68,23 @@ fn host_root(app: &AppHandle) -> Result<PathBuf> {
     Ok(app_root(app)?.join("host"))
 }
 
-/// A bundled binary: beside the app's executable (Contents/MacOS in the .app,
+/// Where a package keeps the bundled binaries when they are not beside the
+/// app's executable: `<resources>/bin`, set once at startup. A Linux package
+/// installs its executable into a shared directory (/usr/bin), where a
+/// `lattice` beside it may be someone else's.
+static RESOURCE_BIN: OnceLock<PathBuf> = OnceLock::new();
+
+/// A bundled binary: in the package's own `<resources>/bin` when it has one,
+/// otherwise beside the app's executable (Contents/MacOS in the .app,
 /// target/<profile> under `tauri dev`).
 fn bundled(name: &str) -> Result<PathBuf> {
     let exe = std::env::current_exe().map_err(err)?;
-    Ok(exe.parent().ok_or("no executable directory")?.join(name))
+    let beside = exe.parent().ok_or("no executable directory")?.join(name);
+    Ok(bundled_in(RESOURCE_BIN.get().map(PathBuf::as_path), name).unwrap_or(beside))
+}
+
+fn bundled_in(resources: Option<&Path>, name: &str) -> Option<PathBuf> {
+    resources.map(|dir| dir.join(name)).filter(|path| path.is_file())
 }
 
 #[derive(Serialize, Debug)]
@@ -535,6 +549,9 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle();
+            if let Ok(resources) = handle.path().resource_dir() {
+                let _ = RESOURCE_BIN.set(resources.join("bin"));
+            }
             // Only a running node (it keeps a cookie; it removes it at exit)
             // is pinned at launch; otherwise the first `up` pins.
             // A crash leaves a stale cookie, so the port is pinned only when
@@ -664,6 +681,17 @@ mod tests {
         write("/old/lattice-miner-gpu");
         repoint_gpu_worker(&file, None).unwrap();
         assert_eq!(worker(), "/old/lattice-miner-gpu", "a build without the worker changes nothing");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_packages_own_binaries_are_used_before_any_beside_the_executable() {
+        let dir = std::env::temp_dir().join(format!("lattice-resources-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(bundled_in(Some(&dir), "lattice"), None, "not there: fall back to beside the executable");
+        assert_eq!(bundled_in(None, "lattice"), None);
+        fs::write(dir.join("lattice"), b"").unwrap();
+        assert_eq!(bundled_in(Some(&dir), "lattice"), Some(dir.join("lattice")));
         fs::remove_dir_all(&dir).unwrap();
     }
 
