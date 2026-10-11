@@ -14,8 +14,11 @@ export interface Topology {
   hostedChains?: string[];
   /** Browser origins allowed on the loopback operator port (e.g. a paired extension). */
   rpcAllowedOrigins?: string[];
-  /** The mining loop's settings. The app sets `workers` and `recipients`; the rest is the operator's. */
-  mine?: { workers?: number; recipients?: Record<string, string>; [field: string]: unknown };
+  /**
+   * The mining loop's settings. The app sets `workers`, `recipients`, and
+   * `worker` to "cpu" or the bundled GPU worker's path; the rest is the operator's.
+   */
+  mine?: { worker?: string; workers?: number; recipients?: Record<string, string>; [field: string]: unknown };
   [field: string]: unknown;
 }
 
@@ -33,6 +36,8 @@ export interface HostOps {
   lattice(verb: LifecycleVerb): Promise<CommandResult>;
   readTopology(): Promise<Topology | null>;
   writeTopology(topology: Topology): Promise<void>;
+  /** The bundled GPU mining worker's path, or null in a build without one. */
+  gpuWorker(): Promise<string | null>;
 }
 
 /** The node settings the app exposes. */
@@ -89,9 +94,24 @@ export function checkPrefs(prefs: NodePrefs): string | undefined {
   return undefined;
 }
 
+/**
+ * What searches for blocks: this Mac's processor (the CLI's bundled worker),
+ * its graphics chip (the bundled GPU worker), or a worker the operator named
+ * in lattice.json by hand, which the app shows and keeps but cannot set.
+ */
+export type Searcher = "cpu" | "gpu" | "custom";
+
+/** The searcher lattice.json's `mine.worker` names, given this build's GPU worker. */
+export function searcherOf(worker: string | undefined, gpuWorker: string | null): Searcher {
+  if (worker === undefined || worker === "cpu") return "cpu";
+  // By name, not by path: the app may have moved since it was saved.
+  return gpuWorker !== null && worker.split("/").pop() === gpuWorker.split("/").pop() ? "gpu" : "custom";
+}
+
 /** The mining settings the app exposes. */
 export interface MiningPrefs {
-  /** CPU workers searching in parallel. */
+  searcher: Searcher;
+  /** Workers searching in parallel. The graphics chip is one worker: more would only contend for it. */
   workers: number;
   /** Who is paid each chain's block reward and fees, by chain path. A chain left out burns its payout. */
   recipients: Record<string, string>;
@@ -274,7 +294,16 @@ export class NodeManager {
   async miningPrefs(): Promise<MiningPrefs | undefined> {
     const mine = (await this.ensureHost()).mine;
     if (!mine) return undefined;
-    return { workers: mine.workers ?? 1, recipients: { ...(mine.recipients ?? {}) } };
+    return {
+      searcher: searcherOf(mine.worker, await this.#host.gpuWorker()),
+      workers: mine.workers ?? 1,
+      recipients: { ...(mine.recipients ?? {}) },
+    };
+  }
+
+  /** Whether this build can mine on the graphics chip. */
+  async canMineOnGPU(): Promise<boolean> {
+    return (await this.#host.gpuWorker()) !== null;
   }
 
   /** Whether the mining loop runs. Before any settings were saved it cannot. */
@@ -290,10 +319,19 @@ export class NodeManager {
   async configureMining(prefs: MiningPrefs): Promise<void> {
     const problem = checkMining(prefs, await this.chains());
     if (problem) throw new Error(problem);
+    const gpuWorker = await this.#host.gpuWorker();
+    if (prefs.searcher === "gpu" && gpuWorker === null) throw new Error("This build has no graphics-chip worker.");
     const wasMining = (await this.miningStatus()).running;
     if (wasMining) await this.#run("mine-stop");
     const topology = await this.ensureHost();
-    await this.#host.writeTopology({ ...topology, mine: { ...topology.mine, workers: prefs.workers, recipients: { ...prefs.recipients } } });
+    const mine: NonNullable<Topology["mine"]> = {
+      ...topology.mine,
+      workers: prefs.searcher === "gpu" ? 1 : prefs.workers,
+      recipients: { ...prefs.recipients },
+    };
+    if (prefs.searcher === "cpu") mine.worker = "cpu";
+    else if (prefs.searcher === "gpu") mine.worker = gpuWorker!;
+    await this.#host.writeTopology({ ...topology, mine });
     if (wasMining) await this.#run("mine-start");
   }
 

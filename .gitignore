@@ -4,3 +4,4 @@ src-tauri/target/
 src-tauri/binaries/
 src-tauri/gen/
 .build-node/
+.build-miner-gpu/

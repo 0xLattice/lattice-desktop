@@ -5,6 +5,11 @@
 // replaced (see e2e-app.test.ts).
 //
 //   LATTICE_NODE_BIN=<lattice-node checkout>/.build/debug npm test
+//
+// With LATTICE_GPU_MINER=<a built lattice-miner-gpu> the app offers the
+// graphics chip, as the packaged app does, and the test mines on it first.
+// On a machine whose GPU it cannot use (a CI runner without Metal) it says so
+// and mines on the processor only.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -15,11 +20,26 @@ import { startApp } from "../src/app.ts";
 import { NodeManager, type Topology } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
-import { bin, button, freePort, harnessHost, input, installPage, pageText, shows, until } from "./helpers/real-node.ts";
+import { bin, button, freePort, gpuMiner, harnessHost, input, installPage, pageText, run, shows, until } from "./helpers/real-node.ts";
 
-test("the app: mine to the wallet, change who is paid, stop", { skip: !bin, timeout: 600_000 }, async () => {
+/** Whether the GPU worker can search on this machine: a tiny range every hash of which wins. */
+async function gpuSearches(): Promise<boolean> {
+  if (!gpuMiner) return false;
+  try {
+    const { stdout } = await run(gpuMiner, ["--work-id", "probe", "--prefix-hex", "00", "--target", "ff".repeat(32), "--start-nonce", "0", "--count", "1024"]);
+    return (JSON.parse(stdout) as { status: string }).status === "found";
+  } catch (e) {
+    console.log(`[desktop e2e] the GPU worker cannot search here, so mining is tested on the processor only: ${String(e).slice(0, 300)}`);
+    return false;
+  }
+}
+
+test("the app: mine to the wallet, change who is paid and what searches, stop", { skip: !bin, timeout: 600_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "lattice-desktop-mining-"));
+  const onGPU = await gpuSearches();
   const host = harnessHost(root);
+  // The app offers the graphics chip only when it carries a worker that works here.
+  if (!onGPU) host.ops.gpuWorker = async () => null;
   const topology = () => JSON.parse(readFileSync(join(root, "lattice.json"), "utf8")) as Topology;
   try {
     const setup = new NodeManager(host.ops);
@@ -46,6 +66,12 @@ test("the app: mine to the wallet, change who is paid, stop", { skip: !bin, time
     // Unless told otherwise, each chain pays the wallet's active account.
     const recipient = () => document.querySelector('select[aria-label="Recipient on Nexus"]') as HTMLSelectElement;
     assert.equal(recipient().value, first);
+    // And it searches on the graphics chip when the app can, as one worker.
+    const searcher = () => document.querySelector('select[aria-label="Search with"]') as HTMLSelectElement;
+    const workers = () => document.querySelector('input[aria-label="Workers"]') as HTMLInputElement;
+    assert.equal(searcher().value, onGPU ? "gpu" : "cpu");
+    assert.equal(workers().disabled, onGPU);
+    assert.match(pageText(), /Chains mined are the chains hosted: Nexus\./);
     button("Start mining").click();
     await shows(/Start the node first: mining runs on it/);
     assert.deepEqual(await manager.miningStatus(), { running: false });
@@ -59,7 +85,8 @@ test("the app: mine to the wallet, change who is paid, stop", { skip: !bin, time
     await shows(/Statusnot mining/);
     button("Start mining").click();
     await shows(/Statusmining \(pid \d+\)/);
-    assert.deepEqual(topology().mine, { workers: 1, recipients: { Nexus: first } });
+    assert.deepEqual(topology().mine, { worker: onGPU ? gpuMiner : "cpu", workers: 1, recipients: { Nexus: first } });
+    console.log(`[desktop e2e] mining on the ${onGPU ? "graphics chip" : "processor"}`);
     button("Back").click();
     await shows(/Your node/);
     button("Back to wallet").click();
@@ -85,11 +112,16 @@ test("the app: mine to the wallet, change who is paid, stop", { skip: !bin, time
     // What was saved is shown, not the account that happens to be active now.
     assert.equal(recipient().value, first);
     recipient().value = second;
-    (document.querySelector('input[aria-label="Workers"]') as HTMLInputElement).value = "2";
+    // And search on the processor from now on, with two workers.
+    assert.equal(searcher().value, onGPU ? "gpu" : "cpu");
+    searcher().value = "cpu";
+    searcher().dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    assert.equal(workers().disabled, false);
+    workers().value = "2";
     button("Save").click();
     await until(() => (topology().mine?.recipients?.Nexus === second ? true : undefined), "the new recipient saved");
     await shows(/Statusmining \(pid \d+\)/);
-    assert.equal(topology().mine?.workers, 2);
+    assert.deepEqual(topology().mine, { worker: "cpu", workers: 2, recipients: { Nexus: second } });
     await until(async () => ((await balance(second)) > 0n ? true : undefined), "blocks paying the second account");
 
     // ---- stop: no more blocks ----

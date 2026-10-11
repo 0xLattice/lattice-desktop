@@ -29,7 +29,7 @@ jobs:
         run: |
           triple="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p src-tauri/binaries
-          for n in lattice lattice-node lattice-mining-coordinator lattice-miner; do printf '#!/bin/sh\nexit 1\n' > "src-tauri/binaries/$n-$triple"; chmod +x "src-tauri/binaries/$n-$triple"; done
+          for n in lattice lattice-node lattice-mining-coordinator lattice-miner lattice-miner-gpu; do printf '#!/bin/sh\nexit 1\n' > "src-tauri/binaries/$n-$triple"; chmod +x "src-tauri/binaries/$n-$triple"; done
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: npx tauri build --bundles app --no-sign
 
@@ -68,15 +68,27 @@ jobs:
           node-version: 24
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
+      - id: gpu
+        run: echo "commit=$(tr -d '[:space:]' < MINER_GPU_COMMIT)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: adalinxx/lattice-miner-gpu
+          ref: ${{ steps.gpu.outputs.commit }}
+          path: .build-miner-gpu
+      - name: Build the GPU mining worker at MINER_GPU_COMMIT
+        working-directory: .build-miner-gpu
+        run: cargo build --release --locked
       # The app as shipped: the real node binaries as its sidecars.
       - name: Stage the node binaries as sidecars
         run: |
           triple="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p src-tauri/binaries
           for n in lattice lattice-node lattice-mining-coordinator lattice-miner; do install -m 0755 ".build-node/.build/debug/$n" "src-tauri/binaries/$n-$triple"; done
+          install -m 0755 .build-miner-gpu/target/release/lattice-miner-gpu "src-tauri/binaries/lattice-miner-gpu-$triple"
       - run: npx tauri build --bundles app --no-sign
       - name: Headless e2e (real node, no peers, throwaway storage) and the packaged app
         run: |
           LATTICE_NODE_BIN="$PWD/.build-node/.build/debug" \
           LATTICE_APP="$PWD/src-tauri/target/release/bundle/macos/Lattice.app" \
+          LATTICE_GPU_MINER="$PWD/.build-miner-gpu/target/release/lattice-miner-gpu" \
           npm test

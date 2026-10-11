@@ -100,6 +100,9 @@ fn run_lattice(root: &Path, verb: &str) -> Result<CommandResult> {
 async fn lattice(app: AppHandle, pinned: State<'_, PinnedPort>, verb: String) -> Result<CommandResult> {
     let root = host_root(&app)?;
     let verb_name = verb.clone();
+    if verb == "mine-start" {
+        repoint_gpu_worker(&topology_path(&app)?, gpu_worker_path().as_deref())?;
+    }
     let result = tauri::async_runtime::spawn_blocking(move || run_lattice(&root, &verb))
         .await
         .map_err(err)??;
@@ -120,6 +123,33 @@ fn next_pin(current: Option<u16>, verb: &str, configured: Option<u16>) -> Option
         "up" => current.or(configured),
         _ => current,
     }
+}
+
+const GPU_WORKER: &str = "lattice-miner-gpu";
+
+/// The bundled GPU mining worker's path, if this build carries one.
+fn gpu_worker_path() -> Option<String> {
+    let path = bundled(GPU_WORKER).ok()?;
+    path.is_file().then(|| path.to_string_lossy().into_owned())
+}
+
+/// The bundled GPU worker, for the page to offer and to name back to
+/// `write_topology` (the only worker path it may name).
+#[tauri::command]
+fn gpu_worker() -> Option<String> {
+    gpu_worker_path()
+}
+
+/// lattice.json names the GPU worker by its path inside this app. If the app
+/// was moved since, point it at where the worker is now, so mining does not
+/// fail on (or run) a file at the old place.
+fn repoint_gpu_worker(topology: &Path, bundled: Option<&str>) -> Result<()> {
+    let Some(mut current) = read_topology_at(topology)? else { return Ok(()) };
+    let Some(worker) = current.pointer("/mine/worker").and_then(Value::as_str) else { return Ok(()) };
+    let names_gpu = Path::new(worker).file_name().is_some_and(|name| name == GPU_WORKER);
+    let Some(bundled) = bundled.filter(|path| names_gpu && *path != worker) else { return Ok(()) };
+    current["mine"]["worker"] = Value::from(bundled);
+    write_atomically(topology, &serde_json::to_vec_pretty(&current).map_err(err)?, 0o644)
 }
 
 /// The cookie the node writes at every start (`lattice up` gives it
@@ -195,8 +225,8 @@ fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 /// The lattice.json fields the page may set. Everything else (public
 /// listeners, external address, ...) is the operator's, edited by hand: the
 /// page cannot expose the node or point `node_http` elsewhere beyond choosing
-/// the node's own loopback RPC port. Of `mine` it may set only who is paid
-/// and how many workers search (see `merged_mine`).
+/// the node's own loopback RPC port. Of `mine` it may set only who is paid,
+/// how many workers search, and which bundled worker does (see `merged_mine`).
 const MANAGED: [&str; 5] = ["rpc", "listen", "peers", "hostedChains", "rpcAllowedOrigins"];
 
 /// The most CPU workers the page may ask for.
@@ -217,14 +247,24 @@ fn is_address(value: &str) -> bool {
 }
 
 /// `current`'s mining section with the page's choices applied: the worker
-/// count and each chain's recipient, nothing else. The worker executable
-/// (`mine.worker`), which the CLI runs, and every tuning field stay as the
-/// operator left them: the page can never name a program to run.
-fn merged_mine(current: Option<&Value>, update: &Value) -> Result<Value> {
+/// count, each chain's recipient, and optionally which bundled worker
+/// searches. `mine.worker` is a program the CLI runs, so the page may name
+/// only `cpu` (the CLI's own bundled worker) or `gpu_worker`, the GPU worker
+/// bundled in this app; left out, the worker stays as the operator set it.
+/// Every tuning field is kept as it is.
+fn merged_mine(current: Option<&Value>, update: &Value, gpu_worker: Option<&str>) -> Result<Value> {
     let update = update.as_object().ok_or("mine must be an object")?;
-    if let Some(key) = update.keys().find(|k| !["workers", "recipients"].contains(&k.as_str())) {
+    if let Some(key) = update.keys().find(|k| !["workers", "recipients", "worker"].contains(&k.as_str())) {
         return Err(format!("refused: lattice.json field mine.{key}"));
     }
+    let worker = match update.get("worker") {
+        None => None,
+        Some(value) => match value.as_str() {
+            Some("cpu") => Some("cpu"),
+            Some(path) if gpu_worker == Some(path) => Some(path),
+            _ => return Err("refused: mine.worker may be only a worker bundled with this app".into()),
+        },
+    };
     let workers = update.get("workers").and_then(Value::as_u64).filter(|n| (1..=MAX_WORKERS).contains(n))
         .ok_or(format!("mine.workers must be a whole number from 1 to {MAX_WORKERS}"))?;
     let recipients = update.get("recipients").and_then(Value::as_object).ok_or("mine.recipients must map chain paths to addresses")?;
@@ -239,6 +279,9 @@ fn merged_mine(current: Option<&Value>, update: &Value) -> Result<Value> {
     let mut out = current.and_then(Value::as_object).cloned().unwrap_or_default();
     out.insert("workers".into(), Value::from(workers));
     out.insert("recipients".into(), Value::Object(recipients.clone()));
+    if let Some(worker) = worker {
+        out.insert("worker".into(), Value::from(worker));
+    }
     Ok(Value::Object(out))
 }
 
@@ -258,7 +301,7 @@ fn is_origin(value: &str) -> bool {
 
 /// `current` with the page's managed fields applied (an absent `peers` or
 /// `hostedChains` removes it); anything else from the page is refused.
-fn merged_topology(current: Value, update: &Value) -> Result<Value> {
+fn merged_topology(current: Value, update: &Value, gpu_worker: Option<&str>) -> Result<Value> {
     let update = update.as_object().ok_or("lattice.json must be an object")?;
     if let Some(key) = update.keys().find(|k| !MANAGED.contains(&k.as_str()) && k.as_str() != "mine") {
         return Err(format!("refused: lattice.json field {key}"));
@@ -292,7 +335,7 @@ fn merged_topology(current: Value, update: &Value) -> Result<Value> {
     }
     // Mining is left as it is unless the page sends its part of it.
     if let Some(mine) = update.get("mine") {
-        let merged = merged_mine(out.get("mine"), mine)?;
+        let merged = merged_mine(out.get("mine"), mine, gpu_worker)?;
         out.insert("mine".into(), merged);
     }
     Ok(Value::Object(out))
@@ -302,7 +345,7 @@ fn merged_topology(current: Value, update: &Value) -> Result<Value> {
 fn write_topology(app: AppHandle, topology: Value) -> Result<()> {
     let path = topology_path(&app)?;
     let current = read_topology_at(&path)?.ok_or("no lattice.json; run lattice init first")?;
-    let merged = merged_topology(current, &topology)?;
+    let merged = merged_topology(current, &topology, gpu_worker_path().as_deref())?;
     let bytes = serde_json::to_vec_pretty(&merged).map_err(err)?;
     write_atomically(&path, &bytes, 0o644)
 }
@@ -501,6 +544,7 @@ pub fn run() {
             store_remove,
             node_http,
             node_cookie,
+            gpu_worker,
             save_backup,
             print_page
         ])
@@ -545,13 +589,13 @@ mod tests {
         let address = "bafyreifrbp6x4ncfbqakwfcwfqkl7qhbsdeygsakjxixekwkdprbomyut4";
         let current = serde_json::json!({ "rpc": 1, "listen": 2, "mine": { "worker": "/opt/gpu-miner", "batchSize": 5, "workers": 9, "recipients": { "Nexus": "old" } } });
         let update = serde_json::json!({ "rpc": 1, "listen": 2, "mine": { "workers": 2, "recipients": { "Nexus": address, "Nexus/testnet": address } } });
-        let merged = merged_topology(current.clone(), &update).unwrap();
+        let merged = merged_topology(current.clone(), &update, None).unwrap();
         assert_eq!(merged["mine"], serde_json::json!({
             "worker": "/opt/gpu-miner", "batchSize": 5, "workers": 2,
             "recipients": { "Nexus": address, "Nexus/testnet": address },
         }));
         // Left out, mining is untouched.
-        let untouched = merged_topology(current.clone(), &serde_json::json!({ "rpc": 1, "listen": 2 })).unwrap();
+        let untouched = merged_topology(current.clone(), &serde_json::json!({ "rpc": 1, "listen": 2 }), None).unwrap();
         assert_eq!(untouched["mine"], current["mine"]);
         // The page never names the program the CLI runs, nor tunes the search.
         for bad in [
@@ -565,8 +609,48 @@ mod tests {
             serde_json::json!({ "workers": 1, "recipients": { "Other": address } }),
         ] {
             let update = serde_json::json!({ "rpc": 1, "listen": 2, "mine": bad });
-            assert!(merged_topology(current.clone(), &update).is_err(), "{update}");
+            assert!(merged_topology(current.clone(), &update, None).is_err(), "{update}");
         }
+    }
+
+    #[test]
+    fn the_page_names_only_a_bundled_worker() {
+        let gpu = "/Applications/Lattice.app/Contents/MacOS/lattice-miner-gpu";
+        let current = serde_json::json!({ "rpc": 1, "listen": 2, "mine": { "worker": "/opt/custom-miner", "workers": 1, "recipients": {} } });
+        let choose = |worker: &str, bundled: Option<&str>| merged_topology(
+            current.clone(),
+            &serde_json::json!({ "rpc": 1, "listen": 2, "mine": { "workers": 1, "recipients": {}, "worker": worker } }),
+            bundled,
+        );
+        assert_eq!(choose(gpu, Some(gpu)).unwrap()["mine"]["worker"], gpu);
+        assert_eq!(choose("cpu", Some(gpu)).unwrap()["mine"]["worker"], "cpu");
+        // Not the operator's own worker, not a look-alike elsewhere, and not the GPU worker in a build without one.
+        for bad in ["/opt/custom-miner", "/tmp/lattice-miner-gpu", "gpu", ""] {
+            assert!(choose(bad, Some(gpu)).is_err(), "{bad}");
+        }
+        assert!(choose(gpu, None).is_err());
+    }
+
+    #[test]
+    fn a_moved_app_repoints_its_gpu_worker_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("lattice-repoint-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lattice.json");
+        let write = |worker: &str| fs::write(&file, serde_json::to_vec(&serde_json::json!({ "rpc": 1, "mine": { "worker": worker, "workers": 1 } })).unwrap()).unwrap();
+        let worker = || read_topology_at(&file).unwrap().unwrap()["mine"]["worker"].as_str().unwrap().to_string();
+        let now = "/Applications/Lattice.app/Contents/MacOS/lattice-miner-gpu";
+        write("/Users/me/Downloads/Lattice.app/Contents/MacOS/lattice-miner-gpu");
+        repoint_gpu_worker(&file, Some(now)).unwrap();
+        assert_eq!(worker(), now);
+        for kept in ["cpu", "/opt/custom-miner"] {
+            write(kept);
+            repoint_gpu_worker(&file, Some(now)).unwrap();
+            assert_eq!(worker(), kept);
+        }
+        write("/old/lattice-miner-gpu");
+        repoint_gpu_worker(&file, None).unwrap();
+        assert_eq!(worker(), "/old/lattice-miner-gpu", "a build without the worker changes nothing");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -591,7 +675,7 @@ mod tests {
     #[test]
     fn the_page_sets_only_managed_topology_fields() {
         let current = serde_json::json!({"listen": 4001, "rpc": 8080, "peers": ["a"], "minRelayFee": 5});
-        let merged = merged_topology(current.clone(), &serde_json::json!({"rpc": 18080, "listen": 14001})).unwrap();
+        let merged = merged_topology(current.clone(), &serde_json::json!({"rpc": 18080, "listen": 14001}), None).unwrap();
         assert_eq!(merged, serde_json::json!({"listen": 14001, "rpc": 18080, "minRelayFee": 5}));
         for bad in [
             serde_json::json!({"rpc": 18080, "listen": 14001, "publicRead": 80}),
@@ -602,7 +686,7 @@ mod tests {
             serde_json::json!({"rpc": 1, "listen": 2, "peers": "x"}),
             serde_json::json!([]),
         ] {
-            assert!(merged_topology(current.clone(), &bad).is_err(), "{bad}");
+            assert!(merged_topology(current.clone(), &bad, None).is_err(), "{bad}");
         }
     }
 
@@ -643,10 +727,10 @@ mod tests {
     fn allowed_origins_are_bare_origins() {
         let current = serde_json::json!({"listen": 4001, "rpc": 8080});
         let ok = serde_json::json!({"rpc": 8080, "listen": 4001, "rpcAllowedOrigins": ["chrome-extension://abcdefghijklmnopabcdefghijklmnop"]});
-        assert_eq!(merged_topology(current.clone(), &ok).unwrap()["rpcAllowedOrigins"], ok["rpcAllowedOrigins"]);
+        assert_eq!(merged_topology(current.clone(), &ok, None).unwrap()["rpcAllowedOrigins"], ok["rpcAllowedOrigins"]);
         for bad in ["*", "null", "https://a.example", "chrome-extension://x/y", "https://a.example/", "http://a b", "x://", "://x", "https://u@h", "a"] {
             let update = serde_json::json!({"rpc": 8080, "listen": 4001, "rpcAllowedOrigins": [bad]});
-            assert!(merged_topology(current.clone(), &update).is_err(), "{bad}");
+            assert!(merged_topology(current.clone(), &update, None).is_err(), "{bad}");
         }
     }
 

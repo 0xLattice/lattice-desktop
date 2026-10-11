@@ -14,6 +14,8 @@ import type { Topology } from "../../src/node-manager.ts";
 /** The directory holding lattice, lattice-node and lattice-mining-coordinator. */
 export const bin = process.env.LATTICE_NODE_BIN;
 export const run = promisify(execFile);
+/** The GPU mining worker (a built `lattice-miner-gpu`), when the test has one. */
+export const gpuMiner = process.env.LATTICE_GPU_MINER;
 
 export async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -75,6 +77,7 @@ export function harnessHost(root: string): AppHost {
       async writeTopology(topology) {
         writeFileSync(topologyFile, JSON.stringify(topology, null, 2));
       },
+      gpuWorker: async () => gpuMiner ?? null,
     },
     async nodeHTTP(method, path, body) {
       const { rpc } = JSON.parse(readFileSync(topologyFile, "utf8")) as Topology;

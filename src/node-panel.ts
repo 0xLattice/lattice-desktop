@@ -3,7 +3,7 @@
 // chains), and mining on it. Rendered with the wallet's own helpers and styles.
 
 import { h, render } from "../vendor/nexus-wallet/src/popup/app.ts";
-import { checkMining, checkPrefs, extensionOrigin, MAX_WORKERS, type ChainStatus, type MiningPrefs, type NodeManager, type NodePrefs } from "./node-manager.ts";
+import { checkMining, checkPrefs, extensionOrigin, MAX_WORKERS, type ChainStatus, type MiningPrefs, type NodeManager, type NodePrefs, type Searcher } from "./node-manager.ts";
 
 /** What the panel reads beyond `lattice status`: a chain's /health, the node's cookie, and the wallet's accounts. */
 export interface NodeReads {
@@ -91,7 +91,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
         h("button", { class: "btn", onclick: () => refresh() }, "Refresh"),
       ),
       toast,
-      h("button", { class: "btn block", onclick: () => { clearTimeout(timer); miningScreen(manager, reads, () => nodeScreen(manager, reads, back, onPrefsChanged)); } }, "Mining"),
+      h("button", { class: "btn block", onclick: () => { clearTimeout(timer); miningScreen(manager, reads, () => nodeScreen(manager, reads, back, onPrefsChanged), onPrefsChanged); } }, "Mining"),
       h("button", { class: "btn block", onclick: () => { clearTimeout(timer); settingsScreen(manager, () => nodeScreen(manager, reads, back, onPrefsChanged), onPrefsChanged); } }, "Node settings"),
       h("button", { class: "btn block", onclick: () => { clearTimeout(timer); pairScreen(manager, reads, () => nodeScreen(manager, reads, back, onPrefsChanged)); } }, "Pair browser extension"),
       h("button", { class: "btn block", onclick: () => { clearTimeout(timer); back(); } }, "Back to wallet"),
@@ -145,20 +145,31 @@ async function settingsScreen(manager: NodeManager, back: () => void, onPrefsCha
 }
 
 /** The recipient choices as entered: a chain set to "burn" is left out. */
-export function miningChoices(workers: string, chosen: Record<string, string>): MiningPrefs {
+export function miningChoices(searcher: Searcher, workers: string, chosen: Record<string, string>): MiningPrefs {
   return {
-    workers: Number(workers.trim()),
+    searcher,
+    // The graphics chip is one worker.
+    workers: searcher === "gpu" ? 1 : Number(workers.trim()),
     recipients: Object.fromEntries(Object.entries(chosen).filter(([, address]) => address !== "")),
   };
 }
 
 /**
- * Mining on this node with this Mac's CPU: the bundled `lattice mine` loop,
- * paying each hosted chain's reward and fees to an account of this wallet.
- * One search covers Nexus and the chains it carries (merged mining).
+ * Mining on this node with this Mac: the bundled `lattice mine` loop, on the
+ * graphics chip or the processor, paying each hosted chain's reward and fees
+ * to an account of this wallet. One search covers Nexus and the chains it
+ * carries (merged mining), so the chains mined are the chains hosted.
  */
-async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => void) {
-  const [chains, saved, accounts] = await Promise.all([manager.chains(), manager.miningPrefs(), reads.accounts()]);
+async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void) {
+  const [chains, saved, accounts, gpu] = await Promise.all([manager.chains(), manager.miningPrefs(), reads.accounts(), manager.canMineOnGPU()]);
+  const again = () => miningScreen(manager, reads, back, onPrefsChanged);
+  // A fresh setup searches on the graphics chip when the app carries its worker.
+  const searcher = h("select", { class: "picker", "aria-label": "Search with" },
+    ...(gpu ? [h("option", { value: "gpu" }, "This Mac's graphics chip (Metal)")] : []),
+    h("option", { value: "cpu" }, "This Mac's processor"),
+    ...(saved?.searcher === "custom" ? [h("option", { value: "custom" }, "The worker set in lattice.json")] : []),
+  ) as HTMLSelectElement;
+  searcher.value = saved?.searcher ?? (gpu ? "gpu" : "cpu");
   const cores = Math.max(1, Math.min(MAX_WORKERS, globalThis.navigator?.hardwareConcurrency ?? 1));
   const workers = h("input", { type: "text", inputmode: "numeric", "aria-label": "Workers", value: String(saved?.workers ?? 1) }) as HTMLInputElement;
   const pickers = new Map<string, HTMLSelectElement>();
@@ -187,7 +198,15 @@ async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => 
     } catch (e) { state.textContent = (e as Error).message; }
     toggle.textContent = mining ? "Stop mining" : "Start mining";
   };
-  const chosen = () => miningChoices(workers.value, Object.fromEntries([...pickers].map(([chain, picker]) => [chain, picker.value])));
+  const workersLabel = h("label", { class: "k" }, "");
+  const showWorkers = () => {
+    const onGPU = searcher.value === "gpu";
+    workers.disabled = onGPU;
+    workersLabel.textContent = onGPU ? "Workers (the graphics chip is one)" : `Workers (this Mac has ${cores} cores)`;
+  };
+  searcher.addEventListener("change", showWorkers);
+  showWorkers();
+  const chosen = () => miningChoices(searcher.value as Searcher, workers.value, Object.fromEntries([...pickers].map(([chain, picker]) => [chain, picker.value])));
   const act = (label: string, run: () => Promise<void>) => async () => {
     if (busy) return;
     busy = true;
@@ -210,11 +229,14 @@ async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => 
   render(
     h("div", { class: "stack" },
       h("h1", {}, "Mining"),
-      h("p", { class: "muted" }, "Mine on your node with this Mac's processor. One search covers Nexus and every chain your node hosts; each block found pays that chain's reward and fees to the account you choose here."),
+      h("p", { class: "muted" }, "Mine on your node with this Mac. One search covers Nexus and every chain your node hosts; each block found pays that chain's reward and fees to the account you choose here."),
       h("div", { class: "kv" }, h("div", { class: "row" }, h("span", { class: "k" }, "Status"), state)),
+      h("label", { class: "k" }, "Search with"), searcher,
       ...chains.flatMap((chain) => [h("label", { class: "k" }, `${chain} pays`), pickers.get(chain)!]),
       ...(accounts.length ? [] : [h("p", { class: "warn" }, "The wallet is locked or has no account, so there is no one of yours to pay. Unlock it first.")]),
-      h("label", { class: "k" }, `Workers (this Mac has ${cores} cores)`), workers,
+      workersLabel, workers,
+      h("p", { class: "muted" }, `Chains mined are the chains hosted: ${chains.join(", ")}. To mine another, or stop mining one, change what the node hosts.`),
+      h("button", { class: "btn block", onclick: () => settingsScreen(manager, again, onPrefsChanged) }, "Choose hosted chains"),
       toast,
       toggle,
       h("button", { class: "btn block", onclick: act("saving (a running miner restarts)", save) }, "Save"),
