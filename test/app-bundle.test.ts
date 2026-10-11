@@ -27,10 +27,14 @@ test("the packaged app boots and scaffolds its node through the bundled CLI", { 
   try {
     const data = join(home, "Library", "Application Support", "Lattice");
     const topologyFile = join(data, "host", "lattice.json");
-    // Nothing but the page asks for `lattice init`: this file means the page ran and reached the shell.
-    await until(() => (existsSync(topologyFile) ? true : undefined), "the app to scaffold its host root", 120_000);
-    const topology = JSON.parse(readFileSync(topologyFile, "utf8")) as { rpc: number; listen: number };
-    assert.deepEqual([topology.rpc, topology.listen], [18080, 14001], "the app's own ports, not the CLI's defaults");
+    // Nothing but the page asks for `lattice init`, and then moves the node to
+    // the app's own ports: this file, with those ports, means the page ran and
+    // reached the shell twice (the CLI's defaults are 8080 and 4001).
+    const ports = () => {
+      const topology = JSON.parse(readFileSync(topologyFile, "utf8")) as { rpc: number; listen: number };
+      return `${topology.rpc}/${topology.listen}`;
+    };
+    await until(() => (existsSync(topologyFile) && ports() === "18080/14001" ? true : undefined), "the app to scaffold its host root on its own ports", 120_000);
     assert.equal(child.exitCode, null, "the app is still running");
     // First run: no wallet was created and no node was started on the user's behalf.
     assert.equal(existsSync(join(data, "wallet", "vault.json")), false);
