@@ -22,7 +22,7 @@ const ctx = await esbuild.context({
   format: "esm",
   target: "es2022",
   platform: "browser",
-  legalComments: "none",
+  legalComments: "eof",
   minify: !watch,
   sourcemap: watch,
 });

@@ -1,0 +1,32 @@
+{
+  "Ivy": {
+    "repository": "https://github.com/adalinxx/Ivy",
+    "version": "15.0.1",
+    "revision": "5afa2f5c52227d4a01a0c9b7462a96d01d488c37",
+    "notice": "Ivy-15.0.1-MIT.txt"
+  },
+  "Multikey": {
+    "repository": "https://github.com/adalinxx/Multikey",
+    "version": "1.0.0",
+    "revision": "413c70e96c4de9af573e16b58ffc6a107911eb9f",
+    "notice": "Multikey-1.0.0-MIT.txt"
+  },
+  "Tally": {
+    "repository": "https://github.com/adalinxx/Tally",
+    "version": "3.1.0",
+    "revision": "f6c5e3571e0ab3cb67432bb720a0a65e9191da6a",
+    "notice": "Tally-3.1.0-MIT.txt"
+  },
+  "TrieDictionary": {
+    "repository": "https://github.com/adalinxx/TrieDictionary",
+    "version": "0.0.9",
+    "revision": "3ee63e31eb7d53cf56a5e7786e6671a7c4e422f5",
+    "notice": "TrieDictionary-0.0.9-MIT.txt"
+  },
+  "VolumeBroker": {
+    "repository": "https://github.com/adalinxx/VolumeBroker",
+    "version": "8.0.1",
+    "revision": "0455f6d28019938914ee804d639a288f46ff2ac0",
+    "notice": "VolumeBroker-8.0.1-MIT.txt"
+  }
+}
