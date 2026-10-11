@@ -104,6 +104,12 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     if (/Balance/.test(await pageText())) await press("Refresh balance");
     return false;
   };
+  /** The transfer listed with a confirmation: the list is read when asked, so it is asked until then. */
+  const confirmed = () => until(async () => {
+    if (/Sent1,?000Nexus\d+ confirmation/.test(await pageText())) return true;
+    await press("Refresh transactions");
+    return false;
+  }, async () => `the transfer confirmed; the page shows: ${(await pageText()).slice(0, 400)}`, 300_000);
   const RECIPIENT = 'input[placeholder="recipient address (bafy…)"]';
   const AMOUNT = 'input[aria-label="Amount"]';
 
@@ -214,7 +220,7 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await session.click(await field("#settings-button"));
     await press("Transactions");
     // Mining is still on, so the transfer is mined and counted.
-    await shows(/Sent1,?000Nexus\d+ confirmation/, 300_000);
+    await confirmed();
     await press("Back");
 
     // ---- locked: a wrong password is refused, the right one lets back in ----
@@ -271,7 +277,7 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await until(funded, "the balance, read from the node still running", 300_000);
     await session.click(await field("#settings-button"));
     await press("Transactions");
-    await shows(/Sent1,?000Nexus\d+ confirmation/);
+    await confirmed();
     await press("Back");
     await session.click(await field("#settings-button"));
     await shows(/Balance on Nexus/);
