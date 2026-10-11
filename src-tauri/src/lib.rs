@@ -795,8 +795,10 @@ mod tests {
         let file = dir.join("lattice.json");
         let write = |worker: &str| fs::write(&file, serde_json::to_vec(&serde_json::json!({ "rpc": 1, "mine": { "worker": worker, "workers": 1 } })).unwrap()).unwrap();
         let worker = || read_topology_at(&file).unwrap().unwrap()["mine"]["worker"].as_str().unwrap().to_string();
-        let now = "/Applications/Lattice.app/Contents/MacOS/lattice-miner-gpu";
-        write("/Users/me/Downloads/Lattice.app/Contents/MacOS/lattice-miner-gpu");
+        // The worker's file name is the platform's (`.exe` on Windows).
+        let (now, before, old) = (format!("/app/now/{GPU_WORKER}"), format!("/app/before/{GPU_WORKER}"), format!("/old/{GPU_WORKER}"));
+        let now = now.as_str();
+        write(&before);
         repoint_gpu_worker(&file, Some(now)).unwrap();
         assert_eq!(worker(), now);
         for kept in ["cpu", "/opt/custom-miner"] {
@@ -804,9 +806,9 @@ mod tests {
             repoint_gpu_worker(&file, Some(now)).unwrap();
             assert_eq!(worker(), kept);
         }
-        write("/old/lattice-miner-gpu");
+        write(&old);
         repoint_gpu_worker(&file, None).unwrap();
-        assert_eq!(worker(), "/old/lattice-miner-gpu", "a build without the worker changes nothing");
+        assert_eq!(worker(), old, "a build without the worker changes nothing");
         fs::remove_dir_all(&dir).unwrap();
     }
 
