@@ -2,6 +2,15 @@
 
 A full Lattice node and the Lattice Wallet in one macOS app (Tauri v2).
 
+The same app is packaged for Linux in
+[lattice-desktop-linux](https://github.com/adalinxx/lattice-desktop-linux) and
+for Windows in
+[lattice-desktop-windows](https://github.com/adalinxx/lattice-desktop-windows).
+Both pin this repository and add only their packaging, so the code here runs
+on all three: the paths below are the macOS ones, a Linux package keeps the
+node binaries in its own resources, and on Windows the shell runs the Linux
+node in WSL (`src-tauri/src/wsl.rs`).
+
 - **Your own full node.** The app runs the bundled, unmodified `lattice-node`
   through the bundled `lattice` CLI (`init` / `up` / `down` / `status`), exactly
   as an operator would. The host root is
