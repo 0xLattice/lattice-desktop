@@ -18,6 +18,10 @@ export RUSTFLAGS="--remap-path-prefix=$PWD=/src/lattice-desktop --remap-path-pre
 export CFLAGS="-ffile-prefix-map=$PWD=/src/lattice-desktop -ffile-prefix-map=$HOME=/build-home"
 export CXXFLAGS="$CFLAGS"
 unset APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+# Swift embeds some literal source paths; serialize the canonical build root.
+lock=/tmp/lattice-release-build.lock
+mkdir "$lock" || { echo 'Another release build holds the canonical build root.' >&2; exit 1; }
+trap 'rmdir "$lock"' EXIT
 scripts/build-node-binaries.sh
 npm run typecheck
 npm run build

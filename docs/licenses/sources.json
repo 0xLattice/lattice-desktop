@@ -44,5 +44,13 @@
   ],
   "objc2-core-foundation-0.3.2.txt": [
     "https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md"
+  ],
+  "block-0.1.6.txt": [
+    "https://github.com/SSheldon/rust-block/blob/47178790cfc9d4a8b092051d8b413b78bd31254a/Cargo.toml",
+    "https://github.com/spdx/license-list-data/blob/779ef2e5dff6d4af389c53de5e97116ab0bb52e8/text/MIT.txt"
+  ],
+  "selectors-0.38.0.txt": [
+    "https://github.com/servo/stylo/blob/572ecba2d1600e7c3d490586692a209faf703baa/selectors/lib.rs",
+    "https://github.com/spdx/license-list-data/blob/779ef2e5dff6d4af389c53de5e97116ab0bb52e8/text/MPL-2.0.txt"
   ]
 }

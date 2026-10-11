@@ -18,7 +18,7 @@ commit="$(tr -d '[:space:]' < "$here/NODE_COMMIT")"
 src="${1:-$here/.build-node}"
 if [ "${LATTICE_RELEASE:-0}" = 1 ]; then
   src="${LATTICE_NODE_SOURCE:-/tmp/lattice-release-node}"
-  case "$src" in /tmp/lattice-release-*|/private/tmp/lattice-release-*) ;; *) echo 'Release node source must use a neutral /tmp/lattice-release-* path' >&2; exit 1;; esac
+  case "$src" in /tmp/lattice-release-node|/private/tmp/lattice-release-node) ;; *) echo 'Release node source must use the canonical /tmp/lattice-release-node path' >&2; exit 1;; esac
 fi
 
 if [ ! -d "$src/.git" ] && [ ! -f "$src/.git" ]; then
@@ -28,6 +28,7 @@ if [ -z "${1:-}" ] || [ "${LATTICE_RELEASE:-0}" = 1 ]; then
   git -C "$src" fetch --quiet origin "$commit"
   git -C "$src" checkout --quiet --detach "$commit"
 fi
+src="$(cd "$src" && pwd -P)"
 head="$(git -C "$src" rev-parse HEAD)"
 if [ "$head" != "$commit" ] && [ "${ALLOW_OTHER_COMMIT:-0}" != 1 ]; then
   echo "lattice-node checkout is at $head, not NODE_COMMIT $commit" >&2
@@ -42,7 +43,7 @@ fi
 products="lattice lattice-node lattice-mining-coordinator lattice-miner"
 flags=(--force-resolved-versions)
 if [ "${LATTICE_RELEASE:-0}" = 1 ]; then
-  flags+=(--disable-index-store
+  flags+=(--disable-index-store -Xlinker -no_uuid
     -Xswiftc -file-prefix-map -Xswiftc "$src=/src/lattice-node"
     -Xswiftc -debug-prefix-map -Xswiftc "$src=/src/lattice-node"
     -Xswiftc -prefix-serialized-debugging-options
@@ -75,7 +76,11 @@ if [ -n "$(git -C "$gpu_src" status --porcelain --untracked-files=normal)" ]; th
   echo "lattice-miner-gpu checkout has local changes; refusing to bundle it" >&2
   exit 1
 fi
-(cd "$gpu_src" && cargo build --release --locked)
+if [ "${LATTICE_RELEASE:-0}" = 1 ]; then
+  (cd "$gpu_src" && RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-no_uuid" cargo build --release --locked)
+else
+  (cd "$gpu_src" && cargo build --release --locked)
+fi
 install -m 0755 "$gpu_src/target/release/lattice-miner-gpu" "$out/lattice-miner-gpu-$triple"
 printf '%s\n' "$gpu_commit" > "$out/MINER_GPU_COMMIT"
 if [ "${LATTICE_RELEASE:-0}" = 1 ]; then

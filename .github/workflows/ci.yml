@@ -21,6 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run typecheck
+      - run: python3 scripts/test-release-macos.py
       - run: npm test
       - run: npm run build
       # The shell's build script requires the sidecars to exist; CI stages

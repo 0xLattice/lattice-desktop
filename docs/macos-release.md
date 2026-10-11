@@ -51,13 +51,13 @@ cd lattice-desktop
 git checkout --detach <reviewed-release-commit>
 git submodule update --init --recursive
 npm ci
-LATTICE_NODE_SOURCE=/tmp/lattice-release-node-a scripts/release-macos.sh ../candidate-a
+LATTICE_NODE_SOURCE=/tmp/lattice-release-node scripts/release-macos.sh ../candidate-a
 python3 scripts/test-release-macos.py
 npm test
 npm --prefix vendor/nexus-wallet test
 npm --prefix vendor/nexus-wallet run typecheck
 cargo test --locked --manifest-path src-tauri/Cargo.toml
-LATTICE_NODE_BIN=/tmp/lattice-release-node-a/.build/debug \
+LATTICE_NODE_BIN=/tmp/lattice-release-node/.build/debug \
 LATTICE_APP="$PWD/src-tauri/target/release/bundle/macos/Lattice.app" \
 LATTICE_GPU_MINER="$PWD/.build-miner-gpu/target/release/lattice-miner-gpu" npm test
 ```
@@ -71,7 +71,7 @@ against an existing production profile for release testing.
 The script builds the node and CLI from `NODE_COMMIT`, the GPU worker from
 `MINER_GPU_COMMIT`, and the wallet/SDK from recursive submodule commits.
 Swift stays unoptimized (`debug`): this preserves the existing workaround for
-the Swift optimizer issue described in the README. Release node builds use a neutral temporary source path because SwiftPM resource accessors and some runtime diagnostics contain literal paths. Use a fresh `/tmp/lattice-release-*` directory for each independent build. Debug symbols are stripped
+the Swift optimizer issue described in the README. Release node builds use a neutral temporary source path because SwiftPM resource accessors and some runtime diagnostics contain literal paths. The absolute `/tmp/lattice-release-node` path is a required build input: Swift runtime file macros are not changed by debug-prefix maps. Release builds serialize access to this root. For an independent repeat, preserve the first outputs, move this task-created source checkout aside, then let the builder create a fresh checkout at the same canonical path. Debug symbols are stripped
 from staged helpers, and compiler paths are remapped. Rust dependencies use
 `Cargo.lock`, Swift uses `Package.resolved`, and npm uses lockfiles. Helper
 compatibility libraries and dependency resource bundles are included. Native binaries are signed individually before the enclosing app. No certificate,
@@ -90,7 +90,7 @@ third-party copyright and license attribution.
 
 Build again from an independent checkout at the same reviewed commit, with
 fresh Swift and Cargo build directories and the same exact toolchain versions.
-Use a different checkout path to test path independence. Keep both signed app
+The desktop checkout path may differ; the helper source root must remain the canonical path specified above. Compiler-generated UUIDs are disabled for the helpers at link time; runtime sections are not removed or rewritten. Keep both signed app
 bundles until comparison is complete:
 
 ```sh
