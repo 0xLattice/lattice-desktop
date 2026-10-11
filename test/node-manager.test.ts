@@ -221,3 +221,28 @@ test("mining: nothing to ask the CLI before it is set up; it needs the node; sav
   assert.deepEqual(calls, ["mine-status", "mine-stop", "down"]);
   assert.equal(state.mining, false);
 });
+
+test("a chain no longer hosted is no longer paid: the CLI refuses a lattice.json whose mining names an unhosted chain", async () => {
+  const { host, calls, state } = scripted({
+    listen: 14001, rpc: 18080, hostedChains: ["Nexus/testnet"],
+    mine: { worker: "cpu", workers: 1, recipients: { Nexus: MINER, "Nexus/testnet": MINER } },
+  }, true);
+  state.mining = true;
+  const manager = new NodeManager(host);
+  const prefs = await manager.prefs();
+  await manager.configure({ ...prefs, hostedChains: [] });
+  assert.deepEqual(state.topology!.mine, { worker: "cpu", workers: 1, recipients: { Nexus: MINER } });
+  assert.equal(state.topology!.hostedChains, undefined);
+  // The loop was started with the old recipients, so it is restarted around the node's own restart.
+  assert.deepEqual(calls, ["mine-status", "mine-stop", "status", "down", "up", "mine-start"]);
+
+  // A change that drops no recipient leaves the miner alone.
+  calls.length = 0;
+  await manager.configure({ ...prefs, hostedChains: [], peers: "none" });
+  assert.deepEqual(calls, ["status", "down", "up"]);
+
+  // An operator's tuning entry for the chain is theirs to remove: say so, and write nothing.
+  state.topology = { listen: 14001, rpc: 18080, hostedChains: ["Nexus/testnet"], mine: { recipients: {}, minWork: { "Nexus/testnet": "2^20" } } };
+  await assert.rejects(manager.configure({ ...prefs, hostedChains: [] }), /mine\.minWork names Nexus\/testnet/);
+  assert.deepEqual(state.topology.hostedChains, ["Nexus/testnet"]);
+});

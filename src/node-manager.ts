@@ -241,7 +241,22 @@ export class NodeManager {
     const problem = checkPrefs(prefs);
     if (problem) throw new Error(problem);
     const topology = await this.ensureHost();
-    await this.#rewrite(withPrefs(topology, prefs));
+    const next = withPrefs(topology, prefs);
+    // The CLI refuses a lattice.json whose mining names a chain it does not
+    // host: `up`, and `status` with it. A chain no longer hosted is no longer
+    // paid; a tuning entry for it is the operator's to remove.
+    const hosted = new Set(["Nexus", ...prefs.hostedChains]);
+    const tuned = Object.keys((topology.mine?.minWork as Record<string, unknown> | undefined) ?? {}).find((chain) => !hosted.has(chain));
+    if (tuned !== undefined) throw new Error(`lattice.json's mine.minWork names ${tuned}. Remove that entry there before you stop hosting it.`);
+    const paid = topology.mine?.recipients ?? {};
+    const dropped = Object.keys(paid).filter((chain) => !hosted.has(chain));
+    if (dropped.length === 0) return this.#rewrite(next);
+    next.mine = { ...topology.mine, recipients: Object.fromEntries(Object.entries(paid).filter(([chain]) => hosted.has(chain))) };
+    // A running loop was started with the old recipients: restart it with these.
+    const wasMining = (await this.miningStatus()).running;
+    if (wasMining) await this.#run("mine-stop");
+    await this.#rewrite(next);
+    if (wasMining) await this.#run("mine-start");
   }
 
   /** Writes the topology; a running node restarts to take it. */

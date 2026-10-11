@@ -156,6 +156,11 @@ The repository produces an **unsigned** development build. To distribute it:
     Stop taking the miner with it. With `LATTICE_GPU_MINER=<a built
     lattice-miner-gpu>` it mines on the graphics chip first, where the
     machine has one it can use.
+  - `e2e-settings`: Node settings typed wrong (refused, nothing written) and
+    right, a port change that reloads the app, a child chain hosted from the
+    Mining screen, both chains mined to different accounts with one paying no
+    one, the node restarted under the miner, a chain dropped while mining
+    still paid it, and a relaunch showing what was saved.
   - `e2e-custody`: a `lattice key generate` key file, the idle lock firing
     in the middle of a send, a fee replacement, pairing an extension, and a
     backup file restored on a second host.
