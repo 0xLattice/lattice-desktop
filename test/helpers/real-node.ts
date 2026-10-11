@@ -78,6 +78,13 @@ export function harnessHost(root: string): AppHost {
         writeFileSync(topologyFile, JSON.stringify(topology, null, 2));
       },
       gpuWorker: async () => gpuMiner ?? null,
+      async miningLog() {
+        try {
+          return readFileSync(join(root, "log", "mine.log"), "utf8").slice(-64 * 1024);
+        } catch {
+          return "";
+        }
+      },
     },
     async nodeHTTP(method, path, body) {
       const { rpc } = JSON.parse(readFileSync(topologyFile, "utf8")) as Topology;
@@ -115,6 +122,9 @@ export function harnessHost(root: string): AppHost {
     },
     print: () => {},
     reload: () => {},
+    // The tests start the node themselves, to see the app with it stopped;
+    // e2e-first-run leaves this on, as the shipped app has it.
+    autoStart: false,
   };
 }
 
@@ -160,3 +170,15 @@ export function input(placeholder: string): HTMLInputElement {
 /** Wait for the page to say `pattern`. */
 export const shows = (pattern: RegExp, ms = 60_000) =>
   until(() => (pattern.test(pageText()) ? true : undefined), () => `the page to show ${pattern}; it shows: ${pageText().slice(0, 600)}`, ms);
+
+/** What the home screen shows as the balance: digits, or a sentence when it could not be read. */
+export const balanceShown = () => document.querySelector(".balance-value .v")?.textContent ?? "";
+/** Whether the home screen shows a balance above zero. */
+export const funded = () => /^[\d,]*[1-9][\d,]*$/.test(balanceShown());
+
+/** Press a button once the screen offers it: one whose label follows what the app has just learned. */
+export async function press(text: string): Promise<void> {
+  const found = await until(() => [...document.querySelectorAll("button")].find((item) => item.textContent === text && !item.disabled) as HTMLButtonElement | undefined,
+    () => `button "${text}"; page was: ${pageText().slice(0, 400)}`, 60_000);
+  found.click();
+}

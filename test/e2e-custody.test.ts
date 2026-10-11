@@ -69,7 +69,7 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     await shows(/Review/);
     const bob = importPrivateKey("b0".repeat(32)).address;
     input("recipient address (bafy…)").value = bob;
-    input("amount (units)").value = "1000";
+    (document.querySelector('input[aria-label="Amount"]') as HTMLInputElement).value = "1000";
     // Idle past the lock. The wallet keeps checking in on its signer while it
     // is in view (here, each time the window comes forward); looking is not use
     // and must not put the lock off.
@@ -119,7 +119,7 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     await shows(/Enter the extension's id/);
     const extension = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
     const oldCookie = readFileSync(cookieFile(root), "utf8");
-    input("extension id (chrome://extensions) or chrome-extension://…").value = "abcdefghijklmnopabcdefghijklmnop";
+    input("the extension's id").value = "abcdefghijklmnopabcdefghijklmnop";
     button("Allow this extension").click();
     await shows(new RegExp("Allowed " + extension));
     await until(async () => (readFileSync(cookieFile(root), "utf8") !== oldCookie && (await fetch(`${ownNode}/health`)).ok ? true : undefined), "the node restarted with a new cookie");

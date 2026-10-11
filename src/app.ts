@@ -11,7 +11,7 @@ import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import type { KeyValueStore } from "../vendor/nexus-wallet/src/lib/wallet/settings.ts";
 import { NodeManager, type HostOps } from "./node-manager.ts";
 import { loopbackFetch, type NodeHTTP } from "./loopback.ts";
-import { nodeScreen } from "./node-panel.ts";
+import { nodeNotices, nodeScreen } from "./node-panel.ts";
 
 export const AUTO_LOCK_MS = 10 * 60 * 1000;
 
@@ -28,6 +28,12 @@ export interface AppHost {
   /** Start over after the node's RPC port changed. */
   reload(): void;
   autoLockMs?: number;
+  /**
+   * Start the node when the app opens (default: yes). The app is a wallet on
+   * its own node; without the node it can show nothing, so a person should not
+   * have to find the switch first.
+   */
+  autoStart?: boolean;
 }
 
 export async function startApp(host: AppHost) {
@@ -61,6 +67,17 @@ export async function startApp(host: AppHost) {
   const reads = {
     health: (path: string) => reader(ownNode, path.split("/"), fetch).health(),
     cookie: host.nodeCookie,
+    peers: async () => {
+      const answer = await fetch(`${ownNode}/api/peers`);
+      return Number(((await answer.json()) as { count?: number }).count ?? 0);
+    },
+    children: async (path: string) => {
+      const chain = reader(ownNode, path.split("/"), fetch);
+      const latest = await chain.latestBlock();
+      return (await chain.children(latest.hash))
+        .filter((child) => child.directory && !child.directory.includes("/"))
+        .map((child) => `${path}/${child.directory}`);
+    },
     // The active account first: it is who mining pays unless told otherwise.
     accounts: async () => {
       const answer = await wallet.getState();
@@ -70,6 +87,9 @@ export async function startApp(host: AppHost) {
         .map(({ label, address }) => ({ label, address }));
     },
   };
+  // Opening the app starts its node. Not waited for: the wallet opens at once
+  // and its home screen says the node is starting, then syncing.
+  if (host.autoStart !== false) void manager.start().catch(() => { /* the home screen offers Start again */ });
   await startWallet({
     wallet,
     store: host.settings,
@@ -87,6 +107,8 @@ export async function startApp(host: AppHost) {
     // the wallet hosts it (a running node restarts).
     chains: { list: () => manager.chains(), add: (chain) => manager.addHostedChain(chain) },
     actions: [{ label: "Node", run: (back) => nodeScreen(manager, reads, back, host.reload) }],
+    // The home screen says what the node is doing before its numbers are read.
+    notices: (chain) => nodeNotices(manager, reads, chain),
   });
   return { manager, ownNode };
 }

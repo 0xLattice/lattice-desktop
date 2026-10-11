@@ -140,6 +140,19 @@ fn gpu_worker() -> Option<String> {
     gpu_worker_path()
 }
 
+/// The end of the mining loop's own log, for the page to say how it is going:
+/// at most the last 64 KiB of `<root>/log/mine.log`, "" when there is none.
+#[tauri::command]
+fn mine_log(app: AppHandle) -> Result<String> {
+    Ok(tail(&host_root(&app)?.join("log").join("mine.log"), 64 * 1024))
+}
+
+fn tail(path: &Path, most: usize) -> String {
+    let Ok(bytes) = fs::read(path) else { return String::new() };
+    let start = bytes.len().saturating_sub(most);
+    String::from_utf8_lossy(&bytes[start..]).into_owned()
+}
+
 /// lattice.json names the GPU worker by its path inside this app. If the app
 /// was moved since, point it at where the worker is now, so mining does not
 /// fail on (or run) a file at the old place.
@@ -545,6 +558,7 @@ pub fn run() {
             node_http,
             node_cookie,
             gpu_worker,
+            mine_log,
             save_backup,
             print_page
         ])
@@ -650,6 +664,18 @@ mod tests {
         write("/old/lattice-miner-gpu");
         repoint_gpu_worker(&file, None).unwrap();
         assert_eq!(worker(), "/old/lattice-miner-gpu", "a build without the worker changes nothing");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_mining_log_is_read_from_its_end_and_may_be_absent() {
+        let dir = std::env::temp_dir().join(format!("lattice-tail-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mine.log");
+        assert_eq!(tail(&file, 8), "");
+        fs::write(&file, "0123456789").unwrap();
+        assert_eq!(tail(&file, 4), "6789");
+        assert_eq!(tail(&file, 64), "0123456789");
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loopbackFetch, type NodeHTTP } from "../src/loopback.ts";
 import { reader, submitter } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
-import { statusLine, parsePeersField, withSync } from "../src/node-panel.ts";
+import { chosenChains, hostableChains, statusLine, parsePeersField, withSync } from "../src/node-panel.ts";
 
 const BASE = "http://127.0.0.1:18080";
 
@@ -37,14 +37,28 @@ test("anything but the app's own node is refused before the shell is asked", asy
   assert.equal(asked, 0);
 });
 
-test("node panel wording", () => {
+test("a chain's state is said in a user's words, not the node's", () => {
   assert.equal(statusLine({ path: "Nexus", state: "down" }), "stopped");
-  assert.equal(statusLine({ path: "Nexus", state: "active", height: 1234n, mempool: 2 }), `active · height ${(1234).toLocaleString()} · 2 pending`);
+  assert.equal(statusLine({ path: "Nexus", state: "unreachable" }), "starting…");
+  assert.equal(statusLine({ path: "Nexus/testnet", state: "awaitingGenesis" }), "waiting for its first block");
+  assert.equal(statusLine({ path: "Nexus", state: "active", height: 1234n, mempool: 2 }), `in sync · block ${(1234).toLocaleString()} · 2 pending`);
   assert.equal(statusLine({ path: "Nexus", state: "active", height: 1234n, bestHeaderHeight: 5000n }), `syncing · ${(1234).toLocaleString()} of ${(5000).toLocaleString()}`);
-  assert.equal(statusLine({ path: "Nexus", state: "active", height: 5000n, bestHeaderHeight: 5000n }), `active · height ${(5000).toLocaleString()}`);
+  assert.equal(statusLine({ path: "Nexus", state: "active", height: 5000n, bestHeaderHeight: 5000n }), `in sync · block ${(5000).toLocaleString()}`);
+  // "In sync" is a claim about the network: without peers the node is only running.
+  assert.equal(statusLine({ path: "Nexus", state: "active", height: 0n }, false), "running · block 0");
   assert.equal(parsePeersField("default", "x"), "default");
   assert.equal(parsePeersField("none", ""), "none");
   assert.deepEqual(parsePeersField("custom", " a@h:1\n b@h:2, "), ["a@h:1", "b@h:2"]);
+});
+
+test("node settings offer the chains the node can see, and a typed path for one it cannot", async () => {
+  const children: Record<string, string[]> = { Nexus: ["Nexus/testnet", "Nexus/games"], "Nexus/testnet": ["Nexus/testnet/payments"] };
+  const reads = { children: async (path: string) => { if (path === "Nexus/gone") throw new Error("not hosted"); return children[path] ?? []; } };
+  // Hosted chains, and the children of Nexus and of each hosted chain; parents first.
+  assert.deepEqual(await hostableChains(["Nexus/testnet", "Nexus/gone"], reads), ["Nexus/games", "Nexus/gone", "Nexus/testnet", "Nexus/testnet/payments"]);
+  assert.deepEqual(await hostableChains([], reads), ["Nexus/games", "Nexus/testnet"]);
+  assert.deepEqual(chosenChains(["Nexus/testnet/payments", "Nexus/testnet"], " Nexus/other  Nexus/testnet "), ["Nexus/other", "Nexus/testnet", "Nexus/testnet/payments"]);
+  assert.deepEqual(chosenChains([], ""), []);
 });
 
 test("sync progress reads each running chain's best header height; a stopped or failing one is left as is", async () => {

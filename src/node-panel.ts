@@ -3,11 +3,15 @@
 // chains), and mining on it. Rendered with the wallet's own helpers and styles.
 
 import { h, render } from "../vendor/nexus-wallet/src/popup/app.ts";
-import { checkMining, checkPrefs, extensionOrigin, MAX_WORKERS, type ChainStatus, type MiningPrefs, type NodeManager, type NodePrefs, type Searcher } from "./node-manager.ts";
+import { checkMining, checkPrefs, extensionOrigin, MAX_WORKERS, parseMiningLog, type ChainStatus, type MiningPrefs, type NodeManager, type NodePrefs, type Searcher } from "./node-manager.ts";
 
-/** What the panel reads beyond `lattice status`: a chain's /health, the node's cookie, and the wallet's accounts. */
+/** What the panel reads beyond `lattice status`: a chain's /health and children, the node's cookie, and the wallet's accounts. */
 export interface NodeReads {
   health(path: string): Promise<{ height?: bigint; bestHeaderHeight?: bigint }>;
+  /** The child chains `path`'s latest block carries, as full paths. */
+  children(path: string): Promise<string[]>;
+  /** How many peers the node is connected to. */
+  peers(): Promise<number>;
   cookie(): Promise<string | null>;
   /** The wallet's accounts, the active one first: who mining can pay. Empty while locked. */
   accounts(): Promise<{ label: string; address: string }[]>;
@@ -15,14 +19,18 @@ export interface NodeReads {
 
 const POLL_MS = 3000;
 
-export function statusLine(s: ChainStatus): string {
+/** A chain's state in the words of someone using the app, not running the node. */
+export function statusLine(s: ChainStatus, connected = true): string {
   if (s.state === "down") return "stopped";
-  if (s.state === "unreachable") return "starting (RPC not answering yet)";
+  if (s.state === "unreachable") return "starting…";
+  if (s.state === "awaitingGenesis") return "waiting for its first block";
   const behind = s.height !== undefined && s.bestHeaderHeight !== undefined && s.bestHeaderHeight > s.height;
   if (behind) return `syncing · ${s.height!.toLocaleString()} of ${s.bestHeaderHeight!.toLocaleString()}`;
-  const height = s.height === undefined ? "" : ` · height ${s.height.toLocaleString()}`;
+  if (s.state !== "active") return s.state;
+  const height = s.height === undefined ? "" : ` · block ${s.height.toLocaleString()}`;
   const pool = s.mempool ? ` · ${s.mempool} pending` : "";
-  return `${s.state}${height}${pool}`;
+  // "In sync" is a claim about the network; a node with no peers cannot make it.
+  return `${connected ? "in sync" : "running"}${height}${pool}`;
 }
 
 /** The peers field as typed: blank = the node's built-in peers. */
@@ -45,94 +53,200 @@ export async function withSync(chains: ChainStatus[], reads: Pick<NodeReads, "he
   }));
 }
 
+export interface Notice {
+  text: string;
+  action?: { label: string; run(): Promise<void> };
+}
+
+/**
+ * What the wallet's home screen should say about this node before its numbers
+ * are trusted, for the chain in view: stopped (with the way to start it),
+ * starting, waiting, or syncing; and that it is mining, when it is. Nothing
+ * when the node is in sync and idle.
+ */
+/** What a node with no peers should say: it runs, and sees only itself. */
+export function alone(peers: NodePrefs["peers"]): string {
+  return peers === "none"
+    ? "Your node is set to connect to no one, so it sees only its own blocks. To join the network, choose its peers in Node settings."
+    : "Your node has no peers yet, so it cannot see the network. It keeps trying.";
+}
+
+export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "health" | "peers">, chain: string): Promise<Notice[]> {
+  const chains = await withSync(await manager.status(), reads);
+  if (chains.every((c) => c.state === "down")) {
+    return [{ text: "Your node is stopped, so nothing can be read or sent.", action: { label: "Start node", run: () => manager.start() } }];
+  }
+  const notices: Notice[] = [];
+  const shown = chains.find((c) => c.path === chain);
+  const root = chains[0];
+  const line = (c: ChainStatus) => statusLine(c);
+  if (chains.some((c) => c.state === "unreachable")) notices.push({ text: "Your node is starting…" });
+  else if (shown === undefined) notices.push({ text: `Your node does not host ${chain}.` });
+  else if (shown.state === "awaitingGenesis") notices.push({ text: `${chain} is waiting for its first block on your node.` });
+  else if (line(shown).startsWith("syncing")) notices.push({ text: `${chain} is ${line(shown)}. Balances may be behind.` });
+  else if (root && root !== shown && line(root).startsWith("syncing")) notices.push({ text: `${root.path} is ${line(root)}. ${chain} follows it.` });
+  // Running is not the same as connected: a node with no peers answers every
+  // read, at whatever height it has, and would otherwise look in sync.
+  if (!chains.some((c) => c.state === "unreachable") && (await reads.peers().catch(() => undefined)) === 0) {
+    notices.push({ text: alone((await manager.prefs()).peers) });
+  }
+  if ((await manager.miningStatus().catch(() => ({ running: false }))).running) notices.push({ text: "Mining on this Mac." });
+  return notices;
+}
+
 export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void) {
   const table = h("div", { class: "kv" }, h("div", { class: "row" }, h("span", { class: "muted" }, "…")));
-  const toast = h("div", { class: "toast" });
+  const toast = h("div", { class: "toast", role: "status" });
+  // One button, saying the one thing it will do: the node is either running or it is not.
+  const toggle = h("button", { class: "block" }, "…") as HTMLButtonElement;
+  const lonely = h("p", { class: "warn", role: "status", hidden: "true" });
+  let running = false;
   let busy = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const again = () => nodeScreen(manager, reads, back, onPrefsChanged);
+  const leave = (go: () => void) => () => { clearTimeout(timer); go(); };
 
   const refresh = async () => {
     clearTimeout(timer);
     try {
-      const chains = await withSync(await manager.status(), reads);
-      table.replaceChildren(...chains.map((c) => h("div", { class: "row" },
-        h("span", { class: "k mono" }, c.path),
-        h("span", { class: "v" }, statusLine(c)),
-      )));
+      const [chains, mining, prefs] = await Promise.all([
+        manager.status().then((status) => withSync(status, reads)),
+        manager.miningStatus().catch(() => ({ running: false })),
+        manager.prefs(),
+      ]);
+      running = chains.some((c) => c.state !== "down");
+      const peers = running ? await reads.peers().catch(() => undefined) : undefined;
+      lonely.hidden = peers !== 0;
+      lonely.textContent = peers === 0 ? alone(prefs.peers) : "";
+      table.replaceChildren(
+        ...chains.map((c) => h("div", { class: "row" },
+          h("span", { class: "k mono" }, c.path),
+          h("span", { class: "v" }, statusLine(c, peers !== 0)),
+        )),
+        ...(peers === undefined ? [] : [h("div", { class: "row" }, h("span", { class: "k" }, "Peers"), h("span", { class: "v" }, peers === 0 ? "none" : peers.toLocaleString()))]),
+        h("div", { class: "row" }, h("span", { class: "k" }, "Mining"), h("span", { class: "v" }, mining.running ? "on" : "off")),
+      );
     } catch (e) {
       table.replaceChildren(h("div", { class: "row" }, h("span", { class: "warn" }, (e as Error).message)));
+    }
+    if (!busy) {
+      toggle.textContent = running ? "Stop node" : "Start node";
+      // Starting is the step forward; stopping is not, so it is not the filled button.
+      toggle.className = running ? "btn block" : "block";
     }
     if (document.body.contains(table)) timer = setTimeout(refresh, POLL_MS);
   };
 
-  const act = (label: string, run: () => Promise<void>) => async () => {
+  toggle.addEventListener("click", async () => {
     if (busy) return;
     busy = true;
-    toast.textContent = label + "…";
+    toggle.disabled = true;
+    toast.textContent = running ? "stopping (mining stops with it)…" : "starting…";
     try {
-      await run();
+      await (running ? manager.stop() : manager.start());
       toast.textContent = "";
     } catch (e) {
       toast.textContent = (e as Error).message;
     } finally {
       busy = false;
-      refresh();
+      toggle.disabled = false;
+      void refresh();
     }
-  };
+  });
 
   render(
     h("div", { class: "stack" },
       h("h1", {}, "Your node"),
-      h("p", { class: "muted" }, "A full Lattice node on this Mac. The wallet reads and sends only through it, over loopback."),
+      h("p", { class: "muted" }, "A full Lattice node on this Mac. The wallet reads and sends only through it."),
       table,
-      h("div", { class: "row-actions" },
-        h("button", { class: "btn", onclick: act("starting", () => manager.start()) }, "Start"),
-        h("button", { class: "btn", onclick: act("stopping", () => manager.stop()) }, "Stop"),
-        h("button", { class: "btn", onclick: () => refresh() }, "Refresh"),
-      ),
+      lonely,
+      toggle,
       toast,
-      h("button", { class: "btn block", onclick: () => { clearTimeout(timer); miningScreen(manager, reads, () => nodeScreen(manager, reads, back, onPrefsChanged), onPrefsChanged); } }, "Mining"),
-      h("button", { class: "btn block", onclick: () => { clearTimeout(timer); settingsScreen(manager, () => nodeScreen(manager, reads, back, onPrefsChanged), onPrefsChanged); } }, "Node settings"),
-      h("button", { class: "btn block", onclick: () => { clearTimeout(timer); pairScreen(manager, reads, () => nodeScreen(manager, reads, back, onPrefsChanged)); } }, "Pair browser extension"),
-      h("button", { class: "btn block", onclick: () => { clearTimeout(timer); back(); } }, "Back to wallet"),
+      h("button", { class: "btn block", onclick: leave(() => miningScreen(manager, reads, again, onPrefsChanged)) }, "Mining"),
+      h("button", { class: "btn block", onclick: leave(() => settingsScreen(manager, reads, again, onPrefsChanged)) }, "Node settings"),
+      h("button", { class: "btn block", onclick: leave(() => pairScreen(manager, reads, again)) }, "Pair browser extension"),
+      h("button", { class: "btn block", onclick: leave(back) }, "Back to wallet"),
     ),
   );
-  refresh();
+  void refresh();
 }
 
-async function settingsScreen(manager: NodeManager, back: () => void, onPrefsChanged: () => void) {
+/** Parents before children, then by name: the order lattice.json wants, and the order to read them in. */
+const byDepth = (a: string, b: string) => a.split("/").length - b.split("/").length || a.localeCompare(b);
+
+/**
+ * The chains the settings screen offers: those hosted, and the child chains
+ * the hosted ones carry (what the node can see without being told a path).
+ */
+export async function hostableChains(hosted: string[], reads: Pick<NodeReads, "children">): Promise<string[]> {
+  const found = new Set(hosted);
+  await Promise.all(["Nexus", ...hosted].map(async (chain) => {
+    for (const child of await reads.children(chain).catch(() => [])) found.add(child);
+  }));
+  return [...found].sort(byDepth);
+}
+
+/** The chains ticked, with a typed path added: parents first, each once. */
+export function chosenChains(ticked: string[], typed: string): string[] {
+  return [...new Set([...ticked, ...typed.split(/[\s,]+/).filter(Boolean)])].sort(byDepth);
+}
+
+async function settingsScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void) {
   const prefs = await manager.prefs();
-  const rpc = h("input", { type: "text", inputmode: "numeric", value: String(prefs.rpc) }) as HTMLInputElement;
-  const listen = h("input", { type: "text", inputmode: "numeric", value: String(prefs.listen) }) as HTMLInputElement;
-  const mode = h("select", { class: "picker" },
-    h("option", { value: "default" }, "Built-in Nexus peers"),
-    h("option", { value: "custom" }, "My peers"),
-    h("option", { value: "none" }, "No peers (private)"),
+  const offered = await hostableChains(prefs.hostedChains, reads);
+  // Recognised, not recalled: the chains the node can see are ticked or not; a path is typed only for one it cannot.
+  const boxes = offered.map((chain) => {
+    const box = h("input", { type: "checkbox", "aria-label": chain, id: `host-${chain}` }) as HTMLInputElement;
+    box.checked = prefs.hostedChains.includes(chain);
+    return { chain, box };
+  });
+  const other = h("input", { type: "text", placeholder: "another chain's path, e.g. Nexus/testnet", spellcheck: "false", "aria-label": "Another chain" }) as HTMLInputElement;
+  const mode = h("select", { class: "picker", "aria-label": "Peers" },
+    h("option", { value: "default" }, "The network's built-in peers"),
+    h("option", { value: "custom" }, "Only peers I list"),
+    h("option", { value: "none" }, "No one (a private node)"),
   ) as HTMLSelectElement;
   mode.value = Array.isArray(prefs.peers) ? "custom" : prefs.peers;
-  const peers = h("textarea", { placeholder: "publicKey@host:port, one per line", spellcheck: "false" }) as HTMLTextAreaElement;
+  const peers = h("textarea", { placeholder: "publicKey@host:port, one per line", spellcheck: "false", "aria-label": "Peer list" }) as HTMLTextAreaElement;
   peers.value = Array.isArray(prefs.peers) ? prefs.peers.join("\n") : "";
-  const hosted = h("textarea", { placeholder: "child chains to host, e.g. Nexus/testnet, one per line", spellcheck: "false" }) as HTMLTextAreaElement;
-  hosted.value = prefs.hostedChains.join("\n");
-  const err = h("div", { class: "toast" });
+  // Shown only when it is what was chosen.
+  const showPeers = () => { peers.hidden = mode.value !== "custom"; };
+  mode.addEventListener("change", showPeers);
+  showPeers();
+  const rpc = h("input", { type: "text", inputmode: "numeric", "aria-label": "Local API port", value: String(prefs.rpc) }) as HTMLInputElement;
+  const listen = h("input", { type: "text", inputmode: "numeric", "aria-label": "Peer port", value: String(prefs.listen) }) as HTMLInputElement;
+  const err = h("div", { class: "toast", role: "status" });
   render(
     h("div", { class: "stack" },
       h("h1", {}, "Node settings"),
-      h("label", { class: "k" }, "RPC port (loopback only)"), rpc,
-      h("label", { class: "k" }, "Peer port"), listen,
-      h("label", { class: "k" }, "Nexus bootstrap peers"), mode, peers,
-      h("label", { class: "k" }, "Hosted child chains"), hosted,
+      h("p", { class: "section-label" }, "Chains this node hosts"),
+      h("div", { class: "kv" },
+        h("label", { class: "row check" }, h("span", {}, "Nexus"), h("span", { class: "muted" }, "always")),
+        ...boxes.map(({ chain, box }) => h("label", { class: "row check", for: box.id }, h("span", { class: "mono" }, chain), box)),
+      ),
+      other,
+      h("p", { class: "section-label" }, "Connect to"),
+      mode, peers,
+      // Rarely needed, so out of the way until asked for.
+      h("details", { class: "advanced" },
+        h("summary", {}, "Ports"),
+        h("div", { class: "advanced-content stack" },
+          h("label", { class: "k" }, "Local API port (this Mac only)"), rpc,
+          h("label", { class: "k" }, "Peer port"), listen,
+        ),
+      ),
+      h("p", { class: "muted" }, "Saving restarts the node if it is running."),
       err,
       h("button", { class: "block", onclick: async () => {
         const next: NodePrefs = {
           rpc: Number(rpc.value.trim()),
           listen: Number(listen.value.trim()),
           peers: parsePeersField(mode.value, peers.value),
-          hostedChains: hosted.value.split(/[\s,]+/).filter(Boolean),
+          hostedChains: chosenChains(boxes.filter(({ box }) => box.checked).map(({ chain }) => chain), other.value),
         };
         const problem = checkPrefs(next);
         if (problem) { err.textContent = problem; return; }
-        err.textContent = "saving (a running node restarts)…";
+        err.textContent = "saving…";
         try {
           await manager.configure(next);
           if (next.rpc !== prefs.rpc) return onPrefsChanged();
@@ -144,7 +258,7 @@ async function settingsScreen(manager: NodeManager, back: () => void, onPrefsCha
   );
 }
 
-/** The recipient choices as entered: a chain set to "burn" is left out. */
+/** The recipient choices as entered: a chain set to pay no one is left out. */
 export function miningChoices(searcher: Searcher, workers: string, chosen: Record<string, string>): MiningPrefs {
   return {
     searcher,
@@ -153,6 +267,8 @@ export function miningChoices(searcher: Searcher, workers: string, chosen: Recor
     recipients: Object.fromEntries(Object.entries(chosen).filter(([, address]) => address !== "")),
   };
 }
+
+const SEARCHERS: Record<Searcher, string> = { gpu: "the graphics chip", cpu: "the processor", custom: "the worker set in lattice.json" };
 
 /**
  * Mining on this node with this Mac: the bundled `lattice mine` loop, on the
@@ -163,15 +279,18 @@ export function miningChoices(searcher: Searcher, workers: string, chosen: Recor
 async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void) {
   const [chains, saved, accounts, gpu] = await Promise.all([manager.chains(), manager.miningPrefs(), reads.accounts(), manager.canMineOnGPU()]);
   const again = () => miningScreen(manager, reads, back, onPrefsChanged);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const leave = (go: () => void) => () => { clearTimeout(timer); go(); };
   // A fresh setup searches on the graphics chip when the app carries its worker.
   const searcher = h("select", { class: "picker", "aria-label": "Search with" },
-    ...(gpu ? [h("option", { value: "gpu" }, "This Mac's graphics chip (Metal)")] : []),
+    ...(gpu ? [h("option", { value: "gpu" }, "This Mac's graphics chip")] : []),
     h("option", { value: "cpu" }, "This Mac's processor"),
     ...(saved?.searcher === "custom" ? [h("option", { value: "custom" }, "The worker set in lattice.json")] : []),
   ) as HTMLSelectElement;
   searcher.value = saved?.searcher ?? (gpu ? "gpu" : "cpu");
   const cores = Math.max(1, Math.min(MAX_WORKERS, globalThis.navigator?.hardwareConcurrency ?? 1));
   const workers = h("input", { type: "text", inputmode: "numeric", "aria-label": "Workers", value: String(saved?.workers ?? 1) }) as HTMLInputElement;
+  const workersField = h("div", { class: "stack" }, h("label", { class: "k" }, `Processor workers (this Mac has ${cores} cores)`), workers);
   const pickers = new Map<string, HTMLSelectElement>();
   for (const chain of chains) {
     // A fresh setup pays the active account; a saved one shows what was saved,
@@ -180,39 +299,61 @@ async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => 
     const picker = h("select", { class: "picker", "aria-label": `Recipient on ${chain}` },
       ...accounts.map((a) => h("option", { value: a.address }, `${a.label} · ${a.address.slice(0, 12)}…${a.address.slice(-8)}`)),
       ...(current && !accounts.some((a) => a.address === current) ? [h("option", { value: current }, `${current.slice(0, 12)}…${current.slice(-8)} (not in this wallet)`)] : []),
-      h("option", { value: "" }, "No one (reward and fees burn)"),
+      h("option", { value: "" }, "No one"),
     ) as HTMLSelectElement;
     picker.value = current;
     pickers.set(chain, picker);
   }
+  // Paying no one is allowed, and costly: it is said out loud before it happens.
+  const burn = h("p", { class: "warn", role: "status" });
   const state = h("span", { class: "v" }, "…");
+  const session = h("span", { class: "v" }, "");
+  const sessionRow = h("div", { class: "row" }, h("span", { class: "k" }, "This run"), session);
   const toast = h("div", { class: "toast", role: "status" });
   const toggle = h("button", { class: "block" }, "Start mining") as HTMLButtonElement;
   let mining = false;
   let busy = false;
+  const reflect = () => {
+    const unpaid = [...pickers].filter(([, picker]) => picker.value === "").map(([chain]) => chain);
+    burn.hidden = unpaid.length === 0;
+    burn.textContent = unpaid.length ? `${unpaid.join(" and ")} will pay no one: every reward and fee mined there is destroyed.` : "";
+    workersField.hidden = searcher.value !== "cpu";
+  };
+  searcher.addEventListener("change", reflect);
+  for (const picker of pickers.values()) picker.addEventListener("change", reflect);
+  reflect();
+  const apply = h("button", { class: "btn block" }, "Apply changes") as HTMLButtonElement;
   const show = async () => {
+    clearTimeout(timer);
     try {
-      const status = await manager.miningStatus();
+      const [status, log] = await Promise.all([manager.miningStatus(), manager.miningLog().catch(() => "")]);
       mining = status.running;
-      state.textContent = mining ? `mining (pid ${status.pid})` : "not mining";
+      state.textContent = mining ? `mining on ${SEARCHERS[saved?.searcher ?? (searcher.value as Searcher)]}` : "not mining";
+      // Proof that it is working, in the only terms that matter: blocks found.
+      const run = parseMiningLog(log);
+      sessionRow.hidden = !mining;
+      session.textContent = run.found === 0 ? "no block found yet" : `${run.found.toLocaleString()} ${run.found === 1 ? "block" : "blocks"} found · last at ${run.last ? new Date(run.last).toLocaleTimeString() : "?"}`;
     } catch (e) { state.textContent = (e as Error).message; }
-    toggle.textContent = mining ? "Stop mining" : "Start mining";
+    if (!busy) {
+      toggle.textContent = mining ? "Stop mining" : "Start mining";
+      // Starting is the step forward; stopping is not, so it is not the filled button.
+      toggle.className = mining ? "btn block" : "block";
+    }
+    // Stopped, starting saves what is chosen; running, a change has its own button.
+    apply.hidden = !mining;
+    if (document.body.contains(toggle)) timer = setTimeout(show, POLL_MS);
   };
-  const workersLabel = h("label", { class: "k" }, "");
-  const showWorkers = () => {
-    const onGPU = searcher.value === "gpu";
-    workers.disabled = onGPU;
-    workersLabel.textContent = onGPU ? "Workers (the graphics chip is one)" : `Workers (this Mac has ${cores} cores)`;
-  };
-  searcher.addEventListener("change", showWorkers);
-  showWorkers();
   const chosen = () => miningChoices(searcher.value as Searcher, workers.value, Object.fromEntries([...pickers].map(([chain, picker]) => [chain, picker.value])));
-  const act = (label: string, run: () => Promise<void>) => async () => {
+  const act = (label: string, run: () => Promise<void>, then?: () => void) => async () => {
     if (busy) return;
     busy = true;
+    toggle.disabled = apply.disabled = true;
     toast.textContent = label + "…";
-    try { await run(); toast.textContent = ""; } catch (e) { toast.textContent = (e as Error).message; }
+    let done = false;
+    try { await run(); toast.textContent = ""; done = true; } catch (e) { toast.textContent = (e as Error).message; }
     busy = false;
+    toggle.disabled = apply.disabled = false;
+    if (done && then) return then();
     await show();
   };
   const save = async () => {
@@ -224,23 +365,25 @@ async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => 
   toggle.addEventListener("click", () => {
     void (mining
       ? act("stopping (it finishes the round it is on)", () => manager.stopMining())()
-      : act("starting", async () => { await save(); await manager.startMining(); })());
+      : act("starting", async () => { await save(); await manager.startMining(); }, leave(again))());
   });
+  apply.addEventListener("click", () => { void act("applying (mining restarts)", save, leave(again))(); });
   render(
     h("div", { class: "stack" },
       h("h1", {}, "Mining"),
-      h("p", { class: "muted" }, "Mine on your node with this Mac. One search covers Nexus and every chain your node hosts; each block found pays that chain's reward and fees to the account you choose here."),
-      h("div", { class: "kv" }, h("div", { class: "row" }, h("span", { class: "k" }, "Status"), state)),
+      h("p", { class: "muted" }, "Mine on your node with this Mac. One search covers every chain your node hosts; each block found pays that chain's reward and fees to the account you choose."),
+      h("div", { class: "kv" }, h("div", { class: "row" }, h("span", { class: "k" }, "Status"), state), sessionRow),
       h("label", { class: "k" }, "Search with"), searcher,
+      workersField,
       ...chains.flatMap((chain) => [h("label", { class: "k" }, `${chain} pays`), pickers.get(chain)!]),
+      burn,
       ...(accounts.length ? [] : [h("p", { class: "warn" }, "The wallet is locked or has no account, so there is no one of yours to pay. Unlock it first.")]),
-      workersLabel, workers,
-      h("p", { class: "muted" }, `Chains mined are the chains hosted: ${chains.join(", ")}. To mine another, or stop mining one, change what the node hosts.`),
-      h("button", { class: "btn block", onclick: () => settingsScreen(manager, again, onPrefsChanged) }, "Choose hosted chains"),
+      h("p", { class: "muted" }, `Chains mined are the chains hosted: ${chains.join(", ")}.`),
       toast,
       toggle,
-      h("button", { class: "btn block", onclick: act("saving (a running miner restarts)", save) }, "Save"),
-      h("button", { class: "btn block", onclick: back }, "Back"),
+      apply,
+      h("button", { class: "btn block", onclick: leave(() => settingsScreen(manager, reads, again, onPrefsChanged)) }, "Choose hosted chains"),
+      h("button", { class: "btn block", onclick: leave(back) }, "Back"),
     ),
   );
   await show();
@@ -253,7 +396,7 @@ async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => 
  * node's cookie, which the node rewrites at every start.
  */
 async function pairScreen(manager: NodeManager, reads: NodeReads, back: () => void) {
-  const id = h("input", { type: "text", placeholder: "extension id (chrome://extensions) or chrome-extension://…", spellcheck: "false" }) as HTMLInputElement;
+  const id = h("input", { type: "text", placeholder: "the extension's id", spellcheck: "false" }) as HTMLInputElement;
   const toast = h("div", { class: "toast" });
   const allowed = h("div", { class: "kv" });
   const showAllowed = async () => {

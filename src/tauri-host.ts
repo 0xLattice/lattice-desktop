@@ -30,6 +30,7 @@ export const hostOps: HostOps = {
     });
   },
   gpuWorker: () => gpuWorker(),
+  miningLog: () => invoke<string>("mine_log"),
 };
 
 /** The node's current loopback cookie, for pairing a browser extension (null when not running). */
