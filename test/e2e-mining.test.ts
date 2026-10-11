@@ -100,7 +100,7 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
       return undefined;
     }, "mined funds in the wallet");
     // And said wherever the person is.
-    await shows(/Mining on this Mac\./);
+    await shows(/Mining on this computer\./);
 
     // ---- pay a second account instead: saved while mining, the loop restarts ----
     const picker = document.querySelector("select.account-picker") as HTMLSelectElement;

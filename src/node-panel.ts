@@ -90,7 +90,7 @@ export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "
   if (!chains.some((c) => c.state === "unreachable") && (await reads.peers().catch(() => undefined)) === 0) {
     notices.push({ text: alone((await manager.prefs()).peers) });
   }
-  if ((await manager.miningStatus().catch(() => ({ running: false }))).running) notices.push({ text: "Mining on this Mac." });
+  if ((await manager.miningStatus().catch(() => ({ running: false }))).running) notices.push({ text: "Mining on this computer." });
   return notices;
 }
 
@@ -157,7 +157,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
   render(
     h("div", { class: "stack" },
       h("h1", {}, "Your node"),
-      h("p", { class: "muted" }, "A full Lattice node on this Mac. The wallet reads and sends only through it."),
+      h("p", { class: "muted" }, "A full Lattice node on this computer. The wallet reads and sends only through it."),
       table,
       lonely,
       toggle,
@@ -231,7 +231,7 @@ async function settingsScreen(manager: NodeManager, reads: NodeReads, back: () =
       h("details", { class: "advanced" },
         h("summary", {}, "Ports"),
         h("div", { class: "advanced-content stack" },
-          h("label", { class: "k" }, "Local API port (this Mac only)"), rpc,
+          h("label", { class: "k" }, "Local API port (this computer only)"), rpc,
           h("label", { class: "k" }, "Peer port"), listen,
         ),
       ),
@@ -271,7 +271,7 @@ export function miningChoices(searcher: Searcher, workers: string, chosen: Recor
 const SEARCHERS: Record<Searcher, string> = { gpu: "the graphics chip", cpu: "the processor", custom: "the worker set in lattice.json" };
 
 /**
- * Mining on this node with this Mac: the bundled `lattice mine` loop, on the
+ * Mining on this node with this computer: the bundled `lattice mine` loop, on the
  * graphics chip or the processor, paying each hosted chain's reward and fees
  * to an account of this wallet. One search covers Nexus and the chains it
  * carries (merged mining), so the chains mined are the chains hosted.
@@ -283,14 +283,15 @@ async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => 
   const leave = (go: () => void) => () => { clearTimeout(timer); go(); };
   // A fresh setup searches on the graphics chip when the app carries its worker.
   const searcher = h("select", { class: "picker", "aria-label": "Search with" },
-    ...(gpu ? [h("option", { value: "gpu" }, "This Mac's graphics chip")] : []),
-    h("option", { value: "cpu" }, "This Mac's processor"),
+    ...(gpu ? [h("option", { value: "gpu" }, "This computer's graphics chip")] : []),
+    h("option", { value: "cpu" }, "This computer's processor"),
     ...(saved?.searcher === "custom" ? [h("option", { value: "custom" }, "The worker set in lattice.json")] : []),
   ) as HTMLSelectElement;
-  searcher.value = saved?.searcher ?? (gpu ? "gpu" : "cpu");
+  // Saved for a graphics chip this computer cannot use (now): the processor, until it is saved otherwise.
+  searcher.value = saved && (saved.searcher !== "gpu" || gpu) ? saved.searcher : gpu ? "gpu" : "cpu";
   const cores = Math.max(1, Math.min(MAX_WORKERS, globalThis.navigator?.hardwareConcurrency ?? 1));
   const workers = h("input", { type: "text", inputmode: "numeric", "aria-label": "Workers", value: String(saved?.workers ?? 1) }) as HTMLInputElement;
-  const workersField = h("div", { class: "stack" }, h("label", { class: "k" }, `Processor workers (this Mac has ${cores} cores)`), workers);
+  const workersField = h("div", { class: "stack" }, h("label", { class: "k" }, `Processor workers (this computer has ${cores} cores)`), workers);
   const pickers = new Map<string, HTMLSelectElement>();
   for (const chain of chains) {
     // A fresh setup pays the active account; a saved one shows what was saved,
@@ -371,7 +372,7 @@ async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => 
   render(
     h("div", { class: "stack" },
       h("h1", {}, "Mining"),
-      h("p", { class: "muted" }, "Mine on your node with this Mac. One search covers every chain your node hosts; each block found pays that chain's reward and fees to the account you choose."),
+      h("p", { class: "muted" }, "Mine on your node with this computer. One search covers every chain your node hosts; each block found pays that chain's reward and fees to the account you choose."),
       h("div", { class: "kv" }, h("div", { class: "row" }, h("span", { class: "k" }, "Status"), state), sessionRow),
       h("label", { class: "k" }, "Search with"), searcher,
       workersField,

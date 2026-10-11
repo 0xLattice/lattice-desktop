@@ -30,6 +30,7 @@ export const hostOps: HostOps = {
     });
   },
   gpuWorker: () => gpuWorker(),
+  gpuWorkerUsable: () => invoke<boolean>("gpu_worker_usable"),
   miningLog: () => invoke<string>("mine_log"),
 };
 

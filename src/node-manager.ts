@@ -38,6 +38,8 @@ export interface HostOps {
   writeTopology(topology: Topology): Promise<void>;
   /** The bundled GPU mining worker's path, or null in a build without one. */
   gpuWorker(): Promise<string | null>;
+  /** Whether that worker can search on this computer's graphics chip. */
+  gpuWorkerUsable(): Promise<boolean>;
   /** The end of the mining loop's log (`<root>/log/mine.log`), "" when there is none. */
   miningLog(): Promise<string>;
 }
@@ -97,11 +99,13 @@ export function checkPrefs(prefs: NodePrefs): string | undefined {
 }
 
 /**
- * What searches for blocks: this Mac's processor (the CLI's bundled worker),
+ * What searches for blocks: this computer's processor (the CLI's bundled worker),
  * its graphics chip (the bundled GPU worker), or a worker the operator named
  * in lattice.json by hand, which the app shows and keeps but cannot set.
  */
 export type Searcher = "cpu" | "gpu" | "custom";
+
+const NO_GPU = "This computer has no graphics chip Lattice can mine on: it needs a graphics driver that provides OpenCL. Choose the processor in Mining.";
 
 /** The searcher lattice.json's `mine.worker` names, given this build's GPU worker. */
 export function searcherOf(worker: string | undefined, gpuWorker: string | null): Searcher {
@@ -329,9 +333,9 @@ export class NodeManager {
     };
   }
 
-  /** Whether this build can mine on the graphics chip. */
+  /** Whether the app can mine on the graphics chip: it carries the worker, and the worker finds a hash on this computer. */
   async canMineOnGPU(): Promise<boolean> {
-    return (await this.#host.gpuWorker()) !== null;
+    return (await this.#host.gpuWorker()) !== null && (await this.#host.gpuWorkerUsable());
   }
 
   /** Whether the mining loop runs. Before any settings were saved it cannot. */
@@ -349,6 +353,7 @@ export class NodeManager {
     if (problem) throw new Error(problem);
     const gpuWorker = await this.#host.gpuWorker();
     if (prefs.searcher === "gpu" && gpuWorker === null) throw new Error("This build has no graphics-chip worker.");
+    if (prefs.searcher === "gpu" && !(await this.#host.gpuWorkerUsable())) throw new Error(NO_GPU);
     const wasMining = (await this.miningStatus()).running;
     if (wasMining) await this.#run("mine-stop");
     const topology = await this.ensureHost();
@@ -367,6 +372,8 @@ export class NodeManager {
   async startMining(): Promise<void> {
     if (!(await this.ensureHost()).mine) throw new Error("Choose who mining pays first.");
     if (!(await this.status()).some((c) => c.state !== "down")) throw new Error("Start the node first: mining runs on it.");
+    // Settings saved when the graphics chip worked, or copied from a computer where it did.
+    if ((await this.miningPrefs())?.searcher === "gpu" && !(await this.canMineOnGPU())) throw new Error(NO_GPU);
     await this.#run("mine-start");
   }
 
