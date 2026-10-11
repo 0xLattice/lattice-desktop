@@ -62,6 +62,8 @@ def audit(app):
             if 'Signature=adhoc' not in signature or 'TeamIdentifier=not set' not in signature:
                 raise ValueError('expected anonymous ad-hoc signature')
             commands = run('otool', '-l', str(path))
+            if 'cmd LC_UUID' not in commands:
+                raise ValueError('native binary lacks a loader-required UUID command')
             rpaths = re.findall(r'cmd LC_RPATH\n.*?path (.*?) \(offset', commands, re.S)
             if any(p not in {'/usr/lib/swift', '@loader_path/../Frameworks', '@loader_path'} for p in rpaths):
                 raise ValueError('unexpected runtime search path')

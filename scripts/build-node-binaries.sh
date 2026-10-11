@@ -43,7 +43,7 @@ fi
 products="lattice lattice-node lattice-mining-coordinator lattice-miner"
 flags=(--force-resolved-versions)
 if [ "${LATTICE_RELEASE:-0}" = 1 ]; then
-  flags+=(--disable-index-store -Xlinker -no_uuid
+  flags+=(--disable-index-store -Xlinker -reproducible
     -Xswiftc -file-prefix-map -Xswiftc "$src=/src/lattice-node"
     -Xswiftc -debug-prefix-map -Xswiftc "$src=/src/lattice-node"
     -Xswiftc -prefix-serialized-debugging-options
@@ -77,7 +77,7 @@ if [ -n "$(git -C "$gpu_src" status --porcelain --untracked-files=normal)" ]; th
   exit 1
 fi
 if [ "${LATTICE_RELEASE:-0}" = 1 ]; then
-  (cd "$gpu_src" && RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-no_uuid" cargo build --release --locked)
+  (cd "$gpu_src" && RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-reproducible" cargo build --release --locked)
 else
   (cd "$gpu_src" && cargo build --release --locked)
 fi

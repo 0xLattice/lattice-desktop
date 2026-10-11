@@ -90,7 +90,7 @@ third-party copyright and license attribution.
 
 Build again from an independent checkout at the same reviewed commit, with
 fresh Swift and Cargo build directories and the same exact toolchain versions.
-The desktop checkout path may differ; the helper source root must remain the canonical path specified above. Compiler-generated UUIDs are disabled for the helpers at link time; runtime sections are not removed or rewritten. Keep both signed app
+The desktop checkout path may differ; the helper source root must remain the canonical path specified above. The helpers use the linker’s reproducible mode while retaining UUID load commands; runtime sections are not removed or rewritten. Keep both signed app
 bundles until comparison is complete:
 
 ```sh

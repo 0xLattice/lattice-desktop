@@ -63,6 +63,23 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'inventory'):
                     release.audit(app)
 
+    def test_bundle_rejects_missing_native_uuid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / 'Lattice.app'
+            macos = app / 'Contents/MacOS'
+            macos.mkdir(parents=True)
+            (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'build.lattice.desktop', 'LSMinimumSystemVersion': '15.0'}))
+            for name in release.BINARIES:
+                (macos / name).write_bytes(b'fixture')
+            def output(*args):
+                if args[0] == 'file': return 'Mach-O 64-bit executable arm64'
+                if args[0] == 'lipo': return 'arm64'
+                if args[0] == 'codesign': return 'Signature=adhoc\nTeamIdentifier=not set'
+                return ''
+            with patch.object(release, 'run', side_effect=output):
+                with self.assertRaisesRegex(ValueError, 'UUID'):
+                    release.audit(app)
+
     def test_manifest_cannot_escape_download_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
