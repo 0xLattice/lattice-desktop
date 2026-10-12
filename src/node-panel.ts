@@ -121,6 +121,8 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
   const offeredRows = h("div", { class: "rows" });
   const table = h("div", { class: "kv" }, hostedRows, offeredRows);
   const status = new Map<string, HTMLElement>();
+  // A read that failed is said beside the rows, which stay as they are.
+  const problem = h("p", { class: "warn", role: "status", hidden: "true" });
   const toast = h("div", { class: "toast", role: "status" });
   // One button, saying the one thing it will do: the node is either running or it is not.
   const toggle = h("button", { class: "block" }, "…") as HTMLButtonElement;
@@ -175,7 +177,8 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
       const nexus = peers.get("Nexus");
       lonely.hidden = nexus !== 0;
       lonely.textContent = nexus === 0 ? alone(prefs.peers) : "";
-      if (chains.length !== status.size || chains.some((c) => !status.has(c.path))) {
+      problem.hidden = true;
+      if (hostedRows.querySelector(".connect") === null || chains.length !== status.size || chains.some((c) => !status.has(c.path))) {
         status.clear();
         hostedRows.replaceChildren(...chains.flatMap((c) => {
           const line = h("span", { class: "v" });
@@ -191,7 +194,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
               }, "Remove")]),
             ),
             // Whom a chain connects to is set once, if ever: folded away on its row.
-            h("details", { class: "connect" }, h("summary", {}, "Connect to"), connectForm(manager, prefs, c.path, leave(() => again()))),
+            h("details", { class: "connect" }, h("summary", { "aria-label": `Connect ${c.path} to` }, "Connect to"), connectForm(manager, prefs, c.path, leave(() => again()))),
           ];
         }));
       }
@@ -205,9 +208,8 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
         h("button", { class: "btn", "aria-label": `Host ${chain}`, onclick: () => { void host((list) => chosenChains(list, chain), `adding ${chain} (the node restarts)…`); } }, "Add"),
       )));
     } catch (e) {
-      status.clear();
-      offeredRows.replaceChildren();
-      hostedRows.replaceChildren(h("div", { class: "row" }, h("span", { class: "warn" }, (e as Error).message)));
+      problem.textContent = (e as Error).message;
+      problem.hidden = false;
     }
     if (!busy) {
       toggle.textContent = running ? "Stop node" : "Start node";
@@ -245,6 +247,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
       h("h1", {}, "Your node"),
       h("p", { class: "muted" }, "A full Lattice node on this computer. The wallet reads and sends only through it."),
       table,
+      problem,
       h("div", { class: "add-chain" }, other, h("button", { class: "btn", onclick: addTyped }, "Add chain")),
       lonely,
       toast,
