@@ -253,6 +253,7 @@ function nodePage(pages: NodePages) {
   // One button, saying the one thing it will do: the node is either running or it is not.
   const toggle = h("button", { class: "btn" }, "…") as HTMLButtonElement;
   const lonely = h("p", { class: "warn", role: "status", hidden: "true" });
+  const problem = h("p", { class: "warn", role: "status", hidden: "true" });
   const toast = h("div", { class: "toast", role: "status" });
   let running = false;
   let busy = false;
@@ -278,9 +279,11 @@ function nodePage(pages: NodePages) {
         : rows.filter((r) => r.status?.state === "active" && r.peers === 0 && (count(parentOf(r.path)) ?? 0) > 0).map((r) => aloneOn(r.path));
       lonely.hidden = alones.length === 0;
       lonely.textContent = alones.join(" ");
-      if (!busy) toast.textContent = "";
+      problem.hidden = true;
     } catch (e) {
-      toast.textContent = (e as Error).message;
+      // A read that failed is said on its own line: what an action said stays.
+      problem.textContent = (e as Error).message;
+      problem.hidden = false;
     }
     if (!busy) {
       toggle.textContent = running ? "Stop node" : "Start node";
@@ -323,6 +326,7 @@ function nodePage(pages: NodePages) {
     ),
     tree.box,
     lonely,
+    problem,
     toast,
     advanced,
     h("button", { class: "btn block", onclick: leave(pages.back) }, "Back to wallet"),
@@ -343,6 +347,8 @@ function chainPage(pages: NodePages, path: string) {
   const parent = parentOf(path);
   const screen = h("div", { class: "stack" });
   const toast = h("div", { class: "toast", role: "status" });
+  // A read that failed is said on its own line: what an action said stays.
+  const problem = h("p", { class: "warn", role: "status", hidden: "true" });
   let busy = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const leave = (go: () => void) => () => { clearTimeout(timer); go(); };
@@ -364,9 +370,9 @@ function chainPage(pages: NodePages, path: string) {
     ]),
     h("span", { "aria-hidden": "true" }, "/"), h("span", { "aria-current": "page" }, name),
   );
-  const heading = [h("h1", { class: "chain-name" }, name), ...(parent ? [h("p", { class: "muted mono" }, path)] : [])];
+  const heading = [h("h1", { class: "chain-title" }, name), ...(parent ? [h("p", { class: "muted mono" }, path)] : [])];
   const body = h("div", { class: "stack" }, h("p", { class: "muted" }, "…"));
-  screen.append(crumbs, ...heading, body, toast, h("button", { class: "btn block", onclick: up }, "Back"));
+  screen.append(crumbs, ...heading, body, problem, toast, h("button", { class: "btn block", onclick: up }, "Back"));
   render(screen);
 
   const block = h("span", { class: "v" });
@@ -382,6 +388,8 @@ function chainPage(pages: NodePages, path: string) {
     const add = () => {
       const typed = other.value.trim();
       if (!/^[A-Za-z0-9_-]{1,64}$/.test(typed)) { toast.textContent = "Type the chain's name: letters, digits, - and _."; return; }
+      // Already hosted, it is only opened: nothing restarts for nothing.
+      if (prefs.hostedChains.includes(`${path}/${typed}`)) return leave(() => chainPage(pages, `${path}/${typed}`))();
       void change((hosted) => chosenChains(hosted, `${path}/${typed}`), `adding ${path}/${typed} (the node restarts)…`, () => chainPage(pages, path));
     };
     other.addEventListener("keydown", (event) => { if ((event as KeyboardEvent).key === "Enter") add(); });
@@ -392,11 +400,13 @@ function chainPage(pages: NodePages, path: string) {
         h("p", {}, `Stop hosting ${name}${under ? ` and the ${under === 1 ? "chain" : `${under} chains`} under it` : ""}? The wallet can no longer use ${under ? "them" : "it"}, and mining stops paying there. The node restarts.`),
         h("div", { class: "row-actions" },
           h("button", { class: "btn", "aria-label": `Stop hosting ${path}`, onclick: () => { void change((list) => list.filter((chain) => chain !== path && !chain.startsWith(path + "/")), `removing ${path} (the node restarts)…`, () => nodePage(pages)); } }, "Stop hosting"),
-          h("button", { class: "btn", onclick: () => { confirm.hidden = true; stop.hidden = false; } }, "Keep it"),
+          h("button", { class: "btn", onclick: () => { confirm.hidden = true; stop.hidden = false; stop.focus(); } }, "Keep it"),
         ),
       );
       confirm.hidden = false;
       stop.hidden = true;
+      // The question takes the keyboard with it, on the answer that changes nothing.
+      (confirm.querySelector(".row-actions button:last-child") as HTMLButtonElement).focus();
     } }, `Stop hosting ${name}`);
     body.replaceChildren(
       h("div", { class: "kv" },
@@ -431,7 +441,7 @@ function chainPage(pages: NodePages, path: string) {
       ]);
       const status = chains.find((c) => c.path === path);
       const kind = status ? "hosted" : "seen";
-      if (built !== kind) { (status ? buildHosted : buildSeen)(prefs); built = kind; }
+      if (built === undefined || (built !== kind && !busy)) { (status ? buildHosted : buildSeen)(prefs); built = kind; }
       if (status) {
         const rows = (await treeRows(chains, prefs.hostedChains, reads));
         const own = rows.find((r) => r.path === path)?.peers;
@@ -447,9 +457,10 @@ function chainPage(pages: NodePages, path: string) {
         none.hidden = below.length !== 0;
         tree.update(below);
       }
-      if (!busy) toast.textContent = "";
+      problem.hidden = true;
     } catch (e) {
-      if (!busy) toast.textContent = (e as Error).message;
+      problem.textContent = (e as Error).message;
+      problem.hidden = false;
     }
     if (document.body.contains(screen)) timer = setTimeout(refresh, POLL_MS);
   };
@@ -509,7 +520,8 @@ function connectForm(manager: NodeManager, prefs: NodePrefs, chain: string, save
     h("label", { class: "k" }, "Connect to"), mode, peers,
     h("p", { class: "muted" }, "Saving restarts the node if it is running."),
     err,
-    h("button", { class: "btn block", "aria-label": `Save peers of ${chain}`, onclick: async () => {
+    h("button", { class: "btn block", "aria-label": `Save peers of ${chain}`, onclick: async (event: Event) => {
+      const button = event.currentTarget as HTMLButtonElement;
       const current = await manager.prefs();
       const typed = parsePeersField(mode.value, peers.value);
       const { [chain]: _, ...others } = current.chainPeers;
@@ -519,10 +531,13 @@ function connectForm(manager: NodeManager, prefs: NodePrefs, chain: string, save
       const problem = checkPrefs(next);
       if (problem) { err.textContent = problem; return; }
       err.textContent = "saving…";
+      // One save at a time: a second press would restart the node twice.
+      button.disabled = true;
       try {
         await manager.configure(next);
         saved();
       } catch (e) { err.textContent = (e as Error).message; }
+      button.disabled = false;
     } }, "Save peers"),
   );
 }
@@ -538,7 +553,8 @@ async function networkForm(manager: NodeManager, saved: () => void, onPrefsChang
     h("label", { class: "k" }, "Peer port"), listen,
     h("p", { class: "muted" }, "Saving restarts the node if it is running."),
     err,
-    h("button", { class: "block", onclick: async () => {
+    h("button", { class: "block", onclick: async (event: Event) => {
+      const button = event.currentTarget as HTMLButtonElement;
       // The chains and their peers are whatever they are now: they are changed above, not here.
       const next: NodePrefs = {
         ...(await manager.prefs()),
@@ -548,11 +564,13 @@ async function networkForm(manager: NodeManager, saved: () => void, onPrefsChang
       const problem = checkPrefs(next);
       if (problem) { err.textContent = problem; return; }
       err.textContent = "saving…";
+      button.disabled = true;
       try {
         await manager.configure(next);
         if (next.rpc !== prefs.rpc) return onPrefsChanged();
         saved();
       } catch (e) { err.textContent = (e as Error).message; }
+      button.disabled = false;
     } }, "Save"),
   );
 }
@@ -650,6 +668,8 @@ export async function miningScreen(manager: NodeManager, reads: NodeReads, back:
       else {
         // A first start saves what the page shows; after that, starting is only starting.
         if (!saved) {
+          // Never set up and no account to pay: starting would mine to no one, unasked.
+          if (accounts.length === 0) throw new Error("Unlock the wallet first: there is no account of yours to pay.");
           const problem = checkMining(prefs, chains);
           if (problem) throw new Error(problem);
           await manager.configureMining(prefs);
@@ -669,7 +689,8 @@ export async function miningScreen(manager: NodeManager, reads: NodeReads, back:
       toggle,
     ),
     payTree(chains, (chain) => payee(prefs.recipients[chain], accounts)),
-    ...(unpaid.length && accounts.length ? [h("p", { class: "warn", role: "status" }, burnt(unpaid))] : []),
+    // Said of what is saved; never set up, the chains pay no one only until an account is there to default to.
+    ...(unpaid.length && (saved || accounts.length) ? [h("p", { class: "warn", role: "status" }, burnt(unpaid))] : []),
     ...(accounts.length ? [] : [h("p", { class: "warn" }, "The wallet is locked or has no account, so there is no one of yours to pay. Unlock it first.")]),
     toast,
     // What is set is one row away, and the row says how it searches now.
@@ -733,7 +754,8 @@ async function miningSettings(
     if (problem) { toast.textContent = problem; return; }
     save.disabled = true;
     toast.textContent = running ? "saving (mining restarts)…" : "saving…";
-    try { await manager.configureMining(chosen); done(); } catch (e) { toast.textContent = (e as Error).message; save.disabled = false; }
+    // A save that ends after this page was left does not draw Mining over where the person went.
+    try { await manager.configureMining(chosen); if (save.isConnected) done(); } catch (e) { toast.textContent = (e as Error).message; save.disabled = false; }
   });
   render(
     h("div", { class: "stack" },
