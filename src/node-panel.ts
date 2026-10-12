@@ -134,6 +134,9 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
   let timer: ReturnType<typeof setTimeout> | undefined;
   const again = (savedTo?: () => void) => nodeScreen(manager, reads, back, onPrefsChanged, savedTo);
   const leave = (go: () => void) => () => { clearTimeout(timer); go(); };
+  // Where a save goes once it is written. A save takes as long as the node
+  // takes to restart: whoever left this page meanwhile is not pulled back.
+  const after = (go: () => void) => () => { if (document.body.contains(table)) leave(go)(); };
 
   // Hosting a chain or not is one press on its row; the node restarts to take it.
   const host = async (change: (hosted: string[]) => string[], doing: string) => {
@@ -146,7 +149,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
       const problem = checkPrefs(next);
       if (problem) { toast.textContent = problem; return; }
       await manager.configure(next);
-      leave(saved ?? (() => again()))();
+      after(saved ?? (() => again()))();
     } catch (e) {
       toast.textContent = (e as Error).message;
     } finally {
@@ -194,7 +197,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
               }, "Remove")]),
             ),
             // Whom a chain connects to is set once, if ever: folded away on its row.
-            h("details", { class: "connect" }, h("summary", { "aria-label": `Connect ${c.path} to` }, "Connect to"), connectForm(manager, prefs, c.path, leave(() => again()))),
+            h("details", { class: "connect" }, h("summary", { "aria-label": `Connect ${c.path} to` }, "Connect to"), connectForm(manager, prefs, c.path, after(() => again()))),
           ];
         }));
       }
@@ -238,7 +241,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
 
   // Ports are set once, if ever: folded away until asked for.
   const network = h("details", { class: "advanced" }, h("summary", {}, "Ports"));
-  void networkForm(manager, leave(() => again()), onPrefsChanged)
+  void networkForm(manager, after(() => again()), onPrefsChanged)
     .then((form) => network.append(form))
     .catch((e) => network.append(h("p", { class: "warn" }, (e as Error).message)));
 
