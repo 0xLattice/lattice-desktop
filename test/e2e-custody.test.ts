@@ -14,7 +14,7 @@ import { NodeManager } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import { importPrivateKey } from "../vendor/nexus-wallet/src/lib/crypto/accounts.ts";
-import { bin, button, cookieFile, freePort, harnessHost, input, installPage, mine, pageText, run, shows, until } from "./helpers/real-node.ts";
+import { bin, button, cookieFile, freePort, harnessHost, input, installPage, mine, pageText, run, shows, until, openNode } from "./helpers/real-node.ts";
 
 const PASSWORD = "correct horse battery";
 
@@ -70,21 +70,25 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     const bob = importPrivateKey("b0".repeat(32)).address;
     input("recipient address (bafy…)").value = bob;
     (document.querySelector('input[aria-label="Amount"]') as HTMLInputElement).value = "1000";
-    // Idle past the lock. The wallet keeps checking in on its signer while it
-    // is in view (here, each time the window comes forward); looking is not use
-    // and must not put the lock off.
+    // Idle past the lock. Looking is not use: the window coming forward (and
+    // the wallet reading its signer's state then) must not put the lock off.
     for (let waited = 0; waited < 2500; waited += 250) {
       document.dispatchEvent(new dom.window.Event("visibilitychange"));
       await new Promise((r) => setTimeout(r, 250));
     }
+    // Nothing was pressed: the app locked on its own clock, told the wallet,
+    // and the wallet covered the page, the half-entered send underneath it.
+    await shows(/Wallet locked/);
     autoLockMs = 10 * 60 * 1000;
+    const cover = document.querySelector(".lock-cover")!;
+    assert.deepEqual([...cover.querySelectorAll("button")].map((item) => item.textContent), ["Unlock"], "a locked wallet offers only to unlock");
+    assert.equal(input("recipient address (bafy…)").value, bob, "what was entered is still there");
+    (cover.querySelector("input") as HTMLInputElement).value = PASSWORD;
+    (cover.querySelector("button") as HTMLButtonElement).click();
+    await until(() => (document.querySelector(".lock-cover") ? undefined : true), "the cover to lift");
     button("Review").click();
     await shows(/Sign & send/);
     button("Sign & send").click();
-    await shows(/Unlock to continue/);
-    const overlay = document.querySelector(".secret-overlay")!;
-    (overlay.querySelector("input") as HTMLInputElement).value = PASSWORD;
-    (overlay.querySelector("button") as HTMLButtonElement).click();
     await shows(/Admitted to the node's pool/);
     button("Done").click();
     await shows(/Balance/);
@@ -111,7 +115,7 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     // ---- pair a browser extension with this node ----
     button("Done").click();
     await shows(/Balance/);
-    button("Node").click();
+    openNode();
     await shows(/Your node/);
     button("Pair browser extension").click();
     await shows(/Allow the extension's origin/);
@@ -175,7 +179,7 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     // Both accounts are back, the imported key among them; this machine's node is not running.
     const restored = [...picker().options].map((option) => option.value);
     assert.deepEqual(restored.slice(0, 2), [first, cliKey.address]);
-    assert.match(pageText(), /node unreachable/);
+    assert.match(pageText(), /Your node is stopped/);
     // The backup's password is now this wallet's.
     document.body.replaceChildren();
     await installPage();

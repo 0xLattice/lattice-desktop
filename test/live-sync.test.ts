@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startApp } from "../src/app.ts";
 import { NodeManager } from "../src/node-manager.ts";
-import { balanceShown, bin, button, freePort, harnessHost, input, installPage, pageText, press, shows, until } from "./helpers/real-node.ts";
+import { balanceShown, bin, button, freePort, harnessHost, input, installPage, pageText, press, shows, until, openNode } from "./helpers/real-node.ts";
 
 const live = process.env.LATTICE_LIVE === "1" && !!bin;
 
@@ -35,7 +35,7 @@ test("live: the app's node syncs Nexus from its built-in peers, and the wallet r
     button("I saved it — create").click();
     await shows(/Balance/);
 
-    button("Node").click();
+    openNode();
     await shows(/Your node/);
     await press("Start node");
     // Headers arrive ahead of execution: the screen says how far along it is.
@@ -55,7 +55,7 @@ test("live: the app's node syncs Nexus from its built-in peers, and the wallet r
       return undefined;
     }, "a balance read from the syncing node");
 
-    button("Node").click();
+    openNode();
     await shows(/Your node/);
     await press("Stop node");
     await shows(/Nexusstopped/);

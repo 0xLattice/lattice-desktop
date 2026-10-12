@@ -93,6 +93,8 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
   /** Opens a folded section by clicking its heading. */
   const unfold = async (heading) => session.click(await element("return [...document.querySelectorAll('summary')].find((s) => s.textContent === arguments[0]) || null", heading));
   const field = (selector) => element("return document.querySelector(arguments[0])", selector);
+  /** The node page, from the wallet's home screen: it is in Settings. */
+  const openNode = async () => { await session.click(await field("#settings-button")); await press("Node"); };
   const type = async (selector, text) => session.type(await field(selector), text);
   const valueOf = (selector) => session.run("return document.querySelector(arguments[0])?.value ?? null", selector);
   const textOf = (selector) => session.run("return document.querySelector(arguments[0])?.textContent ?? null", selector);
@@ -170,15 +172,13 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await shows(/Balance on Nexus/);
 
     // ---- the node stopped: the wallet says so, and mining will not start ----
-    await press("Node");
+    await openNode();
     await shows(/Your node/);
     await shows(/Nexusrunning/);
     await press("Stop node");
     await shows(/Nexusstopped/);
     await press("Back to wallet");
     await shows(/Your node is stopped, so nothing can be read or sent\./);
-    await press("Node");
-    await shows(/Your node/);
     await press("Mining");
     await shows(/Mine on your node/);
     await shows(/Statusnot mining/);
@@ -187,11 +187,13 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await press("Start mining");
     await shows(/Start the node first: mining runs on it/);
     await press("Back");
-    await shows(/Your node/);
+    await shows(/Balance on Nexus/);
+    await openNode();
     await press("Start node");
     await shows(/Nexusrunning/, 300_000);
 
     // ---- mining: blocks found, and the wallet paid, with no other miner ----
+    await press("Back to wallet");
     await press("Mining");
     await shows(/Statusnot mining/);
     await press("Start mining");
@@ -199,8 +201,6 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     console.log(`[desktop ui] ${(/Statusmining on the (graphics chip|processor)/.exec(await pageText()) ?? [""])[0].slice(6)}`);
     await shows(/This run[\d,]+ blocks? found · last at /, 300_000);
     await press("Back");
-    await shows(/Miningon/);
-    await press("Back to wallet");
     await until(funded, "mined funds in the wallet", 300_000);
     await shows(/Mining on this computer\./);
 
@@ -234,21 +234,19 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await shows(/Balance on Nexus/);
 
     // ---- mining off, from the screen that turned it on ----
-    await press("Node");
-    await shows(/Miningon/);
     await press("Mining");
     await shows(/Statusmining/);
     await press("Stop mining");
     await shows(/Statusnot mining/);
     await press("Back");
-    await shows(/Miningoff/);
+    await shows(/Balance on Nexus/);
+    await openNode();
 
     // ---- node settings typed wrong: refused, and nothing changes ----
-    await press("Node settings");
-    await shows(/Chains this node hosts/);
+    await shows(/Connect to/);
     const RPC = 'input[aria-label="Local API port"]';
-    // The ports are folded away until asked for.
-    await unfold("Ports");
+    // Peers and ports are folded away until asked for.
+    await unfold("Peers and ports");
     const [rpc, listen] = [await valueOf(RPC), await valueOf('input[aria-label="Peer port"]')];
     await type(RPC, "0");
     await press("Save");
@@ -256,12 +254,12 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await type(RPC, listen);
     await press("Save");
     await shows(/The RPC and peer ports must differ/);
-    await press("Back");
-    await shows(/Nexusrunning/);
-    await press("Node settings");
-    await shows(/Chains this node hosts/);
+    // Leave and come back: what was refused was never kept.
+    await press("Back to wallet");
+    await shows(/Balance on Nexus/);
+    await openNode();
+    await shows(/Connect to/);
     assert.equal(await valueOf(RPC), rpc, "the port is what it was");
-    await press("Back");
     await press("Back to wallet");
     await shows(/Balance on Nexus/);
 
@@ -283,7 +281,7 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await shows(/Balance on Nexus/);
 
     // ---- and the node stopped from its own screen ----
-    await press("Node");
+    await openNode();
     await shows(/Nexusrunning/);
     await press("Stop node");
     await shows(/Nexusstopped/);

@@ -1,6 +1,6 @@
 // End to end, headless: configuring the node and mining what it hosts, from
 // the desktop app's own screens, on the real `lattice` binaries with throwaway
-// storage and no peers. One session: Node settings typed wrong and then right,
+// storage and no peers. One session: the node's settings typed wrong and then right,
 // a port change that reloads the app, a child chain hosted from the Mining
 // screen, both chains mined to different accounts, the node restarted under
 // the miner, and a relaunch. Only the shell is replaced (see e2e-app.test.ts).
@@ -16,7 +16,7 @@ import { startApp } from "../src/app.ts";
 import { NodeManager, type Topology } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
-import { balanceShown, bin, button, freePort, harnessHost, input, installPage, pageText, press, run, shows, until } from "./helpers/real-node.ts";
+import { balanceShown, bin, button, freePort, harnessHost, input, installPage, pageText, press, run, shows, until, openNode } from "./helpers/real-node.ts";
 
 const PASSWORD = "correct horse battery";
 const CHILD = "Nexus/testnet";
@@ -51,20 +51,19 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
       return shown && shown !== first ? shown : undefined;
     }, "a second account");
 
-    // ---- Node settings, typed wrong: each is refused with its reason and nothing is written ----
-    button("Node").click();
+    // ---- the node's settings, typed wrong: each is refused with its reason and nothing is written ----
+    openNode();
     await shows(/Your node/);
     await press("Start node");
     await shows(/Nexusrunning/);
-    button("Node settings").click();
-    await shows(/Chains this node hosts/);
+    await shows(/Connect to/);
     const before = readFileSync(join(root, "lattice.json"), "utf8");
     const rpc = () => document.querySelector('input[aria-label="Local API port"]') as HTMLInputElement;
     const listen = () => document.querySelector('input[aria-label="Peer port"]') as HTMLInputElement;
     const peerMode = () => document.querySelector('select[aria-label="Peers"]') as HTMLSelectElement;
     const peerList = () => document.querySelector('textarea[aria-label="Peer list"]') as HTMLTextAreaElement;
-    // A chain the node can see is a box to tick; one it cannot is a path to type.
-    const hostBox = (chain: string) => document.querySelector(`input[type="checkbox"][aria-label="${chain}"]`) as HTMLInputElement | null;
+    // A hosted chain's row offers to remove it; one the node cannot see is a path to type.
+    const dropButton = (chain: string) => document.querySelector(`button[aria-label="Stop hosting ${chain}"]`) as HTMLButtonElement | null;
     const otherChain = () => document.querySelector('input[aria-label="Another chain"]') as HTMLInputElement;
     const [oldRPC, oldListen] = [rpc().value, listen().value];
     assert.equal(peerMode().value, "none");
@@ -81,7 +80,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await shows(/Not a peer \(publicKey@host:port\): not-a-peer/);
     peerMode().value = "none";
     otherChain().value = "Nexus/testnet/payments";
-    button("Save").click();
+    button("Add chain").click();
     await shows(/must be a new Nexus-rooted path listed after its parent/);
     assert.equal(readFileSync(join(root, "lattice.json"), "utf8"), before);
 
@@ -108,15 +107,14 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
       if (/Balance/.test(pageText())) button("Refresh balance").click();
       return undefined;
     }, "a balance read on the new port");
-    button("Node").click();
+    openNode();
     await shows(/Nexusrunning/);
-    button("Node settings").click();
-    await shows(/Chains this node hosts/);
+    await shows(/Connect to/);
     assert.deepEqual([rpc().value, peerMode().value, peerList().value], [newRPC, "custom", peer]);
     // Back to a private node: no peers.
     peerMode().value = "none";
     button("Save").click();
-    await shows(/Your node/);
+    await until(() => (topology().peers?.length === 0 ? true : undefined), "the peers saved");
     assert.deepEqual(topology().peers, []);
     assert.equal(reloads, 1, "only a port change reloads");
     await shows(/Nexusrunning/);
@@ -124,13 +122,16 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     // ---- a child chain exists (made with the CLI), and mining is set up while only Nexus is hosted ----
     await run(join(bin!, "lattice"), ["child", "create", CHILD, "--root", root, "--reward", "100000"]);
     await until(async () => ((await app.manager.status())[0]?.state === "active" ? true : undefined), "the node back up");
-    button("Node settings").click();
-    await shows(/Chains this node hosts/);
-    assert.equal(hostBox(CHILD)!.checked, true);
-    hostBox(CHILD)!.checked = false;
-    button("Save").click();
-    await shows(/Your node/);
+    // The chain was made outside the app: the page lists it when next opened.
+    button("Back to wallet").click();
+    await shows(/Balance/);
+    openNode();
+    await until(() => (dropButton(CHILD) ? true : undefined), "the child chain listed");
+    dropButton(CHILD)!.click();
+    await until(() => (topology().hostedChains === undefined ? true : undefined), "the child no longer hosted");
     await shows(/Nexusrunning/);
+    button("Back to wallet").click();
+    await shows(/Balance/);
     button("Mining").click();
     await shows(/Chains mined are the chains hosted: Nexus\./);
     const recipient = (chain: string) => document.querySelector(`select[aria-label="Recipient on ${chain}"]`) as HTMLSelectElement | null;
@@ -138,11 +139,11 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
 
     // ---- host the child from the Mining screen's link; it comes back with a recipient to choose ----
     button("Choose hosted chains").click();
-    await shows(/Chains this node hosts/);
+    await shows(/Nexusrunning/);
     // Its first block is not mined yet, so the node cannot list it: its path is typed.
-    assert.equal(hostBox(CHILD), null);
+    assert.equal(document.querySelector(`button[aria-label="Host ${CHILD}"]`), null);
     otherChain().value = CHILD;
-    button("Save").click();
+    button("Add chain").click();
     await shows(/Chains mined are the chains hosted: Nexus, Nexus\/testnet\./);
     assert.deepEqual(topology().hostedChains, [CHILD]);
     // Each chain pays the active account unless told otherwise.
@@ -170,21 +171,26 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     assert.equal(await balance(CHILD, second), 0n);
 
     // ---- the node restarts under the miner (a settings change): mining carries on ----
-    button("Choose hosted chains").click();
-    await shows(/Chains this node hosts/);
+    button("Back").click();
+    await shows(/Balance/);
+    openNode();
+    await shows(/Connect to/);
     peerMode().value = "custom";
     peerList().value = peer;
     button("Save").click();
-    await shows(/Statusmining on the (graphics chip|processor)/);
+    await until(() => (topology().peers?.length === 1 ? true : undefined), "the peer saved");
     assert.deepEqual(topology().peers, [peer]);
+    button("Back to wallet").click();
+    await shows(/Balance/);
+    button("Mining").click();
+    await shows(/Statusmining on the (graphics chip|processor)/);
     const afterRestart = await until(async () => nexusHeight(), "the node back up");
     await until(async () => ((await nexusHeight()) > afterRestart + 1n ? true : undefined), "blocks mined after the restart");
 
     // ---- stop hosting the child while mining still names a recipient for it ----
     button("Choose hosted chains").click();
-    await shows(/Chains this node hosts/);
-    hostBox(CHILD)!.checked = false;
-    button("Save").click();
+    await until(() => (dropButton(CHILD) ? true : undefined), "the child chain's row");
+    dropButton(CHILD)!.click();
     // The node will not start on a lattice.json whose mining names a chain it
     // does not host, so the chain stops being paid when it stops being hosted.
     await shows(/Chains mined are the chains hosted: Nexus\./);
@@ -204,13 +210,12 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     input("password").value = PASSWORD;
     button("Unlock").click();
     await shows(/Balance/);
-    button("Node").click();
+    openNode();
     await shows(/Nexusrunning/);
-    button("Node settings").click();
-    await shows(/Chains this node hosts/);
-    assert.deepEqual([rpc().value, peerMode().value, peerList().value, hostBox(CHILD)?.checked ?? false], [newRPC, "custom", peer, false]);
-    button("Back").click();
-    await shows(/Your node/);
+    await shows(/Connect to/);
+    assert.deepEqual([rpc().value, peerMode().value, peerList().value, dropButton(CHILD) !== null], [newRPC, "custom", peer, false]);
+    button("Back to wallet").click();
+    await shows(/Balance/);
     button("Mining").click();
     await shows(/Statusmining on the (graphics chip|processor)/);
     assert.equal(recipient("Nexus")!.value, second);
@@ -218,7 +223,8 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     button("Stop mining").click();
     await shows(/Statusnot mining/);
     button("Back").click();
-    await shows(/Your node/);
+    await shows(/Balance/);
+    openNode();
     await press("Stop node");
     await shows(/Nexusstopped/);
   } catch (e) {

@@ -11,9 +11,13 @@ import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import type { KeyValueStore } from "../vendor/nexus-wallet/src/lib/wallet/settings.ts";
 import { NodeManager, type HostOps } from "./node-manager.ts";
 import { loopbackFetch, type NodeHTTP } from "./loopback.ts";
-import { nodeNotices, nodeScreen } from "./node-panel.ts";
+import { miningScreen, nodeNotices, nodeScreen } from "./node-panel.ts";
 
 export const AUTO_LOCK_MS = 10 * 60 * 1000;
+/** How often the idle clock is read. */
+const LOCK_BEAT_MS = 1000;
+/** A beat this late was not a slow timer: the computer slept or the app was suspended. */
+const SLEEP_GAP_MS = 30_000;
 
 /** Everything privileged the page asks of its host. */
 export interface AppHost {
@@ -41,23 +45,44 @@ export async function startApp(host: AppHost) {
   // First run scaffolds the host root (`lattice init`); the node is started by the user.
   const ownNode = await manager.rpcURL();
 
-  // Idle auto-lock, re-armed by every signer request (as the extension's worker
-  // does). The page is left as it is: the wallet notices the lock, says so, and
-  // asks for the password over the current screen when a step needs keys, so a
-  // half-entered send is not thrown away.
-  let idle: ReturnType<typeof setTimeout> | undefined;
-  const arm = () => {
-    clearTimeout(idle);
-    idle = setTimeout(() => signer.lock(), host.autoLockMs ?? AUTO_LOCK_MS);
-    (idle as unknown as { unref?: () => void }).unref?.(); // never keeps a headless host running
+  // Idle auto-lock. "Use" is a signer request that needs keys or the person
+  // touching the page, and idleness is read off the wall clock once a second,
+  // not left to one long timer: a timer stops while the computer sleeps, and
+  // the wallet would wake still unlocked. A beat that arrives late means just
+  // that (the computer slept, or the app was suspended), and locks at once.
+  // The wallet is told the moment the signer locks and covers the page.
+  let unlocked = false;
+  let lastUse = Date.now();
+  let lastBeat = Date.now();
+  let tellLocked = () => {};
+  const used = () => { lastUse = Date.now(); };
+  const lock = () => {
+    if (!unlocked) return;
+    unlocked = false;
+    signer.lock();
+    tellLocked();
   };
-  const signer = createSigner(host.vault, arm);
+  const beat = setInterval(() => {
+    const now = Date.now();
+    const slept = now - lastBeat > SLEEP_GAP_MS;
+    lastBeat = now;
+    if (slept || now - lastUse >= (host.autoLockMs ?? AUTO_LOCK_MS)) lock();
+  }, LOCK_BEAT_MS);
+  (beat as unknown as { unref?: () => void }).unref?.(); // never keeps a headless host running
+  for (const event of ["pointerdown", "keydown", "wheel", "touchstart"]) {
+    document.addEventListener(event, used, { capture: true, passive: true });
+  }
+  // The signer calls this whenever a session opens or keys are touched.
+  const signer = createSigner(host.vault, () => { unlocked = true; used(); });
   const wallet = walletClient(async (msg) => {
     // Passive reads are not use: the wallet checks in while it is in view, and
     // that must not keep it unlocked forever.
-    if (msg.type !== "getState" && msg.type !== "nodeAuthorization") arm();
+    if (msg.type !== "getState" && msg.type !== "nodeAuthorization") used();
     try {
-      return await signer.handle(msg);
+      const answer = await signer.handle(msg);
+      // The wallet's own Lock button, or a reset: the page already shows it.
+      if (msg.type === "lock" || msg.type === "reset") unlocked = false;
+      return answer;
     } catch (e) {
       return { ok: false, error: String((e as Error)?.message ?? e) };
     }
@@ -92,6 +117,7 @@ export async function startApp(host: AppHost) {
   if (host.autoStart !== false) void manager.start().catch(() => { /* the home screen offers Start again */ });
   await startWallet({
     wallet,
+    onLocked: (tell) => { tellLocked = tell; },
     store: host.settings,
     // No origin is ever reachable but the app's own node.
     requestOrigins: async () => false,
@@ -106,7 +132,16 @@ export async function startApp(host: AppHost) {
     // One chain list: the chains this node hosts (lattice.json). Adding one in
     // the wallet hosts it (a running node restarts).
     chains: { list: () => manager.chains(), add: (chain) => manager.addHostedChain(chain) },
-    actions: [{ label: "Node", run: (back) => nodeScreen(manager, reads, back, host.reload) }],
+    actions: [
+      // Mining is something people do, so it sits beside Send and Receive. Its
+      // "Choose hosted chains" opens the node page, and comes back once saved.
+      {
+        label: "Mining", on: "home",
+        run: (back) => miningScreen(manager, reads, (saved) => (saved ? nodeScreen(manager, reads, back, host.reload, saved) : back()), host.reload),
+      },
+      // The node itself is set up once and left alone: it is in Settings.
+      { label: "Node", on: "settings", run: (back) => nodeScreen(manager, reads, back, host.reload) },
+    ],
     // The home screen says what the node is doing before its numbers are read.
     notices: (chain) => nodeNotices(manager, reads, chain),
   });
