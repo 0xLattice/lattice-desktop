@@ -37,13 +37,17 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   with no chip or driver it can use mines on the processor, and settings
   saved for a chip it cannot use are refused when mining starts. One search covers Nexus and every chain the
   node hosts (merged mining), so the chains mined are the chains hosted: to
-  mine another, or stop mining one, change what the node hosts (the screen
-  links to it). Each chain's reward and fees go to the account you choose, the
+  mine another, or stop mining one, change what the node hosts (the settings
+  link to it). Each chain's reward and fees go to the account you choose, the
   wallet's active account unless you change it, or to no one (they burn).
-  While it runs the screen shows the blocks found in this run and when the
-  last was, the Node screen and the wallet's home screen say that it is
-  mining, and a chain set to pay no one is warned about before it starts.
-  Applying a change while it runs restarts the loop. Stopping the node or quitting the app
+  The Mining page says what mining is doing and holds no settings: whether
+  it runs, with Start or Stop, the blocks found in this run and when the last
+  was (or that none is found yet, which is ordinary for a while), and the
+  hosted chains as a tree with who each pays. A first Start needs no setup.
+  How it searches and who each chain pays are on a Mining settings page, one
+  form with one Save; saving while it runs restarts the loop, and the button
+  says so. A chain set to pay no one is warned about on both pages. The wallet's
+  home screen says when it is mining. Stopping the node or quitting the app
   stops mining first. The page can choose only between the two bundled workers:
   a custom `mine.worker` set by hand in `lattice.json` is shown and kept, but
   set only by hand.

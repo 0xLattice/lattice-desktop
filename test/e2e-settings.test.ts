@@ -157,21 +157,26 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     button("Back to wallet").click();
     await shows(/Balance/);
     button("Mining").click();
-    await shows(/Chains mined are the chains hosted: Nexus\./);
+    await shows(/MiningNot mining/);
+    // The Mining page says what mining is doing and who each chain pays; what is set is on its settings page.
+    const mined = () => [...document.querySelectorAll(".tree.paying .chain")].map((row) => row.getAttribute("data-chain"));
     const recipient = (chain: string) => document.querySelector(`select[aria-label="Recipient on ${chain}"]`) as HTMLSelectElement | null;
-    assert.equal(recipient(CHILD), null);
+    const openMiningSettings = async () => { button("Mining settings").click(); await shows(/Who each chain pays/); };
+    assert.deepEqual(mined(), ["Nexus"]);
 
-    // ---- host the child from the Mining screen's link; it comes back with a recipient to choose ----
-    button("Choose hosted chains").click();
+    // ---- host the child from the mining settings' link; it comes back with a recipient to choose ----
+    await openMiningSettings();
+    button("Manage chains on your node").click();
     await shows(/Your nodeRunning/);
     // Its first block is not mined yet, so the node cannot list it: its name is typed, on Nexus's page.
     assert.equal(chainRow(CHILD), null);
     await openChain("Nexus");
     childName("Nexus").value = "testnet";
     button("Add").click();
-    await shows(/Chains mined are the chains hosted: Nexus, Nexus\/testnet\./);
+    await until(() => (mined().join() === `Nexus,${CHILD}` ? true : undefined), "both chains on the Mining page");
     assert.deepEqual(topology().hostedChains, [CHILD]);
     // Each chain pays the active account unless told otherwise.
+    await openMiningSettings();
     assert.deepEqual([recipient("Nexus")!.value, recipient(CHILD)!.value], [second, second]);
 
     // ---- mine both: the child pays the first account, Nexus pays no one ----
@@ -180,8 +185,12 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     recipient(CHILD)!.value = first;
     // Paying no one is allowed, and said out loud before it happens.
     await shows(/Nexus will pay no one: every reward and fee mined there is destroyed\./);
+    button("Save").click();
+    // Saved, the page says it of the chain, and starting is one press.
+    await shows(/MiningNot mining/);
+    await shows(/Nexus pays no one: every reward and fee mined there is destroyed\./);
     button("Start mining").click();
-    await shows(/Statusmining on the (graphics chip|processor)/);
+    await shows(/MiningMining on the (graphics chip|processor)/);
     assert.deepEqual(topology().mine?.recipients, { [CHILD]: first });
     await until(async () => ((await balance(CHILD, first)) > 0n ? true : undefined), "child-chain rewards for the first account");
     const nexusHeight = async () => (await reads("Nexus").chainInfo()).height ?? 0n;
@@ -189,8 +198,9 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     assert.deepEqual([await balance("Nexus", first), await balance("Nexus", second)], [0n, 0n], "Nexus blocks were mined to no one");
 
     // ---- now Nexus pays the second account: saved while mining, the loop restarts with it ----
+    await openMiningSettings();
     recipient("Nexus")!.value = second;
-    button("Apply changes").click();
+    button("Save and restart mining").click();
     await until(() => (topology().mine?.recipients?.Nexus === second ? true : undefined), "the Nexus recipient saved");
     await until(async () => ((await balance("Nexus", second)) > 0n ? true : undefined), "Nexus rewards for the second account");
     assert.equal(await balance(CHILD, second), 0n);
@@ -232,21 +242,21 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     button("Back to wallet").click();
     await shows(/Balance/);
     button("Mining").click();
-    await shows(/Statusmining on the (graphics chip|processor)/);
+    await shows(/MiningMining on the (graphics chip|processor)/);
     const afterRestart = await until(async () => nexusHeight(), "the node back up");
     await until(async () => ((await nexusHeight()) > afterRestart + 1n ? true : undefined), "blocks mined after the restart");
 
     // ---- stop hosting the child while mining still names a recipient for it ----
-    button("Choose hosted chains").click();
+    await openMiningSettings();
+    button("Manage chains on your node").click();
     await stopHosting(CHILD);
     // The node will not start on a lattice.json whose mining names a chain it
     // does not host, so the chain stops being paid when it stops being hosted.
-    await shows(/Chains mined are the chains hosted: Nexus\./);
-    await shows(/Statusmining on the (graphics chip|processor)/);
+    await until(() => (mined().join() === "Nexus" ? true : undefined), "Nexus alone on the Mining page");
+    await shows(/MiningMining on the (graphics chip|processor)/);
     assert.deepEqual(topology().mine?.recipients, { Nexus: second });
     assert.equal(topology().hostedChains, undefined);
     assert.deepEqual(topology().peers, [peer], "a chain no longer hosted takes its peers with it");
-    assert.equal(recipient(CHILD), null);
     assert.deepEqual((await app.manager.status()).map((chain) => chain.path), ["Nexus"]);
     const unhostedAt = await until(async () => nexusHeight(), "the node back up");
     await until(async () => ((await nexusHeight()) > unhostedAt + 1n ? true : undefined), "Nexus still mined after the child was dropped");
@@ -269,11 +279,14 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     button("Back to wallet").click();
     await shows(/Balance/);
     button("Mining").click();
-    await shows(/Statusmining on the (graphics chip|processor)/);
+    await shows(/MiningMining on the (graphics chip|processor)/);
+    await openMiningSettings();
     assert.equal(recipient("Nexus")!.value, second);
     assert.equal((document.querySelector('select[aria-label="Search with"]') as HTMLSelectElement).value, "cpu");
+    button("Cancel").click();
+    await shows(/MiningMining on the (graphics chip|processor)/);
     button("Stop mining").click();
-    await shows(/Statusnot mining/);
+    await shows(/MiningNot mining/);
     button("Back").click();
     await shows(/Balance/);
     openNode();

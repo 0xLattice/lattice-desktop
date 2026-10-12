@@ -150,6 +150,24 @@ const nameOf = (path: string) => path.split("/").pop()!;
 const parentOf = (path: string) => path.split("/").slice(0, -1).join("/");
 
 /**
+ * Chains laid out as the tree they are: one item a chain, a child's item
+ * nested under its parent's. `row` draws a chain's row, given the guide that
+ * marks its place (the lines an outline is drawn with).
+ */
+function outline(paths: string[], row: (path: string, guide: string) => HTMLElement): HTMLElement[] {
+  const listed = new Set(paths);
+  const under = (parent: string | undefined) => paths.filter((p) => (parent === undefined ? !listed.has(parentOf(p)) : parentOf(p) === parent));
+  const branch = (path: string, guide: string, inherited: string): HTMLElement => {
+    const kids = under(path);
+    return h("li", {}, row(path, guide), ...(kids.length ? [h("ul", {}, ...kids.map((kid, i) => {
+      const last = i === kids.length - 1;
+      return branch(kid, inherited + (last ? "└ " : "├ "), inherited + (last ? "  " : "│ "));
+    }))] : []));
+  };
+  return under(undefined).map((path) => branch(path, "", ""));
+}
+
+/**
  * Chains as they are: a tree. One row a chain, a child under its parent and
  * named by the last part of its path, each with the same two numbers.
  * Pressing a row opens that chain. Rows are kept between updates, so the one
@@ -165,23 +183,17 @@ function chainTree(open: (path: string) => void) {
   let shape = "";
   const build = (rows: TreeRow[]) => {
     cells.clear();
-    const paths = new Set(rows.map((r) => r.path));
-    const under = (parent: string | undefined) => rows.filter((r) => (parent === undefined ? !paths.has(parentOf(r.path)) : parentOf(r.path) === parent));
-    const branch = (r: TreeRow, guide: string, inherited: string): HTMLElement => {
+    const status = new Map(rows.map((r) => [r.path, r.status]));
+    list.replaceChildren(...outline(rows.map((r) => r.path), (path, guide) => {
       const [words, block, peers] = [h("span", { class: "words" }), h("span", { class: "n" }), h("span", { class: "n" })];
-      const row = h("button", { class: r.status ? "chain" : "chain off", "data-chain": r.path, onclick: () => open(r.path) },
-        h("span", { class: "name" }, h("span", { class: "guide", "aria-hidden": "true" }, guide), h("span", {}, nameOf(r.path))),
+      const row = h("button", { class: status.get(path) ? "chain" : "chain off", "data-chain": path, onclick: () => open(path) },
+        h("span", { class: "name" }, h("span", { class: "guide", "aria-hidden": "true" }, guide), h("span", {}, nameOf(path))),
         words, block, peers,
         h("span", { class: "go", "aria-hidden": "true" }, "›"),
       );
-      cells.set(r.path, { row, words, block, peers });
-      const kids = under(r.path);
-      return h("li", {}, row, ...(kids.length ? [h("ul", {}, ...kids.map((k, i) => {
-        const last = i === kids.length - 1;
-        return branch(k, inherited + (last ? "└ " : "├ "), inherited + (last ? "  " : "│ "));
-      }))] : []));
-    };
-    list.replaceChildren(...under(undefined).map((r) => branch(r, "", "")));
+      cells.set(path, { row, words, block, peers });
+      return row;
+    }));
   };
   return {
     box,
@@ -566,41 +578,145 @@ export function miningChoices(searcher: Searcher, workers: string, chosen: Recor
 
 const SEARCHERS: Record<Searcher, string> = { gpu: "the graphics chip", cpu: "the processor", custom: "the worker set in lattice.json" };
 
+/** An account as mining names it: its label, or its address when it is not this wallet's. */
+function payee(address: string | undefined, accounts: { label: string; address: string }[]): string {
+  if (!address) return "no one";
+  return accounts.find((a) => a.address === address)?.label ?? `${address.slice(0, 12)}…${address.slice(-8)} (not in this wallet)`;
+}
+
+/** The chains as a tree, with one thing beside each: here, who it pays. */
+function payTree(chains: string[], cell: (chain: string) => HTMLElement | string) {
+  return h("div", { class: "tree paying" },
+    h("div", { class: "cols", "aria-hidden": "true" }, h("span", {}, "Chain"), h("span", {}, "Pays")),
+    h("ul", {}, ...outline(chains, (chain, guide) => h("div", { class: "chain", "data-chain": chain },
+      h("span", { class: "name" }, h("span", { class: "guide", "aria-hidden": "true" }, guide), h("span", {}, nameOf(chain))),
+      h("span", { class: "pays" }, cell(chain)),
+    ))),
+  );
+}
+
+/** What is said of the chains that pay no one: their rewards are destroyed, so it is said out loud. */
+const burnt = (unpaid: string[], will = false) => (unpaid.length
+  ? `${unpaid.join(" and ")} ${will ? "will pay" : unpaid.length === 1 ? "pays" : "pay"} no one: every reward and fee mined there is destroyed.` : "");
+
 /**
  * Mining on this node with this computer: the bundled `lattice mine` loop, on the
  * graphics chip or the processor, paying each hosted chain's reward and fees
  * to an account of this wallet. One search covers Nexus and the chains it
  * carries (merged mining), so the chains mined are the chains hosted.
- */
-/**
- * Mining on the app's node. `back` leaves the screen; given `saved`, it is
- * asked to open the node page to host a chain, and to return here (`saved`)
- * once that is saved.
+ *
+ * This page says what mining is doing: whether it runs, with Start or Stop,
+ * what it has found, and who each chain pays. Nothing on it is a setting;
+ * those are on their own page. `back` leaves; given `saved`, it is asked to
+ * open the node page to host a chain, and to return (`saved`) once that is
+ * saved.
  */
 export async function miningScreen(manager: NodeManager, reads: NodeReads, back: (saved?: () => void) => void, onPrefsChanged: () => void) {
   const [chains, saved, accounts, gpu] = await Promise.all([manager.chains(), manager.miningPrefs(), reads.accounts(), manager.canMineOnGPU()]);
   const again = () => miningScreen(manager, reads, back, onPrefsChanged);
+  // Never set up, it searches on the graphics chip when this computer has one
+  // Lattice can use, and every chain pays the account in use: Start needs no setup.
+  const prefs: MiningPrefs = saved ?? {
+    searcher: gpu ? "gpu" : "cpu",
+    workers: 1,
+    recipients: accounts[0] ? Object.fromEntries(chains.map((chain) => [chain, accounts[0]!.address])) : {},
+  };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const leave = (go: () => void) => () => { clearTimeout(timer); go(); };
-  // A fresh setup searches on the graphics chip when the app carries its worker.
+  const state = h("p", { class: "muted", role: "status" }, "…");
+  const toast = h("div", { class: "toast", role: "status" });
+  const toggle = h("button", { class: "btn" }, "…") as HTMLButtonElement;
+  const screen = h("div", { class: "stack" });
+  let mining = false;
+  let busy = false;
+  const show = async () => {
+    clearTimeout(timer);
+    try {
+      const [status, log] = await Promise.all([manager.miningStatus(), manager.miningLog().catch(() => "")]);
+      mining = status.running;
+      // Proof that it is working, in the only terms that matter: blocks found.
+      // None yet is the ordinary case for a while, and is said as that.
+      const run = parseMiningLog(log);
+      state.textContent = !mining ? "Not mining"
+        : `Mining on ${SEARCHERS[prefs.searcher]}. ` + (run.found === 0
+          ? "No block found yet: a search can run a long while before its first."
+          : `${run.found.toLocaleString()} ${run.found === 1 ? "block" : "blocks"} found, the last at ${run.last ? new Date(run.last).toLocaleTimeString() : "?"}.`);
+    } catch (e) { state.textContent = (e as Error).message; }
+    if (!busy) {
+      toggle.textContent = mining ? "Stop mining" : "Start mining";
+      // Starting is the step forward; stopping is not, so it is not the filled button.
+      toggle.className = mining ? "btn" : "btn btn--primary";
+    }
+    if (document.body.contains(screen)) timer = setTimeout(show, POLL_MS);
+  };
+  toggle.addEventListener("click", async () => {
+    if (busy) return;
+    busy = true;
+    toggle.disabled = true;
+    toast.textContent = mining ? "stopping (it finishes the round it is on)…" : "starting…";
+    try {
+      if (mining) await manager.stopMining();
+      else {
+        // A first start saves what the page shows; after that, starting is only starting.
+        if (!saved) {
+          const problem = checkMining(prefs, chains);
+          if (problem) throw new Error(problem);
+          await manager.configureMining(prefs);
+        }
+        await manager.startMining();
+      }
+      toast.textContent = "";
+    } catch (e) { toast.textContent = (e as Error).message; }
+    busy = false;
+    toggle.disabled = false;
+    await show();
+  });
+  const unpaid = chains.filter((chain) => !prefs.recipients[chain]);
+  screen.append(
+    h("div", { class: "node-head" },
+      h("div", {}, h("h1", {}, "Mining"), state),
+      toggle,
+    ),
+    payTree(chains, (chain) => payee(prefs.recipients[chain], accounts)),
+    ...(unpaid.length && accounts.length ? [h("p", { class: "warn", role: "status" }, burnt(unpaid))] : []),
+    ...(accounts.length ? [] : [h("p", { class: "warn" }, "The wallet is locked or has no account, so there is no one of yours to pay. Unlock it first.")]),
+    toast,
+    h("button", { class: "btn block", onclick: leave(() => miningSettings(manager, reads, back, { chains, prefs, accounts, gpu }, again)) }, "Mining settings"),
+    h("button", { class: "btn block", onclick: leave(() => back()) }, "Back"),
+  );
+  render(screen);
+  await show();
+}
+
+/**
+ * How mining searches and who each chain pays: set once, so on a page of
+ * their own, as one form with one Save. Saving while mining restarts the
+ * loop, and the button says so.
+ */
+async function miningSettings(
+  manager: NodeManager, reads: NodeReads, back: (saved?: () => void) => void,
+  now: { chains: string[]; prefs: MiningPrefs; accounts: { label: string; address: string }[]; gpu: boolean },
+  done: () => void,
+) {
+  const { chains, prefs, accounts, gpu } = now;
+  const running = (await manager.miningStatus().catch(() => ({ running: false }))).running;
   const searcher = h("select", { class: "picker", "aria-label": "Search with" },
     ...(gpu ? [h("option", { value: "gpu" }, "This computer's graphics chip")] : []),
     h("option", { value: "cpu" }, "This computer's processor"),
-    ...(saved?.searcher === "custom" ? [h("option", { value: "custom" }, "The worker set in lattice.json")] : []),
+    ...(prefs.searcher === "custom" ? [h("option", { value: "custom" }, "The worker set in lattice.json")] : []),
   ) as HTMLSelectElement;
   // Saved for a graphics chip this computer cannot use (now): the processor, until it is saved otherwise.
-  searcher.value = saved && (saved.searcher !== "gpu" || gpu) ? saved.searcher : gpu ? "gpu" : "cpu";
+  searcher.value = prefs.searcher !== "gpu" || gpu ? prefs.searcher : "cpu";
   const cores = Math.max(1, Math.min(MAX_WORKERS, globalThis.navigator?.hardwareConcurrency ?? 1));
-  const workers = h("input", { type: "text", inputmode: "numeric", "aria-label": "Workers", value: String(saved?.workers ?? 1) }) as HTMLInputElement;
+  const workers = h("input", { type: "text", inputmode: "numeric", "aria-label": "Workers", value: String(prefs.workers) }) as HTMLInputElement;
   const workersField = h("div", { class: "stack" }, h("label", { class: "k" }, `Processor workers (this computer has ${cores} cores)`), workers);
   const pickers = new Map<string, HTMLSelectElement>();
   for (const chain of chains) {
-    // A fresh setup pays the active account; a saved one shows what was saved,
-    // an address that is not this wallet's included.
-    const current = saved ? saved.recipients[chain] ?? "" : accounts[0]?.address ?? "";
+    // What is saved is what is shown, an address that is not this wallet's included.
+    const current = prefs.recipients[chain] ?? "";
     const picker = h("select", { class: "picker", "aria-label": `Recipient on ${chain}` },
       ...accounts.map((a) => h("option", { value: a.address }, `${a.label} · ${a.address.slice(0, 12)}…${a.address.slice(-8)}`)),
-      ...(current && !accounts.some((a) => a.address === current) ? [h("option", { value: current }, `${current.slice(0, 12)}…${current.slice(-8)} (not in this wallet)`)] : []),
+      ...(current && !accounts.some((a) => a.address === current) ? [h("option", { value: current }, payee(current, accounts))] : []),
       h("option", { value: "" }, "No one"),
     ) as HTMLSelectElement;
     picker.value = current;
@@ -608,87 +724,43 @@ export async function miningScreen(manager: NodeManager, reads: NodeReads, back:
   }
   // Paying no one is allowed, and costly: it is said out loud before it happens.
   const burn = h("p", { class: "warn", role: "status" });
-  const state = h("span", { class: "v" }, "…");
-  const session = h("span", { class: "v" }, "");
-  const sessionRow = h("div", { class: "row" }, h("span", { class: "k" }, "This run"), session);
   const toast = h("div", { class: "toast", role: "status" });
-  const toggle = h("button", { class: "block" }, "Start mining") as HTMLButtonElement;
-  let mining = false;
-  let busy = false;
   const reflect = () => {
     const unpaid = [...pickers].filter(([, picker]) => picker.value === "").map(([chain]) => chain);
     burn.hidden = unpaid.length === 0;
-    burn.textContent = unpaid.length ? `${unpaid.join(" and ")} will pay no one: every reward and fee mined there is destroyed.` : "";
+    burn.textContent = burnt(unpaid, true);
     workersField.hidden = searcher.value !== "cpu";
   };
   searcher.addEventListener("change", reflect);
   for (const picker of pickers.values()) picker.addEventListener("change", reflect);
   reflect();
-  const apply = h("button", { class: "btn block" }, "Apply changes") as HTMLButtonElement;
-  const show = async () => {
-    clearTimeout(timer);
-    try {
-      const [status, log] = await Promise.all([manager.miningStatus(), manager.miningLog().catch(() => "")]);
-      mining = status.running;
-      state.textContent = mining ? `mining on ${SEARCHERS[saved?.searcher ?? (searcher.value as Searcher)]}` : "not mining";
-      // Proof that it is working, in the only terms that matter: blocks found.
-      const run = parseMiningLog(log);
-      sessionRow.hidden = !mining;
-      session.textContent = run.found === 0 ? "no block found yet" : `${run.found.toLocaleString()} ${run.found === 1 ? "block" : "blocks"} found · last at ${run.last ? new Date(run.last).toLocaleTimeString() : "?"}`;
-    } catch (e) { state.textContent = (e as Error).message; }
-    if (!busy) {
-      toggle.textContent = mining ? "Stop mining" : "Start mining";
-      // Starting is the step forward; stopping is not, so it is not the filled button.
-      toggle.className = mining ? "btn block" : "block";
-    }
-    // Stopped, starting saves what is chosen; running, a change has its own button.
-    apply.hidden = !mining;
-    if (document.body.contains(toggle)) timer = setTimeout(show, POLL_MS);
-  };
-  const chosen = () => miningChoices(searcher.value as Searcher, workers.value, Object.fromEntries([...pickers].map(([chain, picker]) => [chain, picker.value])));
-  const act = (label: string, run: () => Promise<void>, then?: () => void) => async () => {
-    if (busy) return;
-    busy = true;
-    toggle.disabled = apply.disabled = true;
-    toast.textContent = label + "…";
-    let done = false;
-    try { await run(); toast.textContent = ""; done = true; } catch (e) { toast.textContent = (e as Error).message; }
-    busy = false;
-    toggle.disabled = apply.disabled = false;
-    if (done && then) return then();
-    await show();
-  };
-  const save = async () => {
-    const prefs = chosen();
-    const problem = checkMining(prefs, chains);
-    if (problem) throw new Error(problem);
-    await manager.configureMining(prefs);
-  };
-  toggle.addEventListener("click", () => {
-    void (mining
-      ? act("stopping (it finishes the round it is on)", () => manager.stopMining())()
-      : act("starting", async () => { await save(); await manager.startMining(); }, leave(again))());
+  const save = h("button", { class: "block" }, running ? "Save and restart mining" : "Save") as HTMLButtonElement;
+  save.addEventListener("click", async () => {
+    const chosen = miningChoices(searcher.value as Searcher, workers.value, Object.fromEntries([...pickers].map(([chain, picker]) => [chain, picker.value])));
+    const problem = checkMining(chosen, chains);
+    if (problem) { toast.textContent = problem; return; }
+    save.disabled = true;
+    toast.textContent = running ? "saving (mining restarts)…" : "saving…";
+    try { await manager.configureMining(chosen); done(); } catch (e) { toast.textContent = (e as Error).message; save.disabled = false; }
   });
-  apply.addEventListener("click", () => { void act("applying (mining restarts)", save, leave(again))(); });
   render(
     h("div", { class: "stack" },
-      h("h1", {}, "Mining"),
-      h("p", { class: "muted" }, "Mine on your node with this computer. One search covers every chain your node hosts; each block found pays that chain's reward and fees to the account you choose."),
-      h("div", { class: "kv" }, h("div", { class: "row" }, h("span", { class: "k" }, "Status"), state), sessionRow),
+      h("h1", {}, "Mining settings"),
+      h("p", { class: "muted" }, "One search covers every chain your node hosts. Each block found pays that chain's reward and fees to the account chosen here."),
       h("label", { class: "k" }, "Search with"), searcher,
       workersField,
-      ...chains.flatMap((chain) => [h("label", { class: "k" }, `${chain} pays`), pickers.get(chain)!]),
+      h("div", { class: "section" }, "Who each chain pays"),
+      payTree(chains, (chain) => pickers.get(chain)!),
       burn,
       ...(accounts.length ? [] : [h("p", { class: "warn" }, "The wallet is locked or has no account, so there is no one of yours to pay. Unlock it first.")]),
-      h("p", { class: "muted" }, `Chains mined are the chains hosted: ${chains.join(", ")}.`),
+      h("p", { class: "muted" }, "Chains mined are the chains your node hosts."),
+      // Hosting a chain is the node's business: its page is opened, and comes back to Mining once a chain is added.
+      h("button", { class: "btn block", onclick: () => back(done) }, "Manage chains on your node"),
       toast,
-      toggle,
-      apply,
-      h("button", { class: "btn block", onclick: leave(() => back(again)) }, "Choose hosted chains"),
-      h("button", { class: "btn block", onclick: leave(() => back()) }, "Back"),
+      save,
+      h("button", { class: "btn block", onclick: done }, "Cancel"),
     ),
   );
-  await show();
 }
 
 /**
