@@ -179,7 +179,7 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     // Both accounts are back, the imported key among them; this machine's node is not running.
     const restored = [...picker().options].map((option) => option.value);
     assert.deepEqual(restored.slice(0, 2), [first, cliKey.address]);
-    assert.match(pageText(), /node unreachable/);
+    assert.match(pageText(), /Your node is stopped/);
     // The backup's password is now this wallet's.
     document.body.replaceChildren();
     await installPage();

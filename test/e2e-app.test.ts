@@ -153,7 +153,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     // ---- the node dies under the app; the wallet says so and the node screen brings it back ----
     await run("pkill", ["-9", "-f", root]);
     await until(() => {
-      if (/node unreachable/.test(pageText())) return true;
+      if (/Your node is stopped/.test(pageText())) return true;
       button("Refresh balance").click();
       return undefined;
     }, "the wallet to report the dead node");

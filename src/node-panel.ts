@@ -80,7 +80,7 @@ export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "
   const shown = chains.find((c) => c.path === chain);
   const root = chains[0];
   const line = (c: ChainStatus) => statusLine(c);
-  if (chains.some((c) => c.state === "unreachable")) notices.push({ text: "Your node is starting…" });
+  if (chains.some((c) => c.state === "unreachable")) notices.push({ text: "Your node is starting. It checks its stored chains before it answers, which can take a minute." });
   else if (shown === undefined) notices.push({ text: `Your node does not host ${chain}.` });
   else if (shown.state === "awaitingGenesis") notices.push({ text: `${chain} is waiting for its first block on your node.` });
   else if (line(shown).startsWith("syncing")) notices.push({ text: `${chain} is ${line(shown)}. Balances may be behind.` });
