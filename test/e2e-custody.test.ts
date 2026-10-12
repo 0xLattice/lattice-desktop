@@ -94,7 +94,7 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     await shows(/Balance/);
 
     // ---- stuck at a low fee: replace it with a higher one ----
-    document.getElementById("settings-button")!.click();
+    button("Activity").click();
     button("Transactions").click();
     await shows(/Increase fee/);
     button("Increase fee").click();
@@ -113,7 +113,7 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     button("Back").click();
 
     // ---- pair a browser extension with this node ----
-    button("Done").click();
+    button("Back").click();
     await shows(/Balance/);
     openNode();
     await shows(/Your node/);

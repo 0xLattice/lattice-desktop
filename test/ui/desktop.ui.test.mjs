@@ -89,12 +89,12 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
   const shows = (pattern, ms = 90_000) => until(async () => pattern.test(await pageText()), async () => `the page to show ${pattern}; it shows: ${(await pageText()).slice(0, 700)}`, ms);
   const element = (script, ...args) => until(() => session.run(script, ...args), async () => `${args.join(" ")} on the page; it shows: ${(await pageText()).slice(0, 500)}`, 60_000);
   /** Clicks the button with this text or accessible name, once the screen offers it. */
-  const press = async (text) => session.click(await element("return [...document.querySelectorAll('button')].find((b) => !b.disabled && (b.textContent === arguments[0] || b.getAttribute('aria-label') === arguments[0])) || null", text));
+  const press = async (text) => session.click(await element("return [...document.querySelectorAll('button')].find((b) => !b.disabled && (b.textContent === arguments[0] || b.getAttribute('aria-label') === arguments[0] || b.getAttribute('data-row') === arguments[0])) || null", text));
   /** Opens a folded section by clicking its heading. */
   const unfold = async (heading) => session.click(await element("return [...document.querySelectorAll('summary')].find((s) => s.textContent === arguments[0]) || null", heading));
   const field = (selector) => element("return document.querySelector(arguments[0])", selector);
   /** The node page, from the wallet's home screen: it is in Settings. */
-  const openNode = async () => { await session.click(await field("#settings-button")); await press("Node"); };
+  const openNode = async () => { await session.click(await field("#settings-button")); await press("Your node"); };
   const type = async (selector, text) => session.type(await field(selector), text);
   const valueOf = (selector) => session.run("return document.querySelector(arguments[0])?.value ?? null", selector);
   const textOf = (selector) => session.run("return document.querySelector(arguments[0])?.textContent ?? null", selector);
@@ -220,13 +220,16 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await shows(/Admitted to the node's pool/);
     await press("Done");
     await shows(/Balance on Nexus/);
-    await session.click(await field("#settings-button"));
+    await press("Activity");
     await press("Transactions");
     // Mining is still on, so the transfer is mined and counted.
     await confirmed();
     await press("Back");
+    await press("Back");
+    await shows(/Balance on Nexus/);
 
     // ---- locked: a wrong password is refused, the right one lets back in ----
+    await session.click(await field("#settings-button"));
     await press("Lock wallet");
     await shows(/Unlock/);
     await type('input[placeholder="password"]', "not the password");
@@ -276,11 +279,11 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     assert.equal(await textOf(".account-address"), second, "the account in use is the one it was");
     // Closing the window this way stops no node; the app finds it running.
     await until(funded, "the balance, read from the node still running", 300_000);
-    await session.click(await field("#settings-button"));
+    await press("Activity");
     await press("Transactions");
     await confirmed();
     await press("Back");
-    await session.click(await field("#settings-button"));
+    await press("Back");
     await shows(/Balance on Nexus/);
 
     // ---- and the node stopped from its own screen ----

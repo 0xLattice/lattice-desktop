@@ -157,7 +157,7 @@ export const pageText = () => (document.body.textContent ?? "").replace(/\s+/g, 
 
 /** A button by its text or its accessible name. */
 export function button(text: string): HTMLButtonElement {
-  const found = [...document.querySelectorAll("button")].find((item) => item.textContent === text || item.getAttribute("aria-label") === text);
+  const found = [...document.querySelectorAll("button")].find((item) => item.textContent === text || item.getAttribute("aria-label") === text || item.getAttribute("data-row") === text);
   assert.ok(found, `button "${text}" exists; page was: ${pageText()}`);
   return found as HTMLButtonElement;
 }
@@ -180,7 +180,7 @@ export const funded = () => /^[\d,]*[1-9][\d,]*$/.test(balanceShown());
 /** Open the node page from the wallet's home screen: it is in Settings. */
 export function openNode(): void {
   document.getElementById("settings-button")!.click();
-  button("Node").click();
+  button("Your node").click();
 }
 
 /** Press a button once the screen offers it: one whose label follows what the app has just learned. */

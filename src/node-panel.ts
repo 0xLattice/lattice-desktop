@@ -2,7 +2,7 @@
 // sync heights, the chains it hosts, each chain's peers, its ports; and, separately,
 // mining on it. Rendered with the wallet's own helpers and styles.
 
-import { h, render } from "../vendor/nexus-wallet/src/popup/app.ts";
+import { h, navRow, outline, render } from "../vendor/nexus-wallet/src/popup/app.ts";
 import { checkMining, checkPrefs, extensionOrigin, MAX_WORKERS, parseMiningLog, type ChainStatus, type MiningPrefs, type NodeManager, type NodePrefs, type Searcher } from "./node-manager.ts";
 
 /** What the panel reads beyond `lattice status`: a chain's /health and children, the node's cookie, and the wallet's accounts. */
@@ -30,6 +30,15 @@ export function chainWords(s: ChainStatus): string | undefined {
   const behind = s.height !== undefined && s.bestHeaderHeight !== undefined && s.bestHeaderHeight > s.height;
   if (behind) return `syncing ${s.height!.toLocaleString()} of ${s.bestHeaderHeight!.toLocaleString()}`;
   return s.state === "active" ? undefined : s.state;
+}
+
+/** The node in a few words, for the row that leads to its page: whether it runs, how many chains, how many peers. */
+export async function nodeSummary(manager: NodeManager, reads: Pick<NodeReads, "peers">): Promise<string> {
+  const chains = await manager.status();
+  if (chains.every((c) => c.state === "down")) return "stopped";
+  if (chains.some((c) => c.state === "unreachable")) return "starting";
+  const peers = await reads.peers("Nexus").catch(() => undefined);
+  return ["running", `${chains.length} ${chains.length === 1 ? "chain" : "chains"}`, ...(peers === undefined ? [] : [peersLine(peers)])].join(" · ");
 }
 
 /** The node as a whole, said once: its chains' rows do not repeat it. */
@@ -150,24 +159,6 @@ const nameOf = (path: string) => path.split("/").pop()!;
 const parentOf = (path: string) => path.split("/").slice(0, -1).join("/");
 
 /**
- * Chains laid out as the tree they are: one item a chain, a child's item
- * nested under its parent's. `row` draws a chain's row, given the guide that
- * marks its place (the lines an outline is drawn with).
- */
-function outline(paths: string[], row: (path: string, guide: string) => HTMLElement): HTMLElement[] {
-  const listed = new Set(paths);
-  const under = (parent: string | undefined) => paths.filter((p) => (parent === undefined ? !listed.has(parentOf(p)) : parentOf(p) === parent));
-  const branch = (path: string, guide: string, inherited: string): HTMLElement => {
-    const kids = under(path);
-    return h("li", {}, row(path, guide), ...(kids.length ? [h("ul", {}, ...kids.map((kid, i) => {
-      const last = i === kids.length - 1;
-      return branch(kid, inherited + (last ? "└ " : "├ "), inherited + (last ? "  " : "│ "));
-    }))] : []));
-  };
-  return under(undefined).map((path) => branch(path, "", ""));
-}
-
-/**
  * Chains as they are: a tree. One row a chain, a child under its parent and
  * named by the last part of its path, each with the same two numbers.
  * Pressing a row opens that chain. Rows are kept between updates, so the one
@@ -187,7 +178,7 @@ function chainTree(open: (path: string) => void) {
     list.replaceChildren(...outline(rows.map((r) => r.path), (path, guide) => {
       const [words, block, peers] = [h("span", { class: "words" }), h("span", { class: "n" }), h("span", { class: "n" })];
       const row = h("button", { class: status.get(path) ? "chain" : "chain off", "data-chain": path, onclick: () => open(path) },
-        h("span", { class: "name" }, h("span", { class: "guide", "aria-hidden": "true" }, guide), h("span", {}, nameOf(path))),
+        h("span", { class: "name" }, h("span", { class: "tree-guide", "aria-hidden": "true" }, guide), h("span", {}, nameOf(path))),
         words, block, peers,
         h("span", { class: "go", "aria-hidden": "true" }, "›"),
       );
@@ -319,8 +310,8 @@ function nodePage(pages: NodePages) {
   // Ports and pairing are set once, if ever: folded away until asked for.
   const ports = h("div", {});
   const advanced = h("details", { class: "advanced" }, h("summary", {}, "Advanced"), ports,
-    h("div", { class: "advanced-content" },
-      h("button", { class: "btn block", onclick: leave(() => pairScreen(manager, reads, () => nodePage(pages))) }, "Pair browser extension")));
+    h("div", { class: "advanced-content nav-list" },
+      navRow("Pair browser extension", leave(() => pairScreen(manager, reads, () => nodePage(pages))))));
   void networkForm(manager, () => { if (document.body.contains(screen)) leave(() => nodePage(pages))(); }, pages.onPrefsChanged)
     .then((form) => ports.append(form))
     .catch((e) => ports.append(h("p", { class: "warn" }, (e as Error).message)));
@@ -414,7 +405,7 @@ function chainPage(pages: NodePages, path: string) {
         pendingRow,
       ),
       h("div", { class: "stack" },
-        h("div", { class: "section" }, `Chains under ${name}`),
+        h("h2", { class: "nav-label" }, `Chains under ${name}`),
         tree.box, none,
         h("div", { class: "add-chain" }, other, h("button", { class: "btn", onclick: add }, "Add")),
       ),
@@ -589,7 +580,7 @@ function payTree(chains: string[], cell: (chain: string) => HTMLElement | string
   return h("div", { class: "tree paying" },
     h("div", { class: "cols", "aria-hidden": "true" }, h("span", {}, "Chain"), h("span", {}, "Pays")),
     h("ul", {}, ...outline(chains, (chain, guide) => h("div", { class: "chain", "data-chain": chain },
-      h("span", { class: "name" }, h("span", { class: "guide", "aria-hidden": "true" }, guide), h("span", {}, nameOf(chain))),
+      h("span", { class: "name" }, h("span", { class: "tree-guide", "aria-hidden": "true" }, guide), h("span", {}, nameOf(chain))),
       h("span", { class: "pays" }, cell(chain)),
     ))),
   );
@@ -681,7 +672,8 @@ export async function miningScreen(manager: NodeManager, reads: NodeReads, back:
     ...(unpaid.length && accounts.length ? [h("p", { class: "warn", role: "status" }, burnt(unpaid))] : []),
     ...(accounts.length ? [] : [h("p", { class: "warn" }, "The wallet is locked or has no account, so there is no one of yours to pay. Unlock it first.")]),
     toast,
-    h("button", { class: "btn block", onclick: leave(() => miningSettings(manager, reads, back, { chains, prefs, accounts, gpu }, again)) }, "Mining settings"),
+    // What is set is one row away, and the row says how it searches now.
+    h("div", { class: "nav-list" }, navRow("Mining settings", leave(() => miningSettings(manager, reads, back, { chains, prefs, accounts, gpu }, again)), SEARCHERS[prefs.searcher])),
     h("button", { class: "btn block", onclick: leave(() => back()) }, "Back"),
   );
   render(screen);
@@ -749,7 +741,7 @@ async function miningSettings(
       h("p", { class: "muted" }, "One search covers every chain your node hosts. Each block found pays that chain's reward and fees to the account chosen here."),
       h("label", { class: "k" }, "Search with"), searcher,
       workersField,
-      h("div", { class: "section" }, "Who each chain pays"),
+      h("h2", { class: "nav-label" }, "Who each chain pays"),
       payTree(chains, (chain) => pickers.get(chain)!),
       burn,
       ...(accounts.length ? [] : [h("p", { class: "warn" }, "The wallet is locked or has no account, so there is no one of yours to pay. Unlock it first.")]),
