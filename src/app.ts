@@ -19,6 +19,16 @@ const LOCK_BEAT_MS = 1000;
 /** A beat this late was not a slow timer: the computer slept or the app was suspended. */
 const SLEEP_GAP_MS = 30_000;
 
+/**
+ * Whether the wallet should lock at this beat of the idle clock: it went
+ * unused for `autoLockMs`, or the beat before this one was so long ago that
+ * the computer slept or the app was suspended in between, however recently
+ * the wallet was used before that.
+ */
+export function lockDue(now: number, lastBeat: number, lastUse: number, autoLockMs: number): boolean {
+  return now - lastBeat > SLEEP_GAP_MS || now - lastUse >= autoLockMs;
+}
+
 /** Everything privileged the page asks of its host. */
 export interface AppHost {
   ops: HostOps;
@@ -64,9 +74,9 @@ export async function startApp(host: AppHost) {
   };
   const beat = setInterval(() => {
     const now = Date.now();
-    const slept = now - lastBeat > SLEEP_GAP_MS;
+    const due = lockDue(now, lastBeat, lastUse, host.autoLockMs ?? AUTO_LOCK_MS);
     lastBeat = now;
-    if (slept || now - lastUse >= (host.autoLockMs ?? AUTO_LOCK_MS)) lock();
+    if (due) lock();
   }, LOCK_BEAT_MS);
   (beat as unknown as { unref?: () => void }).unref?.(); // never keeps a headless host running
   for (const event of ["pointerdown", "keydown", "wheel", "touchstart"]) {

@@ -7,6 +7,7 @@ import { loopbackFetch, type NodeHTTP } from "../src/loopback.ts";
 import { reader, submitter } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import { aloneOn, chosenChains, hostableChains, chainWords, nodeLine, nodeNotices, peersLine, rowCells, parsePeersField, withSync } from "../src/node-panel.ts";
 import type { ChainStatus, NodeManager } from "../src/node-manager.ts";
+import { lockDue } from "../src/app.ts";
 
 const BASE = "http://127.0.0.1:18080";
 
@@ -103,4 +104,18 @@ test("a chain's peers are its own: the row counts them, and the home screen says
   for (const chain of ["Nexus", "Nexus/testnet"]) {
     assert.deepEqual(await notices({ Nexus: 0, "Nexus/testnet": 0 }, chain), ["Your node has no peers yet, so it cannot see the network. It keeps trying."]);
   }
+});
+
+test("the wallet locks when unused for its time, and at once when the computer has slept", () => {
+  const TEN_MINUTES = 10 * 60 * 1000;
+  const start = 1_000_000;
+  // In use, with the clock ticking every second: not due.
+  assert.equal(lockDue(start + 1000, start, start, TEN_MINUTES), false);
+  assert.equal(lockDue(start + TEN_MINUTES - 1, start + TEN_MINUTES - 1001, start, TEN_MINUTES), false);
+  // Unused for the whole time: due.
+  assert.equal(lockDue(start + TEN_MINUTES, start + TEN_MINUTES - 1000, start, TEN_MINUTES), true);
+  // Used a second before the lid closed, and the next beat comes a minute later: due, whatever the use.
+  assert.equal(lockDue(start + 61_000, start + 1000, start + 1000, TEN_MINUTES), true);
+  // A beat that was only late (a busy machine) is not a sleep.
+  assert.equal(lockDue(start + 20_000, start + 1000, start + 1000, TEN_MINUTES), false);
 });
