@@ -179,8 +179,6 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await shows(/Nexusstopped/);
     await press("Back to wallet");
     await shows(/Your node is stopped, so nothing can be read or sent\./);
-    await openNode();
-    await shows(/Your node/);
     await press("Mining");
     await shows(/Mine on your node/);
     await shows(/Statusnot mining/);
@@ -189,11 +187,13 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await press("Start mining");
     await shows(/Start the node first: mining runs on it/);
     await press("Back");
-    await shows(/Your node/);
+    await shows(/Balance on Nexus/);
+    await openNode();
     await press("Start node");
     await shows(/Nexusrunning/, 300_000);
 
     // ---- mining: blocks found, and the wallet paid, with no other miner ----
+    await press("Back to wallet");
     await press("Mining");
     await shows(/Statusnot mining/);
     await press("Start mining");
@@ -201,8 +201,6 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     console.log(`[desktop ui] ${(/Statusmining on the (graphics chip|processor)/.exec(await pageText()) ?? [""])[0].slice(6)}`);
     await shows(/This run[\d,]+ blocks? found · last at /, 300_000);
     await press("Back");
-    await shows(/Miningon/);
-    await press("Back to wallet");
     await until(funded, "mined funds in the wallet", 300_000);
     await shows(/Mining on this computer\./);
 
@@ -236,20 +234,19 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await shows(/Balance on Nexus/);
 
     // ---- mining off, from the screen that turned it on ----
-    await openNode();
-    await shows(/Miningon/);
     await press("Mining");
     await shows(/Statusmining/);
     await press("Stop mining");
     await shows(/Statusnot mining/);
     await press("Back");
-    await shows(/Miningoff/);
+    await shows(/Balance on Nexus/);
+    await openNode();
 
     // ---- node settings typed wrong: refused, and nothing changes ----
-    await shows(/Chains this node hosts/);
+    await shows(/Connect to/);
     const RPC = 'input[aria-label="Local API port"]';
-    // The ports are folded away until asked for.
-    await unfold("Ports");
+    // Peers and ports are folded away until asked for.
+    await unfold("Peers and ports");
     const [rpc, listen] = [await valueOf(RPC), await valueOf('input[aria-label="Peer port"]')];
     await type(RPC, "0");
     await press("Save");
@@ -261,7 +258,7 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await press("Back to wallet");
     await shows(/Balance on Nexus/);
     await openNode();
-    await shows(/Chains this node hosts/);
+    await shows(/Connect to/);
     assert.equal(await valueOf(RPC), rpc, "the port is what it was");
     await press("Back to wallet");
     await shows(/Balance on Nexus/);

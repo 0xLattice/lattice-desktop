@@ -54,8 +54,8 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     assert.equal(document.querySelectorAll(".notice").length, 1);
     // The Node screen says the same in its own terms, with one button for the one thing to do.
     openNode();
-    await shows(/Nexusrunning · block 0PeersnoneMiningoff/);
-    assert.deepEqual([...document.querySelectorAll("#view button")].map((item) => item.textContent).slice(0, 2), ["Stop node", "Mining"]);
+    await shows(/Nexusrunning · block 0Peersnone/);
+    assert.equal([...document.querySelectorAll("#view button")].some((item) => item.textContent === "Mining"), false, "the node page is the node's alone");
     button("Back to wallet").click();
     await shows(/Balance/);
     await mine(root, ownNode, { Nexus: address }, 2, height);
@@ -115,13 +115,9 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await until(async () => ((await manager.status()).every((c) => c.state === "active") ? true : undefined), "both chains active");
     openNode();
     await shows(/Nexus\/testnetrunning/);
-    await shows(/Chains this node hosts/);
-    // The chain is listed with its box ticked: hosting it or not is a tick, not a typed path.
-    const hosted = document.querySelector('input[aria-label="Nexus/testnet"]') as HTMLInputElement;
-    assert.equal(hosted.checked, true);
-    hosted.checked = false;
-    button("Save").click();
-    // Saved, the page is the same page: the node, now hosting Nexus alone.
+    // The chain's own row, beside what it is doing, is where it stops being hosted: one press.
+    (document.querySelector('button[aria-label="Stop hosting Nexus/testnet"]') as HTMLButtonElement).click();
+    // The page is the same page: the node, now hosting Nexus alone.
     await until(async () => ((await manager.chains()).length === 1 ? true : undefined), "the child no longer hosted");
     await shows(/Nexusrunning/);
     assert.deepEqual(await manager.chains(), ["Nexus"]);

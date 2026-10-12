@@ -83,6 +83,10 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     await shows(/Your node/);
     await press("Start node");
     await shows(/Nexusrunning/);
+    // The node page is the node's alone: mining is not on it.
+    assert.doesNotMatch(pageText(), /Mining/);
+    button("Back to wallet").click();
+    await shows(/Balance/);
 
     // ---- mine: the wallet's balance grows with no other miner ----
     button("Mining").click();
@@ -94,8 +98,7 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     // Proof it is working, on the screen that started it: blocks found, and when.
     await shows(/This run[\d,]+ blocks? found · last at /);
     button("Back").click();
-    await shows(/Miningon/);
-    button("Back to wallet").click();
+    await shows(/Mining on this computer\./);
     await until(() => {
       if (funded()) return true;
       button("Refresh balance").click();
@@ -113,8 +116,6 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
       return shown && shown !== first ? shown : undefined;
     }, "a second account");
     assert.equal(await balance(second), 0n);
-    openNode();
-    await shows(/Your node/);
     button("Mining").click();
     await shows(/Statusmining/);
     // What was saved is shown, not the account that happens to be active now.
@@ -143,6 +144,8 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     button("Start mining").click();
     await shows(/Statusmining/);
     button("Back").click();
+    await shows(/Balance/);
+    openNode();
     await shows(/Your node/);
     await press("Stop node");
     await shows(/Nexusstopped/);
