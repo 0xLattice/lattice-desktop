@@ -86,10 +86,12 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   to stop hosting it, which asks first. Ports and pairing are folded away
   under Advanced. Hosting or dropping a chain restarts a running node.
   Mining is not on this page.
-- **Settings** open from the mark at the top left, which says so. The chain name beside it
-  lists the current chain's child chains, and `↑` goes to its parent. A child
-  chain this node does not host yet is marked "add to node": choosing it hosts
-  it first (a running node restarts).
+- **Settings** open from the mark at the top left, which says so. The chain
+  name beside it opens the chains as the same tree the Node page shows, with
+  the chain in use marked: one press on any of them switches the wallet
+  there. A chain this node sees and does not host is listed as "not hosted";
+  choosing it opens that chain's page on the Node screen, where hosting it is
+  one press. The menu's last row opens the Node page.
 - **Cross-chain orders** (Settings → Open cross-chain order): sell deposits,
   purchases and their withdrawals, as in the extension. Both chains are read
   and submitted through this node, so it must host the child chain as well as

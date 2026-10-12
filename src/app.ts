@@ -11,7 +11,7 @@ import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import type { KeyValueStore } from "../vendor/nexus-wallet/src/lib/wallet/settings.ts";
 import { NodeManager, type HostOps } from "./node-manager.ts";
 import { loopbackFetch, type NodeHTTP } from "./loopback.ts";
-import { miningScreen, nodeNotices, nodeScreen } from "./node-panel.ts";
+import { hostableChains, miningScreen, nodeNotices, nodeScreen } from "./node-panel.ts";
 
 export const AUTO_LOCK_MS = 10 * 60 * 1000;
 /** How often the idle clock is read. */
@@ -131,7 +131,15 @@ export async function startApp(host: AppHost) {
     print: host.print,
     // One chain list: the chains this node hosts (lattice.json). Adding one in
     // the wallet hosts it (a running node restarts).
-    chains: { list: () => manager.chains(), add: (chain) => manager.addHostedChain(chain) },
+    chains: {
+      list: () => manager.chains(),
+      add: (chain) => manager.addHostedChain(chain),
+      // The chain menu lists what the node sees and does not host, and only
+      // switches: hosting a chain, like everything else about the node's
+      // chains, is on the node's own pages.
+      seen: async () => hostableChains((await manager.prefs()).hostedChains, reads),
+      manage: (back, chain) => nodeScreen(manager, reads, back, host.reload, undefined, chain),
+    },
     actions: [
       // Mining is something people do, so it sits beside Send and Receive. Its
       // "Choose hosted chains" opens the node page, and comes back once saved.

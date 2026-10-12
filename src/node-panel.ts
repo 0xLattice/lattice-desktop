@@ -238,8 +238,10 @@ async function setHosted(pages: NodePages, screen: HTMLElement, toast: HTMLEleme
  * its block and its peers. Everything that can be changed about a chain is
  * on that chain's own page; the node's ports and pairing are folded away.
  */
-export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void, saved?: () => void) {
-  nodePage({ manager, reads, back, onPrefsChanged, saved });
+export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void, saved?: () => void, chain?: string) {
+  const pages = { manager, reads, back, onPrefsChanged, saved };
+  // Opened for one chain (the wallet's chain menu does this), it opens on that chain's page.
+  if (chain) chainPage(pages, chain); else nodePage(pages);
 }
 
 function nodePage(pages: NodePages) {
