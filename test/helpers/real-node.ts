@@ -131,7 +131,8 @@ export function harnessHost(root: string): AppHost {
 
 /** One coordinator batch at a time until `height()` has advanced by `blocks`. */
 export async function mine(root: string, url: string, recipients: Record<string, string>, blocks: number, height: () => Promise<bigint>) {
-  const target = (await height()) + BigInt(blocks);
+  // Asked until it answers: a node that has just restarted may not have written its cookie yet.
+  const target = (await until(async () => height(), "the node's height")) + BigInt(blocks);
   await until(async () => {
     await run(join(bin!, "lattice-mining-coordinator"), [
       "--node", url, "--rpc-cookie-file", cookieFile(root), "--workers", "2",
