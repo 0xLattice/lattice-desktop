@@ -54,7 +54,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     assert.equal(document.querySelectorAll(".notice").length, 1);
     // The Node screen says the same in its own terms, with one button for the one thing to do.
     openNode();
-    await shows(/Nexusrunning · block 0Peersnone/);
+    await shows(/Nexusrunning · block 0 · no peers/);
     assert.equal([...document.querySelectorAll("#view button")].some((item) => item.textContent === "Mining"), false, "the node page is the node's alone");
     button("Back to wallet").click();
     await shows(/Balance/);

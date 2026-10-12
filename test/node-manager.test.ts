@@ -46,24 +46,52 @@ test("first run scaffolds the host with `lattice init` once, on the app's own po
   const manager = new NodeManager(host);
   // Its own ports, clear of a CLI host's 8080/4001 on the same machine.
   assert.equal(await manager.rpcURL(), "http://127.0.0.1:18080");
-  assert.deepEqual(await manager.prefs(), { rpc: 18080, listen: 14001, peers: "default", hostedChains: [] });
+  assert.deepEqual(await manager.prefs(), { rpc: 18080, listen: 14001, peers: "default", chainPeers: {}, hostedChains: [] });
   assert.deepEqual(calls, ["init"]);
 });
 
 test("settings map onto lattice.json and keep fields the app does not manage", () => {
   const base: Topology = { listen: 4001, rpc: 8080, minRelayFee: 5, mine: { workers: 2 } };
-  const none = withPrefs(base, { rpc: 18080, listen: 14001, peers: "none", hostedChains: ["Nexus/testnet"] });
+  const none = withPrefs(base, { rpc: 18080, listen: 14001, peers: "none", chainPeers: {}, hostedChains: ["Nexus/testnet"] });
   assert.deepEqual(none, { listen: 14001, rpc: 18080, minRelayFee: 5, mine: { workers: 2 }, peers: [], hostedChains: ["Nexus/testnet"] });
   assert.deepEqual(prefsOf(none).peers, "none");
-  const custom = withPrefs(none, { rpc: 18080, listen: 14001, peers: [PEER], hostedChains: [] });
+  const custom = withPrefs(none, { rpc: 18080, listen: 14001, peers: [PEER], chainPeers: {}, hostedChains: [] });
   assert.deepEqual(custom.peers, [PEER]);
   assert.equal("hostedChains" in custom, false);
   const back = withPrefs(custom, { ...prefsOf(custom), peers: "default" });
   assert.equal("peers" in back, false, "default = no peers key = the node's built-in peers");
 });
 
+test("each chain has its own peers: Nexus's list as before, a child's as extra peers for that chain", () => {
+  const OTHER = `${"cd".repeat(32)}@198.51.100.2:4001`;
+  // An array is Nexus's list, as in every file written before chains had their own.
+  assert.deepEqual(prefsOf({ listen: 1, rpc: 2, peers: [PEER], hostedChains: ["Nexus/testnet"] }), {
+    rpc: 2, listen: 1, peers: [PEER], chainPeers: {}, hostedChains: ["Nexus/testnet"],
+  });
+  // Keyed by chain: Nexus left out keeps the built-in peers; an empty child list is no list.
+  const keyed = prefsOf({ listen: 1, rpc: 2, peers: { "Nexus/testnet": [OTHER], "Nexus/other": [] }, hostedChains: ["Nexus/testnet", "Nexus/other"] });
+  assert.deepEqual([keyed.peers, keyed.chainPeers], ["default", { "Nexus/testnet": [OTHER] }]);
+  assert.deepEqual(prefsOf({ listen: 1, rpc: 2, peers: { Nexus: [] } }).peers, "none");
+
+  const base: Topology = { listen: 1, rpc: 2 };
+  const prefs: NodePrefs = { rpc: 2, listen: 1, peers: "default", chainPeers: { "Nexus/testnet": [OTHER] }, hostedChains: ["Nexus/testnet"] };
+  assert.deepEqual(withPrefs(base, prefs).peers, { "Nexus/testnet": [OTHER] });
+  assert.deepEqual(withPrefs(base, { ...prefs, peers: "none" }).peers, { Nexus: [], "Nexus/testnet": [OTHER] });
+  assert.deepEqual(withPrefs(base, { ...prefs, peers: [PEER] }).peers, { Nexus: [PEER], "Nexus/testnet": [OTHER] });
+  // What is written is read back the same.
+  assert.deepEqual(prefsOf(withPrefs(base, { ...prefs, peers: [PEER] })), { ...prefs, peers: [PEER] });
+  // A chain no longer hosted takes its list with it: the node refuses a list for a chain it does not host.
+  const dropped = withPrefs(base, { ...prefs, peers: [PEER], hostedChains: [] });
+  assert.deepEqual(dropped.peers, [PEER], "with no child lists, Nexus's list is the array it always was");
+  assert.equal("peers" in withPrefs(base, { ...prefs, hostedChains: [] }), false);
+
+  assert.equal(checkPrefs(prefs), undefined);
+  assert.match(checkPrefs({ ...prefs, chainPeers: { "Nexus/testnet": ["host:4001"] } })!, /Not a peer/);
+  assert.match(checkPrefs({ ...prefs, chainPeers: { "Nexus/testnet": [] } })!, /at least one peer for Nexus\/testnet/);
+});
+
 test("settings are checked before they are written", () => {
-  const ok: NodePrefs = { rpc: 8080, listen: 4001, peers: "default", hostedChains: [] };
+  const ok: NodePrefs = { rpc: 8080, listen: 4001, peers: "default", chainPeers: {}, hostedChains: [] };
   assert.equal(checkPrefs(ok), undefined);
   assert.match(checkPrefs({ ...ok, rpc: 0 })!, /Ports/);
   assert.match(checkPrefs({ ...ok, rpc: 70000 })!, /Ports/);
@@ -79,15 +107,15 @@ test("settings are checked before they are written", () => {
 
 test("saving settings restarts a running node, and leaves a stopped one stopped", async () => {
   const running = scripted({ listen: 4001, rpc: 8080 }, true);
-  await new NodeManager(running.host).configure({ rpc: 8080, listen: 4001, peers: "none", hostedChains: [] });
+  await new NodeManager(running.host).configure({ rpc: 8080, listen: 4001, peers: "none", chainPeers: {}, hostedChains: [] });
   assert.deepEqual(running.calls, ["status", "down", "up"]);
   assert.deepEqual(running.state.topology?.peers, []);
 
   const stopped = scripted({ listen: 4001, rpc: 8080 });
-  await new NodeManager(stopped.host).configure({ rpc: 9090, listen: 4001, peers: "default", hostedChains: [] });
+  await new NodeManager(stopped.host).configure({ rpc: 9090, listen: 4001, peers: "default", chainPeers: {}, hostedChains: [] });
   assert.deepEqual(stopped.calls, ["status"]);
   assert.equal(stopped.state.topology?.rpc, 9090);
-  await assert.rejects(new NodeManager(stopped.host).configure({ rpc: 1, listen: 1, peers: "default", hostedChains: [] }), /differ/);
+  await assert.rejects(new NodeManager(stopped.host).configure({ rpc: 1, listen: 1, peers: "default", chainPeers: {}, hostedChains: [] }), /differ/);
 });
 
 test("a failing lifecycle verb surfaces the CLI's own words", async () => {
@@ -242,7 +270,7 @@ test("a chain no longer hosted is no longer paid: the CLI refuses a lattice.json
   state.mining = true;
   const manager = new NodeManager(host);
   const prefs = await manager.prefs();
-  await manager.configure({ ...prefs, hostedChains: [] });
+  await manager.configure({ ...prefs, chainPeers: {}, hostedChains: [] });
   assert.deepEqual(state.topology!.mine, { worker: "cpu", workers: 1, recipients: { Nexus: MINER } });
   assert.equal(state.topology!.hostedChains, undefined);
   // The loop was started with the old recipients, so it is restarted around the node's own restart.
@@ -255,7 +283,7 @@ test("a chain no longer hosted is no longer paid: the CLI refuses a lattice.json
 
   // An operator's tuning entry for the chain is theirs to remove: say so, and write nothing.
   state.topology = { listen: 14001, rpc: 18080, hostedChains: ["Nexus/testnet"], mine: { recipients: {}, minWork: { "Nexus/testnet": "2^20" } } };
-  await assert.rejects(manager.configure({ ...prefs, hostedChains: [] }), /mine\.minWork names Nexus\/testnet/);
+  await assert.rejects(manager.configure({ ...prefs, chainPeers: {}, hostedChains: [] }), /mine\.minWork names Nexus\/testnet/);
   assert.deepEqual(state.topology.hostedChains, ["Nexus/testnet"]);
 });
 

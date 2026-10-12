@@ -486,11 +486,17 @@ fn merged_topology(current: Value, update: &Value, gpu_worker: Option<&str>) -> 
         rpc_port(&Some(serde_json::json!({ "rpc": update.get(port).cloned().unwrap_or(Value::Null) })))
             .map_err(|_| format!("{port} must be a port"))?;
     }
-    for list in ["peers", "hostedChains", "rpcAllowedOrigins"] {
-        if let Some(v) = update.get(list) {
-            if !v.as_array().is_some_and(|a| a.iter().all(Value::is_string)) {
-                return Err(format!("{list} must be a list of strings"));
-            }
+    let strings = |v: &Value| v.as_array().is_some_and(|a| a.iter().all(Value::is_string));
+    for list in ["hostedChains", "rpcAllowedOrigins"] {
+        if update.get(list).is_some_and(|v| !strings(v)) {
+            return Err(format!("{list} must be a list of strings"));
+        }
+    }
+    // Nexus's list, or a list per chain path.
+    if let Some(v) = update.get("peers") {
+        let per_chain = v.as_object().is_some_and(|m| m.iter().all(|(chain, list)| is_chain_path(chain) && strings(list)));
+        if !strings(v) && !per_chain {
+            return Err("peers must be a list of strings, or one per chain path".to_string());
         }
     }
     if let Some(origins) = update.get("rpcAllowedOrigins").and_then(Value::as_array) {
@@ -924,6 +930,11 @@ mod tests {
         let current = serde_json::json!({"listen": 4001, "rpc": 8080, "peers": ["a"], "minRelayFee": 5});
         let merged = merged_topology(current.clone(), &serde_json::json!({"rpc": 18080, "listen": 14001}), None).unwrap();
         assert_eq!(merged, serde_json::json!({"listen": 14001, "rpc": 18080, "minRelayFee": 5}));
+        let per_chain = serde_json::json!({"rpc": 18080, "listen": 14001, "peers": {"Nexus": [], "Nexus/testnet": ["a"]}});
+        assert_eq!(
+            merged_topology(current.clone(), &per_chain, None).unwrap()["peers"],
+            serde_json::json!({"Nexus": [], "Nexus/testnet": ["a"]})
+        );
         for bad in [
             serde_json::json!({"rpc": 18080, "listen": 14001, "publicRead": 80}),
             serde_json::json!({"rpc": 18080, "listen": 14001, "publicSubmit": true}),
@@ -931,6 +942,8 @@ mod tests {
             serde_json::json!({"rpc": 0, "listen": 14001}),
             serde_json::json!({"listen": 14001}),
             serde_json::json!({"rpc": 1, "listen": 2, "peers": "x"}),
+            serde_json::json!({"rpc": 1, "listen": 2, "peers": {"Nexus/testnet": "x"}}),
+            serde_json::json!({"rpc": 1, "listen": 2, "peers": {"not a path": ["a"]}}),
             serde_json::json!([]),
         ] {
             assert!(merged_topology(current.clone(), &bad, None).is_err(), "{bad}");

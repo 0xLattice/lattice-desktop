@@ -245,8 +245,8 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     // ---- node settings typed wrong: refused, and nothing changes ----
     await shows(/Connect to/);
     const RPC = 'input[aria-label="Local API port"]';
-    // Peers and ports are folded away until asked for.
-    await unfold("Peers and ports");
+    // Ports are folded away until asked for.
+    await unfold("Ports");
     const [rpc, listen] = [await valueOf(RPC), await valueOf('input[aria-label="Peer port"]')];
     await type(RPC, "0");
     await press("Save");
