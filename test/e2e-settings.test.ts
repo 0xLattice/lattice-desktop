@@ -60,8 +60,8 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     const before = readFileSync(join(root, "lattice.json"), "utf8");
     const rpc = () => document.querySelector('input[aria-label="Local API port"]') as HTMLInputElement;
     const listen = () => document.querySelector('input[aria-label="Peer port"]') as HTMLInputElement;
-    const peerMode = () => document.querySelector('select[aria-label="Peers"]') as HTMLSelectElement;
-    const peerList = () => document.querySelector('textarea[aria-label="Peer list"]') as HTMLTextAreaElement;
+    const peerMode = () => document.querySelector('select[aria-label="Peers of Nexus"]') as HTMLSelectElement;
+    const peerList = () => document.querySelector('textarea[aria-label="Peer list of Nexus"]') as HTMLTextAreaElement;
     // A hosted chain's row offers to remove it; one the node cannot see is a path to type.
     const dropButton = (chain: string) => document.querySelector(`button[aria-label="Stop hosting ${chain}"]`) as HTMLButtonElement | null;
     const otherChain = () => document.querySelector('input[aria-label="Another chain"]') as HTMLInputElement;
@@ -76,7 +76,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     rpc().value = oldRPC;
     peerMode().value = "custom";
     peerList().value = "not-a-peer";
-    button("Save").click();
+    button("Save peers").click();
     await shows(/Not a peer \(publicKey@host:port\): not-a-peer/);
     peerMode().value = "none";
     otherChain().value = "Nexus/testnet/payments";
@@ -88,9 +88,13 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     const newRPC = String(await freePort());
     const peer = `${"ab".repeat(32)}@127.0.0.1:${await freePort()}`;
     otherChain().value = "";
-    rpc().value = newRPC;
+    // Each chain's peers are saved on its own row; the ports under Ports.
     peerMode().value = "custom";
     peerList().value = peer;
+    button("Save peers").click();
+    await until(() => (topology().peers?.length === 1 ? true : undefined), "the peer saved");
+    await shows(/Nexusrunning/);
+    rpc().value = newRPC;
     button("Save").click();
     await until(() => (reloads === 1 ? true : undefined), "the app to reload for the new RPC port");
     assert.deepEqual([topology().rpc, topology().peers], [Number(newRPC), [peer]]);
@@ -113,7 +117,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     assert.deepEqual([rpc().value, peerMode().value, peerList().value], [newRPC, "custom", peer]);
     // Back to a private node: no peers.
     peerMode().value = "none";
-    button("Save").click();
+    button("Save peers").click();
     await until(() => (topology().peers?.length === 0 ? true : undefined), "the peers saved");
     assert.deepEqual(topology().peers, []);
     assert.equal(reloads, 1, "only a port change reloads");
@@ -177,9 +181,26 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await shows(/Connect to/);
     peerMode().value = "custom";
     peerList().value = peer;
-    button("Save").click();
+    button("Save peers").click();
     await until(() => (topology().peers?.length === 1 ? true : undefined), "the peer saved");
     assert.deepEqual(topology().peers, [peer]);
+    // The child chain has its own row and its own peers: found through Nexus
+    // unless it is given more to try.
+    const childMode = () => document.querySelector(`select[aria-label="Peers of ${CHILD}"]`) as HTMLSelectElement;
+    await until(() => (childMode() ? true : undefined), "the child chain's row");
+    const childList = () => document.querySelector(`textarea[aria-label="Peer list of ${CHILD}"]`) as HTMLTextAreaElement;
+    assert.deepEqual([...childMode().options].map((option) => option.textContent), ["Peers found through Nexus", "Those, and peers I list"]);
+    assert.equal(childMode().value, "default");
+    childMode().value = "custom";
+    childList().value = "not-a-peer";
+    (document.querySelector(`button[aria-label="Save peers of ${CHILD}"]`) as HTMLButtonElement).click();
+    await shows(/Not a peer \(publicKey@host:port\): not-a-peer/);
+    childList().value = peer;
+    (document.querySelector(`button[aria-label="Save peers of ${CHILD}"]`) as HTMLButtonElement).click();
+    await until(() => (Array.isArray(topology().peers) ? undefined : true), "the child chain's peer saved");
+    assert.deepEqual(topology().peers, { Nexus: [peer], [CHILD]: [peer] });
+    // The node starts on it, and the row shows what was saved.
+    await until(() => (childMode()?.value === "custom" && childList().value === peer ? true : undefined), "the child chain's peers shown");
     button("Back to wallet").click();
     await shows(/Balance/);
     button("Mining").click();
@@ -197,6 +218,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await shows(/Statusmining on the (graphics chip|processor)/);
     assert.deepEqual(topology().mine?.recipients, { Nexus: second });
     assert.equal(topology().hostedChains, undefined);
+    assert.deepEqual(topology().peers, [peer], "a chain no longer hosted takes its peers with it");
     assert.equal(recipient(CHILD), null);
     assert.deepEqual((await app.manager.status()).map((chain) => chain.path), ["Nexus"]);
     const unhostedAt = await until(async () => nexusHeight(), "the node back up");

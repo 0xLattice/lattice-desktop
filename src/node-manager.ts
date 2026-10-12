@@ -9,8 +9,13 @@
 export interface Topology {
   listen: number;
   rpc: number;
-  /** Absent: the node's built-in bootstrap peers. []: none. */
-  peers?: string[];
+  /**
+   * Each chain's peers, by chain path. Nexus's list: absent = the node's
+   * built-in peers, [] = none. A hosted child chain's list is extra peers to
+   * try for that chain, beside those it finds through its parent. A bare
+   * array is Nexus's list.
+   */
+  peers?: string[] | Record<string, string[]>;
   hostedChains?: string[];
   /** Browser origins allowed on the loopback operator port (e.g. a paired extension). */
   rpcAllowedOrigins?: string[];
@@ -50,16 +55,27 @@ export interface NodePrefs {
   listen: number;
   /** "default": the node's built-in Nexus peers; "none": no peers; or the user's list. */
   peers: "default" | "none" | string[];
+  /**
+   * Extra peers for a hosted child chain, by chain path. A chain left out
+   * finds its peers through its parent, which is all most chains need.
+   */
+  chainPeers: Record<string, string[]>;
   /** Child chains to host beside Nexus, parent before child (e.g. "Nexus/testnet"). */
   hostedChains: string[];
 }
 
 export function prefsOf(topology: Topology): NodePrefs {
+  // An array is Nexus's list, as in every file written before chains had their own.
+  const byChain = Array.isArray(topology.peers) ? { Nexus: topology.peers } : topology.peers ?? {};
+  const nexus = byChain.Nexus;
+  const hostedChains = [...(topology.hostedChains ?? [])];
   return {
     rpc: topology.rpc,
     listen: topology.listen,
-    peers: topology.peers === undefined ? "default" : topology.peers.length === 0 ? "none" : [...topology.peers],
-    hostedChains: [...(topology.hostedChains ?? [])],
+    peers: nexus === undefined ? "default" : nexus.length === 0 ? "none" : [...nexus],
+    // For a child chain an empty list is the same as none.
+    chainPeers: Object.fromEntries(hostedChains.filter((chain) => (byChain[chain]?.length ?? 0) > 0).map((chain) => [chain, [...byChain[chain]!]])),
+    hostedChains,
   };
 }
 
@@ -67,8 +83,12 @@ export function prefsOf(topology: Topology): NodePrefs {
 export function withPrefs(topology: Topology, prefs: NodePrefs): Topology {
   const next: Topology = { ...topology, rpc: prefs.rpc, listen: prefs.listen };
   delete next.peers;
-  if (prefs.peers === "none") next.peers = [];
-  else if (prefs.peers !== "default") next.peers = [...prefs.peers];
+  const nexus = prefs.peers === "default" ? undefined : prefs.peers === "none" ? [] : [...prefs.peers];
+  // Only for chains still hosted: the node refuses a list for any other.
+  const children = prefs.hostedChains.filter((chain) => (prefs.chainPeers[chain]?.length ?? 0) > 0).map((chain) => [chain, [...prefs.chainPeers[chain]!]]);
+  // With no child lists, Nexus's list is written as the array it always was.
+  if (children.length > 0) next.peers = { ...(nexus ? { Nexus: nexus } : {}), ...Object.fromEntries(children) };
+  else if (nexus) next.peers = nexus;
   delete next.hostedChains;
   if (prefs.hostedChains.length > 0) next.hostedChains = [...prefs.hostedChains];
   return next;
@@ -84,6 +104,11 @@ export function checkPrefs(prefs: NodePrefs): string | undefined {
   if (Array.isArray(prefs.peers)) {
     if (prefs.peers.length === 0) return "List at least one peer, or choose none.";
     const bad = prefs.peers.find((p) => !PEER.test(p));
+    if (bad !== undefined) return `Not a peer (publicKey@host:port): ${bad}`;
+  }
+  for (const [chain, list] of Object.entries(prefs.chainPeers)) {
+    if (list.length === 0) return `List at least one peer for ${chain}, or let it find its own.`;
+    const bad = list.find((p) => !PEER.test(p));
     if (bad !== undefined) return `Not a peer (publicKey@host:port): ${bad}`;
   }
   const listed = new Set(["Nexus"]);

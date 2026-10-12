@@ -12,6 +12,13 @@ main { max-width: 560px; margin: 0 auto; }
 .kv .row { align-items: center; }
 .kv .row .v { margin-left: auto; text-align: right; }
 .kv .row .btn { flex: 0 0 auto; padding: 2px var(--s-2); font-size: var(--fs-12); }
+/* Hosted rows, then the chains on offer: one table. */
+.kv .rows { display: contents; }
+.kv .rows:last-child .row:last-child { border-bottom: 0; }
+/* Whom a chain connects to: folded under its row, and quiet until opened. */
+.kv .connect { border-bottom: var(--rule); }
+.kv .connect summary { cursor: pointer; padding: 2px var(--s-3); font-size: var(--fs-12); color: var(--muted, inherit); }
+.kv .rows:last-child .connect:last-child { border-bottom: 0; }
 .add-chain { display: flex; gap: var(--s-2); }
 .add-chain input { flex: 1; min-width: 0; }
 .add-chain .btn { flex: 0 0 auto; }

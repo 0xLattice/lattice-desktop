@@ -1,5 +1,5 @@
 // The desktop's node screen: start/stop/status of the app's own node, its
-// sync heights, the chains it hosts, its peers and ports; and, separately,
+// sync heights, the chains it hosts, each chain's peers, its ports; and, separately,
 // mining on it. Rendered with the wallet's own helpers and styles.
 
 import { h, render } from "../vendor/nexus-wallet/src/popup/app.ts";
@@ -10,8 +10,8 @@ export interface NodeReads {
   health(path: string): Promise<{ height?: bigint; bestHeaderHeight?: bigint }>;
   /** The child chains `path`'s latest block carries, as full paths. */
   children(path: string): Promise<string[]>;
-  /** How many peers the node is connected to. */
-  peers(): Promise<number>;
+  /** How many of the node's peers serve the chain at `path`. */
+  peers(path: string): Promise<number>;
   cookie(): Promise<string | null>;
   /** The wallet's accounts, the active one first: who mining can pay. Empty while locked. */
   accounts(): Promise<{ label: string; address: string }[]>;
@@ -71,6 +71,16 @@ export function alone(peers: NodePrefs["peers"]): string {
     : "Your node has no peers yet, so it cannot see the network. It keeps trying.";
 }
 
+/** What a child chain with no peers of its own should say, on a node that has peers. */
+export function aloneOn(chain: string): string {
+  return `None of your node's peers host ${chain} yet, so it cannot see new blocks there. It keeps looking.`;
+}
+
+/** A chain's own peers, in a row. */
+export function peersLine(peers: number): string {
+  return peers === 0 ? "no peers" : peers === 1 ? "1 peer" : `${peers.toLocaleString()} peers`;
+}
+
 export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "health" | "peers">, chain: string): Promise<Notice[]> {
   const chains = await withSync(await manager.status(), reads);
   if (chains.every((c) => c.state === "down")) {
@@ -87,8 +97,12 @@ export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "
   else if (root && root !== shown && line(root).startsWith("syncing")) notices.push({ text: `${root.path} is ${line(root)}. ${chain} follows it.` });
   // Running is not the same as connected: a node with no peers answers every
   // read, at whatever height it has, and would otherwise look in sync.
-  if (!chains.some((c) => c.state === "unreachable") && (await reads.peers().catch(() => undefined)) === 0) {
-    notices.push({ text: alone((await manager.prefs()).peers) });
+  // It is said of the chain in view: Nexus without peers is the node cut
+  // off; a child without peers on a connected node is that chain alone.
+  if (!chains.some((c) => c.state === "unreachable") && root) {
+    const count = (path: string) => reads.peers(path).catch(() => undefined);
+    if ((await count(root.path)) === 0) notices.push({ text: alone((await manager.prefs()).peers) });
+    else if (shown && shown !== root && shown.state === "active" && (await count(shown.path)) === 0) notices.push({ text: aloneOn(shown.path) });
   }
   if ((await manager.miningStatus().catch(() => ({ running: false }))).running) notices.push({ text: "Mining on this computer." });
   return notices;
@@ -101,7 +115,14 @@ export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "
  * people here to host a chain, and wants them back).
  */
 export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void, saved?: () => void) {
-  const table = h("div", { class: "kv" }, h("div", { class: "row" }, h("span", { class: "muted" }, "…")));
+  // Hosted chains keep their rows between polls, so what is typed into one
+  // stays; the chains on offer are listed again each time.
+  const hostedRows = h("div", { class: "rows" }, h("div", { class: "row" }, h("span", { class: "muted" }, "…")));
+  const offeredRows = h("div", { class: "rows" });
+  const table = h("div", { class: "kv" }, hostedRows, offeredRows);
+  const status = new Map<string, HTMLElement>();
+  // A read that failed is said beside the rows, which stay as they are.
+  const problem = h("p", { class: "warn", role: "status", hidden: "true" });
   const toast = h("div", { class: "toast", role: "status" });
   // One button, saying the one thing it will do: the node is either running or it is not.
   const toggle = h("button", { class: "block" }, "…") as HTMLButtonElement;
@@ -113,6 +134,9 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
   let timer: ReturnType<typeof setTimeout> | undefined;
   const again = (savedTo?: () => void) => nodeScreen(manager, reads, back, onPrefsChanged, savedTo);
   const leave = (go: () => void) => () => { clearTimeout(timer); go(); };
+  // Where a save goes once it is written. A save takes as long as the node
+  // takes to restart: whoever left this page meanwhile is not pulled back.
+  const after = (go: () => void) => () => { if (document.body.contains(table)) leave(go)(); };
 
   // Hosting a chain or not is one press on its row; the node restarts to take it.
   const host = async (change: (hosted: string[]) => string[], doing: string) => {
@@ -125,7 +149,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
       const problem = checkPrefs(next);
       if (problem) { toast.textContent = problem; return; }
       await manager.configure(next);
-      leave(saved ?? (() => again()))();
+      after(saved ?? (() => again()))();
     } catch (e) {
       toast.textContent = (e as Error).message;
     } finally {
@@ -147,31 +171,48 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
         manager.prefs(),
       ]);
       running = chains.some((c) => c.state !== "down");
-      const peers = running ? await reads.peers().catch(() => undefined) : undefined;
+      // Each chain's own peers: the node's peers that serve it.
+      const peers = new Map(await Promise.all(chains.map(async (c) =>
+        [c.path, c.state === "down" || c.state === "unreachable" ? undefined : await reads.peers(c.path).catch(() => undefined)] as const)));
       // Chains the node can see but does not host: one press to add.
       const hosted = new Set(chains.map((c) => c.path));
       const offered = (await hostableChains(prefs.hostedChains, reads)).filter((chain) => !hosted.has(chain));
-      lonely.hidden = peers !== 0;
-      lonely.textContent = peers === 0 ? alone(prefs.peers) : "";
-      table.replaceChildren(
-        ...chains.map((c) => h("div", { class: "row" },
-          h("span", { class: "k mono" }, c.path),
-          h("span", { class: "v" }, statusLine(c, peers !== 0)),
-          // Nexus is the root: always hosted. A chain goes with the chains under it.
-          ...(c.path === "Nexus" ? [] : [h("button", {
-            class: "btn", "aria-label": `Stop hosting ${c.path}`,
-            onclick: () => { void host((list) => list.filter((chain) => chain !== c.path && !chain.startsWith(c.path + "/")), `removing ${c.path} (the node restarts)…`); },
-          }, "Remove")]),
-        )),
-        ...offered.map((chain) => h("div", { class: "row" },
-          h("span", { class: "k mono" }, chain),
-          h("span", { class: "v muted" }, "not hosted"),
-          h("button", { class: "btn", "aria-label": `Host ${chain}`, onclick: () => { void host((list) => chosenChains(list, chain), `adding ${chain} (the node restarts)…`); } }, "Add"),
-        )),
-        ...(peers === undefined ? [] : [h("div", { class: "row" }, h("span", { class: "k" }, "Peers"), h("span", { class: "v" }, peers === 0 ? "none" : peers.toLocaleString()))]),
-      );
+      const nexus = peers.get("Nexus");
+      lonely.hidden = nexus !== 0;
+      lonely.textContent = nexus === 0 ? alone(prefs.peers) : "";
+      problem.hidden = true;
+      if (hostedRows.querySelector(".connect") === null || chains.length !== status.size || chains.some((c) => !status.has(c.path))) {
+        status.clear();
+        hostedRows.replaceChildren(...chains.flatMap((c) => {
+          const line = h("span", { class: "v" });
+          status.set(c.path, line);
+          return [
+            h("div", { class: "row" },
+              h("span", { class: "k mono" }, c.path),
+              line,
+              // Nexus is the root: always hosted. A chain goes with the chains under it.
+              ...(c.path === "Nexus" ? [] : [h("button", {
+                class: "btn", "aria-label": `Stop hosting ${c.path}`,
+                onclick: () => { void host((list) => list.filter((chain) => chain !== c.path && !chain.startsWith(c.path + "/")), `removing ${c.path} (the node restarts)…`); },
+              }, "Remove")]),
+            ),
+            // Whom a chain connects to is set once, if ever: folded away on its row.
+            h("details", { class: "connect" }, h("summary", { "aria-label": `Connect ${c.path} to` }, "Connect to"), connectForm(manager, prefs, c.path, after(() => again()))),
+          ];
+        }));
+      }
+      for (const c of chains) {
+        const count = peers.get(c.path);
+        status.get(c.path)!.textContent = statusLine(c, count !== 0) + (count === undefined ? "" : ` · ${peersLine(count)}`);
+      }
+      offeredRows.replaceChildren(...offered.map((chain) => h("div", { class: "row" },
+        h("span", { class: "k mono" }, chain),
+        h("span", { class: "v muted" }, "not hosted"),
+        h("button", { class: "btn", "aria-label": `Host ${chain}`, onclick: () => { void host((list) => chosenChains(list, chain), `adding ${chain} (the node restarts)…`); } }, "Add"),
+      )));
     } catch (e) {
-      table.replaceChildren(h("div", { class: "row" }, h("span", { class: "warn" }, (e as Error).message)));
+      problem.textContent = (e as Error).message;
+      problem.hidden = false;
     }
     if (!busy) {
       toggle.textContent = running ? "Stop node" : "Start node";
@@ -198,9 +239,9 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
     }
   });
 
-  // Peers and ports are set once, if ever: folded away until asked for.
-  const network = h("details", { class: "advanced" }, h("summary", {}, "Peers and ports"));
-  void networkForm(manager, leave(() => again()), onPrefsChanged)
+  // Ports are set once, if ever: folded away until asked for.
+  const network = h("details", { class: "advanced" }, h("summary", {}, "Ports"));
+  void networkForm(manager, after(() => again()), onPrefsChanged)
     .then((form) => network.append(form))
     .catch((e) => network.append(h("p", { class: "warn" }, (e as Error).message)));
 
@@ -209,6 +250,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
       h("h1", {}, "Your node"),
       h("p", { class: "muted" }, "A full Lattice node on this computer. The wallet reads and sends only through it."),
       table,
+      problem,
       h("div", { class: "add-chain" }, other, h("button", { class: "btn", onclick: addTyped }, "Add chain")),
       lonely,
       toast,
@@ -241,37 +283,74 @@ export function chosenChains(ticked: string[], typed: string): string[] {
   return [...new Set([...ticked, ...typed.split(/[\s,]+/).filter(Boolean)])].sort(byDepth);
 }
 
-/** How the node connects, as a form: its peers, its ports, and Save. `saved` runs once they are written. */
-async function networkForm(manager: NodeManager, saved: () => void, onPrefsChanged: () => void) {
-  const prefs = await manager.prefs();
-  const mode = h("select", { class: "picker", "aria-label": "Peers" },
-    h("option", { value: "default" }, "The network's built-in peers"),
-    h("option", { value: "custom" }, "Only peers I list"),
-    h("option", { value: "none" }, "No one (a private node)"),
+/**
+ * Whom one chain connects to, as a form. Nexus has the network's built-in
+ * peers, a list of the user's own instead, or no one. A child chain finds its
+ * peers through its parent, and may be given more to try.
+ */
+function connectForm(manager: NodeManager, prefs: NodePrefs, chain: string, saved: () => void) {
+  const root = chain === "Nexus";
+  const parent = chain.split("/").slice(0, -1).join("/");
+  const now = root ? prefs.peers : prefs.chainPeers[chain] ?? "default";
+  const mode = h("select", { class: "picker", "aria-label": `Peers of ${chain}` },
+    ...(root
+      ? [
+          h("option", { value: "default" }, "The network's built-in peers"),
+          h("option", { value: "custom" }, "Only peers I list"),
+          h("option", { value: "none" }, "No one (a private node)"),
+        ]
+      : [
+          h("option", { value: "default" }, `Peers found through ${parent}`),
+          h("option", { value: "custom" }, "Those, and peers I list"),
+        ]),
   ) as HTMLSelectElement;
-  mode.value = Array.isArray(prefs.peers) ? "custom" : prefs.peers;
-  const peers = h("textarea", { placeholder: "publicKey@host:port, one per line", spellcheck: "false", "aria-label": "Peer list" }) as HTMLTextAreaElement;
-  peers.value = Array.isArray(prefs.peers) ? prefs.peers.join("\n") : "";
+  mode.value = Array.isArray(now) ? "custom" : now;
+  const peers = h("textarea", { placeholder: "publicKey@host:port, one per line", spellcheck: "false", "aria-label": `Peer list of ${chain}` }) as HTMLTextAreaElement;
+  peers.value = Array.isArray(now) ? now.join("\n") : "";
   // Shown only when it is what was chosen.
   const showPeers = () => { peers.hidden = mode.value !== "custom"; };
   mode.addEventListener("change", showPeers);
   showPeers();
+  const err = h("div", { class: "toast", role: "status" });
+  return h("div", { class: "advanced-content stack" },
+    mode, peers,
+    h("p", { class: "muted" }, "Saving restarts the node if it is running."),
+    err,
+    h("button", { class: "btn block", "aria-label": `Save peers of ${chain}`, onclick: async () => {
+      const current = await manager.prefs();
+      const typed = parsePeersField(mode.value, peers.value);
+      const { [chain]: _, ...others } = current.chainPeers;
+      const next: NodePrefs = root
+        ? { ...current, peers: typed }
+        : { ...current, chainPeers: Array.isArray(typed) ? { ...others, [chain]: typed } : others };
+      const problem = checkPrefs(next);
+      if (problem) { err.textContent = problem; return; }
+      err.textContent = "saving…";
+      try {
+        await manager.configure(next);
+        saved();
+      } catch (e) { err.textContent = (e as Error).message; }
+    } }, "Save peers"),
+  );
+}
+
+/** The node's ports, as a form, and Save. `saved` runs once they are written. */
+async function networkForm(manager: NodeManager, saved: () => void, onPrefsChanged: () => void) {
+  const prefs = await manager.prefs();
   const rpc = h("input", { type: "text", inputmode: "numeric", "aria-label": "Local API port", value: String(prefs.rpc) }) as HTMLInputElement;
   const listen = h("input", { type: "text", inputmode: "numeric", "aria-label": "Peer port", value: String(prefs.listen) }) as HTMLInputElement;
   const err = h("div", { class: "toast", role: "status" });
   return h("div", { class: "advanced-content stack" },
-    h("label", { class: "k" }, "Connect to"), mode, peers,
     h("label", { class: "k" }, "Local API port (this computer only)"), rpc,
     h("label", { class: "k" }, "Peer port"), listen,
     h("p", { class: "muted" }, "Saving restarts the node if it is running."),
     err,
     h("button", { class: "block", onclick: async () => {
-      // The chains are whatever is hosted now: they are changed above, not here.
+      // The chains and their peers are whatever they are now: they are changed above, not here.
       const next: NodePrefs = {
         ...(await manager.prefs()),
         rpc: Number(rpc.value.trim()),
         listen: Number(listen.value.trim()),
-        peers: parsePeersField(mode.value, peers.value),
       };
       const problem = checkPrefs(next);
       if (problem) { err.textContent = problem; return; }

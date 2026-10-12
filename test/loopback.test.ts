@@ -5,7 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loopbackFetch, type NodeHTTP } from "../src/loopback.ts";
 import { reader, submitter } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
-import { chosenChains, hostableChains, statusLine, parsePeersField, withSync } from "../src/node-panel.ts";
+import { aloneOn, chosenChains, hostableChains, nodeNotices, peersLine, statusLine, parsePeersField, withSync } from "../src/node-panel.ts";
+import type { ChainStatus, NodeManager } from "../src/node-manager.ts";
 
 const BASE = "http://127.0.0.1:18080";
 
@@ -71,4 +72,29 @@ test("sync progress reads each running chain's best header height; a stopped or 
     { path: "Nexus/a", state: "active", height: 1n },
     { path: "Nexus/b", state: "down" },
   ]);
+});
+
+test("a chain's peers are its own: the row counts them, and the home screen says which chain has none", async () => {
+  assert.deepEqual([peersLine(0), peersLine(1), peersLine(1234)], ["no peers", "1 peer", `${(1234).toLocaleString()} peers`]);
+
+  const chains: ChainStatus[] = [
+    { path: "Nexus", state: "active", height: 10n },
+    { path: "Nexus/testnet", state: "active", height: 5n },
+  ];
+  const manager = {
+    status: async () => chains,
+    prefs: async () => ({ rpc: 1, listen: 2, peers: "default", chainPeers: {}, hostedChains: ["Nexus/testnet"] }),
+    miningStatus: async () => ({ running: false }),
+  } as unknown as NodeManager;
+  const notices = async (peers: Record<string, number>, chain: string) =>
+    (await nodeNotices(manager, { health: async () => ({}), peers: async (path) => peers[path]! }, chain)).map((notice) => notice.text);
+
+  // Nexus connected, the child not: said of the child, and only when it is the chain in view.
+  assert.deepEqual(await notices({ Nexus: 3, "Nexus/testnet": 0 }, "Nexus/testnet"), [aloneOn("Nexus/testnet")]);
+  assert.deepEqual(await notices({ Nexus: 3, "Nexus/testnet": 0 }, "Nexus"), []);
+  assert.deepEqual(await notices({ Nexus: 3, "Nexus/testnet": 2 }, "Nexus/testnet"), []);
+  // The node itself cut off: said once, as the node's, whichever chain is in view.
+  for (const chain of ["Nexus", "Nexus/testnet"]) {
+    assert.deepEqual(await notices({ Nexus: 0, "Nexus/testnet": 0 }, chain), ["Your node has no peers yet, so it cannot see the network. It keeps trying."]);
+  }
 });
