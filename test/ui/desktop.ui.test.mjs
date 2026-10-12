@@ -180,10 +180,13 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await press("Back to wallet");
     await shows(/Your node is stopped, so nothing can be read or sent\./);
     await press("Mining");
-    await shows(/Mine on your node/);
-    await shows(/Statusnot mining/);
+    await shows(/MiningNot mining/);
     // Unless told otherwise, mining pays the account in use.
+    await press("Mining settings");
+    await shows(/Who each chain pays/);
     assert.equal(await valueOf('select[aria-label="Recipient on Nexus"]'), second);
+    await press("Cancel");
+    await shows(/MiningNot mining/);
     await press("Start mining");
     await shows(/Start the node first: mining runs on it/);
     await press("Back");
@@ -195,11 +198,11 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     // ---- mining: blocks found, and the wallet paid, with no other miner ----
     await press("Back to wallet");
     await press("Mining");
-    await shows(/Statusnot mining/);
+    await shows(/MiningNot mining/);
     await press("Start mining");
-    await shows(/Statusmining on the (graphics chip|processor)/);
-    console.log(`[desktop ui] ${(/Statusmining on the (graphics chip|processor)/.exec(await pageText()) ?? [""])[0].slice(6)}`);
-    await shows(/This run[\d,]+ blocks? found · last at /, 300_000);
+    await shows(/MiningMining on the (graphics chip|processor)/);
+    console.log(`[desktop ui] ${(/MiningMining on the (graphics chip|processor)/.exec(await pageText()) ?? [""])[0].slice(6)}`);
+    await shows(/[\d,]+ blocks? found, the last at /, 300_000);
     await press("Back");
     await until(funded, "mined funds in the wallet", 300_000);
     await shows(/Mining on this computer\./);
@@ -235,9 +238,9 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
 
     // ---- mining off, from the screen that turned it on ----
     await press("Mining");
-    await shows(/Statusmining/);
+    await shows(/MiningMining on/);
     await press("Stop mining");
-    await shows(/Statusnot mining/);
+    await shows(/MiningNot mining/);
     await press("Back");
     await shows(/Balance on Nexus/);
     await openNode();
