@@ -177,6 +177,12 @@ export const balanceShown = () => document.querySelector(".balance-value .v")?.t
 /** Whether the home screen shows a balance above zero. */
 export const funded = () => /^[\d,]*[1-9][\d,]*$/.test(balanceShown());
 
+/** Open the node page from the wallet's home screen: it is in Settings. */
+export function openNode(): void {
+  document.getElementById("settings-button")!.click();
+  button("Node").click();
+}
+
 /** Press a button once the screen offers it: one whose label follows what the app has just learned. */
 export async function press(text: string): Promise<void> {
   const found = await until(() => [...document.querySelectorAll("button")].find((item) => item.textContent === text && !item.disabled) as HTMLButtonElement | undefined,

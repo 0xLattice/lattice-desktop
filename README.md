@@ -19,7 +19,7 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   with `lattice init` and gives the node its own ports (RPC 18080, peers 14001)
   so that it doesn't clash with a CLI-managed host on 8080/4001. Nexus bootstrap
   peers are the node's built-in defaults; you can change them on the **Node**
-  page (built-in, your own list, or none). Opening the app starts
+  page, in Settings, (built-in, your own list, or none). Opening the app starts
   the node, and the wallet's home screen says what it is doing until it is in
   sync: stopped (with a Start button), starting, or how far along it is.
   Quitting the app stops the node cleanly (`lattice down`, which can take a
@@ -29,7 +29,7 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   in `lattice.json`, and of `mine` only `workers`, `recipients`, and `worker`
   as one of the two bundled workers. Other fields, such as public listeners
   and mining's tuning, are left to the operator.
-- **Mining** (Node → Mining) runs the bundled `lattice mine` loop on this node,
+- **Mining** (a button beside Send and Receive) runs the bundled `lattice mine` loop on this node,
   searching on this computer's graphics chip (the bundled worker from
   [lattice-miner-gpu](https://github.com/adalinxx/lattice-miner-gpu), the
   default) or on its processor. The graphics chip is offered only where the
@@ -76,7 +76,7 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   chain list, `hostedChains` in `lattice.json`: adding a chain in the wallet's
   chain picker hosts it, and a chain added on the Node page appears in the
   picker (a running node restarts to take either).
-- **The Node page** is the node in one place: what it is doing, Start and
+- **The Node page**, in Settings, is the node in one place: what it is doing, Start and
   Stop, and its settings. The chains the node can see are boxes to tick (a path
   is typed only for one it cannot), with the ports under Ports. Saving restarts
   a running node.

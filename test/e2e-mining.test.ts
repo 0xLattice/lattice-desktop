@@ -20,7 +20,7 @@ import { startApp } from "../src/app.ts";
 import { NodeManager, type Topology } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
-import { bin, button, freePort, funded, gpuMiner, harnessHost, input, installPage, pageText, press, run, shows, until } from "./helpers/real-node.ts";
+import { bin, button, freePort, funded, gpuMiner, harnessHost, input, installPage, pageText, press, run, shows, until, openNode } from "./helpers/real-node.ts";
 
 /** Whether the GPU worker can search on this machine: a tiny range every hash of which wins. */
 async function gpuSearches(): Promise<boolean> {
@@ -58,8 +58,8 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     const first = document.querySelector(".account-address")!.textContent!;
 
     // ---- mining needs the node: asked for without it, the app says so ----
-    button("Node").click();
-    await shows(/Your node/);
+    // Mining is beside Send and Receive; the node page is not.
+    assert.deepEqual([...document.querySelectorAll("#view button")].map((item) => item.textContent).filter((text) => text === "Mining" || text === "Node"), ["Mining"]);
     button("Mining").click();
     await shows(/Mine on your node/);
     await shows(/Statusnot mining/);
@@ -78,6 +78,8 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     await shows(/Start the node first: mining runs on it/);
     assert.deepEqual(await manager.miningStatus(), { running: false });
     button("Back").click();
+    await shows(/Balance/);
+    openNode();
     await shows(/Your node/);
     await press("Start node");
     await shows(/Nexusrunning/);
@@ -111,7 +113,7 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
       return shown && shown !== first ? shown : undefined;
     }, "a second account");
     assert.equal(await balance(second), 0n);
-    button("Node").click();
+    openNode();
     await shows(/Your node/);
     button("Mining").click();
     await shows(/Statusmining/);

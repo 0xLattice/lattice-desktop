@@ -14,7 +14,7 @@ import { NodeManager } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import { importPrivateKey } from "../vendor/nexus-wallet/src/lib/crypto/accounts.ts";
-import { bin, button, cookieFile, freePort, harnessHost, input, installPage, mine, pageText, run, shows, until } from "./helpers/real-node.ts";
+import { bin, button, cookieFile, freePort, harnessHost, input, installPage, mine, pageText, run, shows, until, openNode } from "./helpers/real-node.ts";
 
 const PASSWORD = "correct horse battery";
 
@@ -115,7 +115,7 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     // ---- pair a browser extension with this node ----
     button("Done").click();
     await shows(/Balance/);
-    button("Node").click();
+    openNode();
     await shows(/Your node/);
     button("Pair browser extension").click();
     await shows(/Allow the extension's origin/);

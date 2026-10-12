@@ -15,7 +15,7 @@ import { NodeManager } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import { importPrivateKey } from "../vendor/nexus-wallet/src/lib/crypto/accounts.ts";
-import { balanceShown, bin, button, freePort, funded, harnessHost, input, installPage, mine, pageText, press, run, shows, until } from "./helpers/real-node.ts";
+import { balanceShown, bin, button, freePort, funded, harnessHost, input, installPage, mine, pageText, press, run, shows, until, openNode } from "./helpers/real-node.ts";
 
 const PASSWORD = "correct horse battery";
 
@@ -53,7 +53,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await until(() => (/^Your node is set to connect to no one/.test(document.querySelector(".notices")?.textContent ?? "") ? true : undefined), "the stopped notice to give way");
     assert.equal(document.querySelectorAll(".notice").length, 1);
     // The Node screen says the same in its own terms, with one button for the one thing to do.
-    button("Node").click();
+    openNode();
     await shows(/Nexusrunning · block 0PeersnoneMiningoff/);
     assert.deepEqual([...document.querySelectorAll("#view button")].map((item) => item.textContent).slice(0, 2), ["Stop node", "Mining"]);
     button("Back to wallet").click();
@@ -113,7 +113,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await until(async () => ((await manager.status())[0]?.state === "active" ? true : undefined), "the node back up");
     await mine(root, ownNode, { Nexus: address, "Nexus/testnet": address }, 3, height);
     await until(async () => ((await manager.status()).every((c) => c.state === "active") ? true : undefined), "both chains active");
-    button("Node").click();
+    openNode();
     await shows(/Nexus\/testnetrunning/);
     await shows(/Chains this node hosts/);
     // The chain is listed with its box ticked: hosting it or not is a tick, not a typed path.
@@ -157,7 +157,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
       button("Refresh balance").click();
       return undefined;
     }, "the wallet to report the dead node");
-    button("Node").click();
+    openNode();
     await shows(/Your node/);
     await until(() => (/Nexus(stopped|starting)/.test(pageText()) ? true : undefined), "the node screen to show it down");
     await press("Start node");
@@ -169,7 +169,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
       return undefined;
     }, "the balance after the restart");
 
-    button("Node").click();
+    openNode();
     await shows(/Your node/);
     await press("Stop node");
     await shows(/Nexusstopped/);

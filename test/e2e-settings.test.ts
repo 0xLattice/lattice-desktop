@@ -16,7 +16,7 @@ import { startApp } from "../src/app.ts";
 import { NodeManager, type Topology } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
-import { balanceShown, bin, button, freePort, harnessHost, input, installPage, pageText, press, run, shows, until } from "./helpers/real-node.ts";
+import { balanceShown, bin, button, freePort, harnessHost, input, installPage, pageText, press, run, shows, until, openNode } from "./helpers/real-node.ts";
 
 const PASSWORD = "correct horse battery";
 const CHILD = "Nexus/testnet";
@@ -52,7 +52,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     }, "a second account");
 
     // ---- the node's settings, typed wrong: each is refused with its reason and nothing is written ----
-    button("Node").click();
+    openNode();
     await shows(/Your node/);
     await press("Start node");
     await shows(/Nexusrunning/);
@@ -107,7 +107,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
       if (/Balance/.test(pageText())) button("Refresh balance").click();
       return undefined;
     }, "a balance read on the new port");
-    button("Node").click();
+    openNode();
     await shows(/Nexusrunning/);
     await shows(/Chains this node hosts/);
     assert.deepEqual([rpc().value, peerMode().value, peerList().value], [newRPC, "custom", peer]);
@@ -125,7 +125,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     // The chain was made outside the app: the page lists it when next opened.
     button("Back to wallet").click();
     await shows(/Balance/);
-    button("Node").click();
+    openNode();
     await until(() => (hostBox(CHILD) ? true : undefined), "the child chain listed");
     assert.equal(hostBox(CHILD)!.checked, true);
     hostBox(CHILD)!.checked = false;
@@ -205,7 +205,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     input("password").value = PASSWORD;
     button("Unlock").click();
     await shows(/Balance/);
-    button("Node").click();
+    openNode();
     await shows(/Nexusrunning/);
     await shows(/Chains this node hosts/);
     assert.deepEqual([rpc().value, peerMode().value, peerList().value, hostBox(CHILD)?.checked ?? false], [newRPC, "custom", peer, false]);

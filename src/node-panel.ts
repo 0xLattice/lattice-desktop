@@ -289,7 +289,12 @@ const SEARCHERS: Record<Searcher, string> = { gpu: "the graphics chip", cpu: "th
  * to an account of this wallet. One search covers Nexus and the chains it
  * carries (merged mining), so the chains mined are the chains hosted.
  */
-async function miningScreen(manager: NodeManager, reads: NodeReads, back: (saved?: () => void) => void, onPrefsChanged: () => void) {
+/**
+ * Mining on the app's node. `back` leaves the screen; given `saved`, it is
+ * asked to open the node page to host a chain, and to return here (`saved`)
+ * once that is saved.
+ */
+export async function miningScreen(manager: NodeManager, reads: NodeReads, back: (saved?: () => void) => void, onPrefsChanged: () => void) {
   const [chains, saved, accounts, gpu] = await Promise.all([manager.chains(), manager.miningPrefs(), reads.accounts(), manager.canMineOnGPU()]);
   const again = () => miningScreen(manager, reads, back, onPrefsChanged);
   let timer: ReturnType<typeof setTimeout> | undefined;
