@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loopbackFetch, type NodeHTTP } from "../src/loopback.ts";
 import { reader, submitter } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
-import { aloneOn, chosenChains, hostableChains, nodeNotices, peersLine, statusLine, parsePeersField, withSync } from "../src/node-panel.ts";
+import { aloneOn, chosenChains, hostableChains, chainWords, nodeLine, nodeNotices, peersLine, rowCells, parsePeersField, withSync } from "../src/node-panel.ts";
 import type { ChainStatus, NodeManager } from "../src/node-manager.ts";
 
 const BASE = "http://127.0.0.1:18080";
@@ -39,14 +39,20 @@ test("anything but the app's own node is refused before the shell is asked", asy
 });
 
 test("a chain's state is said in a user's words, not the node's", () => {
-  assert.equal(statusLine({ path: "Nexus", state: "down" }), "stopped");
-  assert.equal(statusLine({ path: "Nexus", state: "unreachable" }), "starting…");
-  assert.equal(statusLine({ path: "Nexus/testnet", state: "awaitingGenesis" }), "waiting for its first block");
-  assert.equal(statusLine({ path: "Nexus", state: "active", height: 1234n, mempool: 2 }), `in sync · block ${(1234).toLocaleString()} · 2 pending`);
-  assert.equal(statusLine({ path: "Nexus", state: "active", height: 1234n, bestHeaderHeight: 5000n }), `syncing · ${(1234).toLocaleString()} of ${(5000).toLocaleString()}`);
-  assert.equal(statusLine({ path: "Nexus", state: "active", height: 5000n, bestHeaderHeight: 5000n }), `in sync · block ${(5000).toLocaleString()}`);
-  // "In sync" is a claim about the network: without peers the node is only running.
-  assert.equal(statusLine({ path: "Nexus", state: "active", height: 0n }, false), "running · block 0");
+  // A chain that is caught up says nothing: its block and its peers are the whole of it.
+  assert.equal(chainWords({ path: "Nexus", state: "active", height: 5000n, bestHeaderHeight: 5000n }), undefined);
+  assert.deepEqual(rowCells({ path: "Nexus", state: "active", height: 1234n, mempool: 2 }, 3), { block: (1234).toLocaleString(), peers: "3" });
+  assert.deepEqual(rowCells({ path: "Nexus", state: "active", height: 0n }, 0), { block: "0", peers: "no peers" });
+  // Words are for what needs saying.
+  assert.equal(chainWords({ path: "Nexus/testnet", state: "awaitingGenesis" }), "waiting for its first block");
+  const behind = { path: "Nexus", state: "active", height: 1234n, bestHeaderHeight: 5000n };
+  assert.equal(chainWords(behind), `syncing ${(1234).toLocaleString()} of ${(5000).toLocaleString()}`);
+  assert.deepEqual(rowCells(behind, 3), { words: chainWords(behind), block: "", peers: "" });
+  // A stopped or starting node is said once, of the node; its rows keep what they last knew and claim no peers.
+  assert.deepEqual(rowCells({ path: "Nexus", state: "down" }, undefined), { block: "", peers: "" });
+  assert.equal(nodeLine([{ path: "Nexus", state: "down" }, { path: "Nexus/testnet", state: "down" }]), "Stopped. Nothing can be read or sent.");
+  assert.match(nodeLine([{ path: "Nexus", state: "unreachable" }]), /^Starting\./);
+  assert.equal(nodeLine([{ path: "Nexus", state: "active", height: 1n }, { path: "Nexus/testnet", state: "awaitingGenesis" }]), "Running");
   assert.equal(parsePeersField("default", "x"), "default");
   assert.equal(parsePeersField("none", ""), "none");
   assert.deepEqual(parsePeersField("custom", " a@h:1\n b@h:2, "), ["a@h:1", "b@h:2"]);

@@ -82,7 +82,7 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     openNode();
     await shows(/Your node/);
     await press("Start node");
-    await shows(/Nexusrunning/);
+    await shows(/Your nodeRunning/);
     // The node page is the node's alone: mining is not on it.
     assert.doesNotMatch(pageText(), /Mining/);
     button("Back to wallet").click();
@@ -148,7 +148,7 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     openNode();
     await shows(/Your node/);
     await press("Stop node");
-    await shows(/Nexusstopped/);
+    await shows(/Your nodeStopped/);
     assert.deepEqual(await manager.miningStatus(), { running: false });
   } catch (e) {
     for (const log of ["lattice-node.log", "mine.log"]) {

@@ -54,7 +54,8 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     assert.equal(document.querySelectorAll(".notice").length, 1);
     // The Node screen says the same in its own terms, with one button for the one thing to do.
     openNode();
-    await shows(/Nexusrunning · block 0 · no peers/);
+    await shows(/Your nodeRunning/);
+    await shows(/Nexus0no peers/);
     assert.equal([...document.querySelectorAll("#view button")].some((item) => item.textContent === "Mining"), false, "the node page is the node's alone");
     button("Back to wallet").click();
     await shows(/Balance/);
@@ -114,12 +115,20 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await mine(root, ownNode, { Nexus: address, "Nexus/testnet": address }, 3, height);
     await until(async () => ((await manager.status()).every((c) => c.state === "active") ? true : undefined), "both chains active");
     openNode();
-    await shows(/Nexus\/testnetrunning/);
-    // The chain's own row, beside what it is doing, is where it stops being hosted: one press.
+    // The child is a row under Nexus, named by the last part of its path.
+    const chainRow = () => document.querySelector('button[data-chain="Nexus/testnet"]') as HTMLButtonElement | null;
+    await until(() => (chainRow() ? true : undefined), "the child chain's row");
+    assert.equal(chainRow()!.querySelector(".name")!.textContent, "└ testnet");
+    // Its own page is where it stops being hosted, and it asks first.
+    chainRow()!.click();
+    await shows(/Your node\/Nexus\/testnet/);
+    await shows(/Stop hosting testnet/);
+    button("Stop hosting testnet").click();
+    await shows(/Stop hosting testnet\? The wallet can no longer use it/);
     (document.querySelector('button[aria-label="Stop hosting Nexus/testnet"]') as HTMLButtonElement).click();
-    // The page is the same page: the node, now hosting Nexus alone.
+    // Back on the node's page, now hosting Nexus alone.
     await until(async () => ((await manager.chains()).length === 1 ? true : undefined), "the child no longer hosted");
-    await shows(/Nexusrunning/);
+    await shows(/Your nodeRunning/);
     assert.deepEqual(await manager.chains(), ["Nexus"]);
     button("Back to wallet").click();
     await shows(/Balance/);
@@ -155,9 +164,9 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     }, "the wallet to report the dead node");
     openNode();
     await shows(/Your node/);
-    await until(() => (/Nexus(stopped|starting)/.test(pageText()) ? true : undefined), "the node screen to show it down");
+    await until(() => (/Your node(Stopped|Starting)\./.test(pageText()) ? true : undefined), "the node screen to show it down");
     await press("Start node");
-    await shows(/Nexusrunning/);
+    await shows(/Your nodeRunning/);
     button("Back to wallet").click();
     await until(() => {
       if (funded()) return true;
@@ -168,7 +177,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     openNode();
     await shows(/Your node/);
     await press("Stop node");
-    await shows(/Nexusstopped/);
+    await shows(/Your nodeStopped/);
   } catch (e) {
     try {
       console.error(readFileSync(join(root, "log", "lattice-node.log"), "utf8").slice(-4000));

@@ -174,9 +174,9 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     // ---- the node stopped: the wallet says so, and mining will not start ----
     await openNode();
     await shows(/Your node/);
-    await shows(/Nexusrunning/);
+    await shows(/Your nodeRunning/);
     await press("Stop node");
-    await shows(/Nexusstopped/);
+    await shows(/Your nodeStopped/);
     await press("Back to wallet");
     await shows(/Your node is stopped, so nothing can be read or sent\./);
     await press("Mining");
@@ -190,7 +190,7 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await shows(/Balance on Nexus/);
     await openNode();
     await press("Start node");
-    await shows(/Nexusrunning/, 300_000);
+    await shows(/Your nodeRunning/, 300_000);
 
     // ---- mining: blocks found, and the wallet paid, with no other miner ----
     await press("Back to wallet");
@@ -243,10 +243,10 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await openNode();
 
     // ---- node settings typed wrong: refused, and nothing changes ----
-    await shows(/Connect to/);
+    await shows(/Your node/);
     const RPC = 'input[aria-label="Local API port"]';
     // Ports are folded away until asked for.
-    await unfold("Ports");
+    await unfold("Advanced");
     const [rpc, listen] = [await valueOf(RPC), await valueOf('input[aria-label="Peer port"]')];
     await type(RPC, "0");
     await press("Save");
@@ -258,7 +258,7 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await press("Back to wallet");
     await shows(/Balance on Nexus/);
     await openNode();
-    await shows(/Connect to/);
+    await shows(/Your node/);
     assert.equal(await valueOf(RPC), rpc, "the port is what it was");
     await press("Back to wallet");
     await shows(/Balance on Nexus/);
@@ -282,9 +282,9 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
 
     // ---- and the node stopped from its own screen ----
     await openNode();
-    await shows(/Nexusrunning/);
+    await shows(/Your nodeRunning/);
     await press("Stop node");
-    await shows(/Nexusstopped/);
+    await shows(/Your nodeStopped/);
   } catch (e) {
     const shown = session ? await pageText().catch(() => "(the page could not be read)") : "(no window)";
     console.error(`[desktop ui] failed with the page showing: ${shown.slice(0, 1500)}`);
