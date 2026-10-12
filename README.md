@@ -19,7 +19,7 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   with `lattice init` and gives the node its own ports (RPC 18080, peers 14001)
   so that it doesn't clash with a CLI-managed host on 8080/4001. Nexus bootstrap
   peers are the node's built-in defaults; you can change them on the **Node**
-  page, in Settings, (built-in, your own list, or none). Opening the app starts
+  page in Settings (built-in, your own list, or none). Opening the app starts
   the node, and the wallet's home screen says what it is doing until it is in
   sync: stopped (with a Start button), starting, or how far along it is.
   Quitting the app stops the node cleanly (`lattice down`, which can take a
