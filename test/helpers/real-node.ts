@@ -131,7 +131,8 @@ export function harnessHost(root: string): AppHost {
 
 /** One coordinator batch at a time until `height()` has advanced by `blocks`. */
 export async function mine(root: string, url: string, recipients: Record<string, string>, blocks: number, height: () => Promise<bigint>) {
-  const target = (await height()) + BigInt(blocks);
+  // Asked until it answers: a node that has just restarted may not have written its cookie yet.
+  const target = (await until(async () => height(), "the node's height")) + BigInt(blocks);
   await until(async () => {
     await run(join(bin!, "lattice-mining-coordinator"), [
       "--node", url, "--rpc-cookie-file", cookieFile(root), "--workers", "2",
@@ -157,7 +158,7 @@ export const pageText = () => (document.body.textContent ?? "").replace(/\s+/g, 
 
 /** A button by its text or its accessible name. */
 export function button(text: string): HTMLButtonElement {
-  const found = [...document.querySelectorAll("button")].find((item) => item.textContent === text || item.getAttribute("aria-label") === text);
+  const found = [...document.querySelectorAll("button")].find((item) => item.textContent === text || item.getAttribute("aria-label") === text || item.getAttribute("data-row") === text);
   assert.ok(found, `button "${text}" exists; page was: ${pageText()}`);
   return found as HTMLButtonElement;
 }
@@ -180,7 +181,7 @@ export const funded = () => /^[\d,]*[1-9][\d,]*$/.test(balanceShown());
 /** Open the node page from the wallet's home screen: it is in Settings. */
 export function openNode(): void {
   document.getElementById("settings-button")!.click();
-  button("Node").click();
+  button("Your node").click();
 }
 
 /** Press a button once the screen offers it: one whose label follows what the app has just learned. */

@@ -77,10 +77,19 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     assert.equal((await reads("Nexus").account(bob)).balance, 1000n);
     button("Done").click();
     await shows(/Balance/);
-    document.getElementById("settings-button")!.click();
+    // What was sent is in Activity, on the home screen: not a setting.
+    button("Activity").click();
     button("Transactions").click();
     await shows(/Sent1,000Nexus\d+ confirmation/);
     button("Back").click();
+    button("Back").click();
+    await shows(/Balance/);
+
+    // ---- Settings holds what is set, each row saying what it is set to ----
+    document.getElementById("settings-button")!.click();
+    assert.deepEqual([...document.querySelectorAll(".nav-label")].map((label) => label.textContent), ["Wallet", "This chain · Nexus", "Node"]);
+    await until(() => (/^Your noderunning · 1 chain · no peers$/.test(button("Your node").textContent ?? "") ? true : undefined), "the node's row to say what it is doing");
+    assert.equal(button("Default fee").textContent, "Default fee1");
 
     // ---- lock, a wrong password, unlock ----
     button("Lock wallet").click();
@@ -101,11 +110,11 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     button("Unlock").click();
     await shows(/Balance/);
     assert.equal(document.querySelector(".account-address")?.textContent, address);
-    document.getElementById("settings-button")!.click();
+    button("Activity").click();
     button("Transactions").click();
     await shows(/Sent1,000Nexus\d+ confirmation/);
     button("Back").click();
-    document.getElementById("settings-button")!.click(); // on Settings, the mark closes it
+    button("Back").click();
     await shows(/Balance/);
 
     // ---- a child chain exists on Nexus, but this node does not host it ----

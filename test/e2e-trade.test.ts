@@ -133,11 +133,12 @@ test("the app: sell on the child chain, buy on the parent, withdraw", { skip: !b
     input("password").value = PASSWORD;
     button("Unlock").click();
     await shows(/Balance/);
-    document.getElementById("settings-button")!.click();
-    await shows(/Pending purchases \(1\)/);
-    button("Pending purchases (1)").click();
-    await shows(/Complete/);
-    (document.querySelector(".chain-menu-item") as HTMLButtonElement).click();
+    // A purchase paid for and not yet claimed is said on the home screen, and is one row into Activity.
+    assert.equal(button("Activity").textContent, "Activity1 purchase to claim");
+    button("Activity").click();
+    const purchaseRow = () => document.querySelector(".nav-group .nav-row") as HTMLButtonElement;
+    assert.equal(purchaseRow().textContent, "5,000 on Nexus/testnetpaid · claim it");
+    purchaseRow().click();
     await shows(/Complete purchase/);
     const buyerChildBefore = await balance(CHILD, buyer);
     button("Check & withdraw tokens").click();
@@ -151,22 +152,25 @@ test("the app: sell on the child chain, buy on the parent, withdraw", { skip: !b
     // ---- settled: what each side is told, and the records the wallet keeps ----
     await mine(root, ownNode, recipients, 6, height);
     button("Back").click();
-    await shows(/Pending purchases/);
-    (document.querySelector(".chain-menu-item") as HTMLButtonElement).click();
+    await shows(/Activity/);
+    assert.equal(purchaseRow().textContent, "5,000 on Nexus/testnetwithdrawal submitted");
+    purchaseRow().click();
     await shows(/Node reports withdrawal .* included/);
     button("Back").click();
     // Six confirmations, and the node proves every bought deposit is spent:
     // the purchase leaves the pending list for the confirmed archive.
+    await shows(/Activity/);
+    button("Purchase records").click();
     await shows(/5,000 on Nexus\/testnetconfirmed archive/);
     button("Back").click();
-    await shows(/Purchase recovery \(0 pending, 1 confirmed\)Pending sales \(1\)/);
-    button("Pending sales (1)").click();
+    await shows(/Purchase records0 pending, 1 confirmed/);
+    button("Pending sales").click();
     await shows(/5,000 on Nexus\/testnetfor 700 on Nexus/);
     button("Check payment").click();
     await shows(/Paid by /);
     button("Back").click();
-    await shows(/Settings/);
-    document.getElementById("settings-button")!.click();
+    await shows(/Activity/);
+    button("Back").click();
     await shows(/Balance/);
 
     // The same deposit cannot be bought twice: the review refuses before anything is signed.

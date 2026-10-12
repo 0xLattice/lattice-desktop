@@ -90,18 +90,23 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   to stop hosting it, which asks first. Ports and pairing are folded away
   under Advanced. Hosting or dropping a chain restarts a running node.
   Mining is not on this page.
-- **Settings** open from the mark at the top left, which says so. The chain
+- **Settings** open from the mark at the top left, which says so, and hold
+  what is set, in three groups of rows: the wallet (backup, lock), the chain
+  in use (its default fee), and the node. A row says what it is set to: the
+  node's row reads, for instance, "running · 2 chains · 4 peers" and opens the
+  Node page. **Activity**, a row on the home screen, is what has happened and
+  what is pending: purchases still to claim, sales, and transactions. The chain
   name beside it opens the chains as the same tree the Node page shows, with
   the chain in use marked: one press on any of them switches the wallet
   there. A chain this node sees and does not host is listed as "not hosted";
   choosing it opens that chain's page on the Node screen, where hosting it is
   one press. The menu's last row opens the Node page.
-- **Cross-chain orders** (Settings → Open cross-chain order): sell deposits,
+- **Cross-chain orders** (Open order, on the home screen): sell deposits,
   purchases and their withdrawals, as in the extension. Both chains are read
   and submitted through this node, so it must host the child chain as well as
   its parent. The signed bytes of every unsettled transfer, deposit and
   purchase are kept in the settings file for status checks and exact
-  resubmission (Settings → pending lists).
+  resubmission (Activity).
 - **Sync progress**: the node screen shows each chain's executed height
   against the best header height the node knows (`/health`'s
   `bestHeaderHeight`).

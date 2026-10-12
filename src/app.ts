@@ -11,7 +11,7 @@ import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import type { KeyValueStore } from "../vendor/nexus-wallet/src/lib/wallet/settings.ts";
 import { NodeManager, type HostOps } from "./node-manager.ts";
 import { loopbackFetch, type NodeHTTP } from "./loopback.ts";
-import { hostableChains, miningScreen, nodeNotices, nodeScreen } from "./node-panel.ts";
+import { hostableChains, miningScreen, nodeNotices, nodeScreen, nodeSummary } from "./node-panel.ts";
 
 export const AUTO_LOCK_MS = 10 * 60 * 1000;
 /** How often the idle clock is read. */
@@ -148,7 +148,8 @@ export async function startApp(host: AppHost) {
         run: (back) => miningScreen(manager, reads, (saved) => (saved ? nodeScreen(manager, reads, back, host.reload, saved) : back()), host.reload),
       },
       // The node itself is set up once and left alone: it is in Settings.
-      { label: "Node", on: "settings", run: (back) => nodeScreen(manager, reads, back, host.reload) },
+      // Its row in Settings says what the node is doing, so checking on it needs no second page.
+      { label: "Your node", on: "settings", run: (back) => nodeScreen(manager, reads, back, host.reload), summary: () => nodeSummary(manager, reads) },
     ],
     // The home screen says what the node is doing before its numbers are read.
     notices: (chain) => nodeNotices(manager, reads, chain),

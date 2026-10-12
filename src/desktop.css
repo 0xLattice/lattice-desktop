@@ -5,8 +5,6 @@ main { max-width: 560px; margin: 0 auto; }
 
 /* An element that is hidden is hidden, whatever its display. */
 [hidden] { display: none !important; }
-/* A chain's name is its path, and paths are case-sensitive: shown as written. */
-.kv .k.mono { text-transform: none; letter-spacing: 0; font-size: var(--fs-14); }
 
 /* The node page's heading: what the node is doing, and the one button for it. */
 .node-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--s-3); }
@@ -27,7 +25,6 @@ main { max-width: 560px; margin: 0 auto; }
 .tree .chain { width: 100%; border: 0; text-align: left; text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .tree .chain:hover .name, .tree .chain:focus-visible .name { text-decoration: underline; text-underline-offset: 2px; }
 .tree .chain .name { display: flex; min-width: 0; overflow-wrap: anywhere; }
-.tree .chain .guide { flex: 0 0 auto; white-space: pre; opacity: 0.45; }
 .tree .chain .words { grid-column: 2 / 4; }
 .tree .chain .go { opacity: 0.45; }
 /* A chain the node sees and does not host. */
@@ -37,8 +34,9 @@ main { max-width: 560px; margin: 0 auto; }
 .crumbs { display: flex; flex-wrap: wrap; gap: var(--s-1); font-size: var(--fs-12); }
 .crumbs .link { border: 0; padding: 0; text-transform: none; letter-spacing: 0; text-decoration: underline; text-underline-offset: 2px; }
 /* A chain's name is its path, and paths are case-sensitive: shown as written. */
-h1.chain-name { text-transform: none; letter-spacing: 0; margin-bottom: 0; }
-.section { font-size: var(--fs-12); text-transform: uppercase; letter-spacing: var(--track-display); }
+h1.chain-title { text-transform: none; letter-spacing: 0; margin-bottom: 0; }
+/* A group's label on a page reads as it does in the wallet's lists. */
+h2.nav-label { margin: 0; font-size: var(--fs-12); text-transform: uppercase; letter-spacing: var(--track-display); font-weight: 400; opacity: 0.6; }
 .kv .row .v { margin-left: auto; text-align: right; }
 .add-chain { display: flex; gap: var(--s-2); }
 .add-chain input { flex: 1; min-width: 0; }
