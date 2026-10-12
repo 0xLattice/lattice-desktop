@@ -76,11 +76,16 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   chain list, `hostedChains` in `lattice.json`: adding a chain in the wallet's
   chain picker hosts it, and a chain added on the Node page appears in the
   picker (a running node restarts to take either).
-- **The Node page**, in Settings, is the node alone: each chain it hosts with
-  what it is doing and a Remove button, each chain it can see but does not
-  host with an Add button, a field to add one by its path, and Start or Stop.
-  Peers and ports are folded away under one heading. Adding or removing a
-  chain restarts a running node. Mining is not on this page.
+- **The Node page**, in Settings, is the node alone: whether it runs, with
+  Start or Stop, and its chains as a tree, a child under its parent. Each row
+  is a chain's name, block and peers; a chain says something only when there
+  is something to say (syncing, waiting for its first block, no peers). A
+  chain the node can see but does not host is listed in its place, dimmed.
+  Pressing a row opens that chain's own page: its block and peers, the chains
+  under it and a name to host another there, whom it connects to, and the way
+  to stop hosting it, which asks first. Ports and pairing are folded away
+  under Advanced. Hosting or dropping a chain restarts a running node.
+  Mining is not on this page.
 - **Settings** open from the mark at the top left, which says so. The chain name beside it
   lists the current chain's child chains, and `↑` goes to its parent. A child
   chain this node does not host yet is marked "add to node": choosing it hosts

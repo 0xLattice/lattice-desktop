@@ -318,7 +318,7 @@ test("the home screen is told what the node is doing, with the one thing to do a
   assert.deepEqual(await nodeNotices(manager, reads, "Nexus"), []);
   // Behind: the numbers shown may be too.
   const behind = { health: async () => ({ height: 12n, bestHeaderHeight: 5000n }), peers: async () => 3 };
-  assert.deepEqual((await nodeNotices(manager, behind, "Nexus")).map((n) => n.text), [`Nexus is syncing · 12 of ${(5000).toLocaleString()}. Balances may be behind.`]);
+  assert.deepEqual((await nodeNotices(manager, behind, "Nexus")).map((n) => n.text), [`Nexus is syncing 12 of ${(5000).toLocaleString()}. Balances may be behind.`]);
   // A chain this node does not host cannot be read at all.
   assert.deepEqual((await nodeNotices(manager, reads, "Nexus/testnet")).map((n) => n.text), ["Your node does not host Nexus/testnet."]);
   // Running is not connected: with no peers it sees only itself, and says which kind of alone it is.

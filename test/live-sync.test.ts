@@ -39,7 +39,7 @@ test("live: the app's node syncs Nexus from its built-in peers, and the wallet r
     await shows(/Your node/);
     await press("Start node");
     // Headers arrive ahead of execution: the screen says how far along it is.
-    await shows(/Nexussyncing · [\d,]+ of [\d,]+/, 300_000);
+    await shows(/Nexussyncing [\d,]+ of [\d,]+/, 300_000);
     const [early] = await manager.status();
     const progressed = await until(async () => {
       const [now] = await manager.status();
@@ -58,7 +58,7 @@ test("live: the app's node syncs Nexus from its built-in peers, and the wallet r
     openNode();
     await shows(/Your node/);
     await press("Stop node");
-    await shows(/Nexusstopped/);
+    await shows(/Your nodeStopped/);
   } catch (e) {
     try {
       console.error(readFileSync(join(root, "log", "lattice-node.log"), "utf8").slice(-4000));

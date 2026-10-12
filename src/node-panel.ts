@@ -19,18 +19,35 @@ export interface NodeReads {
 
 const POLL_MS = 3000;
 
-/** A chain's state in the words of someone using the app, not running the node. */
-export function statusLine(s: ChainStatus, connected = true): string {
-  if (s.state === "down") return "stopped";
-  if (s.state === "unreachable") return "starting…";
+/**
+ * What a chain needs said about it, in the words of someone using the app:
+ * that it has no block yet, or how far behind it is. A chain that is caught
+ * up says nothing; its block and its peers are the whole of it.
+ */
+export function chainWords(s: ChainStatus): string | undefined {
+  if (s.state === "down" || s.state === "unreachable") return undefined;
   if (s.state === "awaitingGenesis") return "waiting for its first block";
   const behind = s.height !== undefined && s.bestHeaderHeight !== undefined && s.bestHeaderHeight > s.height;
-  if (behind) return `syncing · ${s.height!.toLocaleString()} of ${s.bestHeaderHeight!.toLocaleString()}`;
-  if (s.state !== "active") return s.state;
-  const height = s.height === undefined ? "" : ` · block ${s.height.toLocaleString()}`;
-  const pool = s.mempool ? ` · ${s.mempool} pending` : "";
-  // "In sync" is a claim about the network; a node with no peers cannot make it.
-  return `${connected ? "in sync" : "running"}${height}${pool}`;
+  if (behind) return `syncing ${s.height!.toLocaleString()} of ${s.bestHeaderHeight!.toLocaleString()}`;
+  return s.state === "active" ? undefined : s.state;
+}
+
+/** The node as a whole, said once: its chains' rows do not repeat it. */
+export function nodeLine(chains: ChainStatus[]): string {
+  if (chains.every((c) => c.state === "down")) return "Stopped. Nothing can be read or sent.";
+  if (chains.some((c) => c.state === "unreachable")) return "Starting. It checks its stored chains before it answers, which can take a minute.";
+  return "Running";
+}
+
+/** A chain's row: words when something needs saying, otherwise its block and its peers. */
+export function rowCells(s: ChainStatus, peers: number | undefined): { words?: string; block: string; peers: string } {
+  const words = chainWords(s);
+  if (words !== undefined) return { words, block: "", peers: "" };
+  const up = s.state !== "down" && s.state !== "unreachable";
+  return {
+    block: s.height === undefined ? "" : s.height.toLocaleString(),
+    peers: !up || peers === undefined ? "" : peers === 0 ? "no peers" : peers.toLocaleString(),
+  };
 }
 
 /** The peers field as typed: blank = the node's built-in peers. */
@@ -89,7 +106,7 @@ export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "
   const notices: Notice[] = [];
   const shown = chains.find((c) => c.path === chain);
   const root = chains[0];
-  const line = (c: ChainStatus) => statusLine(c);
+  const line = (c: ChainStatus) => chainWords(c) ?? "";
   if (chains.some((c) => c.state === "unreachable")) notices.push({ text: "Your node is starting. It checks its stored chains before it answers, which can take a minute." });
   else if (shown === undefined) notices.push({ text: `Your node does not host ${chain}.` });
   else if (shown.state === "awaitingGenesis") notices.push({ text: `${chain} is waiting for its first block on your node.` });
@@ -108,60 +125,136 @@ export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "
   return notices;
 }
 
+/** Where the node's pages go when they are done, and what they are made of. */
+interface NodePages {
+  manager: NodeManager;
+  reads: NodeReads;
+  back: () => void;
+  onPrefsChanged: () => void;
+  /**
+   * Where a change of the hosted chains goes instead of back to the page it
+   * was made on (the Mining screen sends people here to host a chain, and
+   * wants them back).
+   */
+  saved?: () => void;
+}
+
+interface TreeRow {
+  path: string;
+  /** Absent: a chain the node can see and does not host. */
+  status?: ChainStatus;
+  peers?: number;
+}
+
+const nameOf = (path: string) => path.split("/").pop()!;
+const parentOf = (path: string) => path.split("/").slice(0, -1).join("/");
+
 /**
- * The node on one page: its chains (what each is doing, and hosting one or
- * not), Start and Stop, and how it connects. `saved` is where a change of the
- * hosted chains goes instead of back to this page (the Mining screen sends
- * people here to host a chain, and wants them back).
+ * Chains as they are: a tree. One row a chain, a child under its parent and
+ * named by the last part of its path, each with the same two numbers.
+ * Pressing a row opens that chain. Rows are kept between updates, so the one
+ * in focus stays in focus.
+ */
+function chainTree(open: (path: string) => void) {
+  const list = h("ul", {});
+  const box = h("div", { class: "tree" },
+    h("div", { class: "cols", "aria-hidden": "true" }, h("span", {}, "Chain"), h("span", {}, "Block"), h("span", {}, "Peers"), h("span", {})),
+    list,
+  );
+  const cells = new Map<string, { row: HTMLElement; words: HTMLElement; block: HTMLElement; peers: HTMLElement }>();
+  let shape = "";
+  const build = (rows: TreeRow[]) => {
+    cells.clear();
+    const paths = new Set(rows.map((r) => r.path));
+    const under = (parent: string | undefined) => rows.filter((r) => (parent === undefined ? !paths.has(parentOf(r.path)) : parentOf(r.path) === parent));
+    const branch = (r: TreeRow, guide: string, inherited: string): HTMLElement => {
+      const [words, block, peers] = [h("span", { class: "words" }), h("span", { class: "n" }), h("span", { class: "n" })];
+      const row = h("button", { class: r.status ? "chain" : "chain off", "data-chain": r.path, onclick: () => open(r.path) },
+        h("span", { class: "name" }, h("span", { class: "guide", "aria-hidden": "true" }, guide), h("span", {}, nameOf(r.path))),
+        words, block, peers,
+        h("span", { class: "go", "aria-hidden": "true" }, "›"),
+      );
+      cells.set(r.path, { row, words, block, peers });
+      const kids = under(r.path);
+      return h("li", {}, row, ...(kids.length ? [h("ul", {}, ...kids.map((k, i) => {
+        const last = i === kids.length - 1;
+        return branch(k, inherited + (last ? "└ " : "├ "), inherited + (last ? "  " : "│ "));
+      }))] : []));
+    };
+    list.replaceChildren(...under(undefined).map((r) => branch(r, "", "")));
+  };
+  return {
+    box,
+    update(rows: TreeRow[]) {
+      const next = rows.map((r) => `${r.path}:${r.status ? 1 : 0}`).join("|");
+      if (next !== shape) { build(rows); shape = next; }
+      for (const r of rows) {
+        const cell = cells.get(r.path)!;
+        const said = r.status ? rowCells(r.status, r.peers) : { words: "not hosted", block: "", peers: "" };
+        cell.words.textContent = said.words ?? "";
+        cell.words.hidden = said.words === undefined;
+        cell.block.textContent = said.block;
+        cell.peers.textContent = said.peers;
+        cell.block.hidden = cell.peers.hidden = said.words !== undefined;
+        // Read out whole: the row's cells carry no units of their own.
+        cell.row.setAttribute("aria-label", said.words !== undefined ? `${r.path}: ${said.words}`
+          : [r.path, said.block && `block ${said.block}`, said.peers && (said.peers === "no peers" ? said.peers : peersLine(r.peers!))].filter(Boolean).join(", "));
+      }
+    },
+  };
+}
+
+/** The tree's rows: the chains hosted, with their peers, and the chains the node can see under them. */
+async function treeRows(chains: ChainStatus[], hosted: string[], reads: NodeReads): Promise<TreeRow[]> {
+  const peers = new Map(await Promise.all(chains.map(async (c) =>
+    [c.path, c.state === "down" || c.state === "unreachable" ? undefined : await reads.peers(c.path).catch(() => undefined)] as const)));
+  const status = new Map(chains.map((c) => [c.path, c]));
+  const seen = await hostableChains(hosted, reads);
+  return [...new Set([...chains.map((c) => c.path), ...seen])].sort(byDepth)
+    .map((path) => ({ path, status: status.get(path), peers: peers.get(path) }));
+}
+
+/**
+ * Changes which chains are hosted (the node restarts to take it), then goes
+ * on: to `pages.saved` when there is one, otherwise to `then`. Whoever left
+ * `screen` meanwhile is not pulled back.
+ */
+async function setHosted(pages: NodePages, screen: HTMLElement, toast: HTMLElement, change: (hosted: string[]) => string[], doing: string, then: () => void) {
+  toast.textContent = doing;
+  try {
+    const prefs = await pages.manager.prefs();
+    const next = { ...prefs, hostedChains: change(prefs.hostedChains) };
+    const problem = checkPrefs(next);
+    if (problem) { toast.textContent = problem; return; }
+    await pages.manager.configure(next);
+    if (document.body.contains(screen)) (pages.saved ?? then)();
+  } catch (e) {
+    toast.textContent = (e as Error).message;
+  }
+}
+
+/**
+ * The node on one page: whether it runs, and its chains as a tree, each with
+ * its block and its peers. Everything that can be changed about a chain is
+ * on that chain's own page; the node's ports and pairing are folded away.
  */
 export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void, saved?: () => void) {
-  // Hosted chains keep their rows between polls, so what is typed into one
-  // stays; the chains on offer are listed again each time.
-  const hostedRows = h("div", { class: "rows" }, h("div", { class: "row" }, h("span", { class: "muted" }, "…")));
-  const offeredRows = h("div", { class: "rows" });
-  const table = h("div", { class: "kv" }, hostedRows, offeredRows);
-  const status = new Map<string, HTMLElement>();
-  // A read that failed is said beside the rows, which stay as they are.
-  const problem = h("p", { class: "warn", role: "status", hidden: "true" });
-  const toast = h("div", { class: "toast", role: "status" });
+  nodePage({ manager, reads, back, onPrefsChanged, saved });
+}
+
+function nodePage(pages: NodePages) {
+  const { manager, reads } = pages;
+  const summary = h("p", { class: "muted", role: "status" }, "…");
   // One button, saying the one thing it will do: the node is either running or it is not.
-  const toggle = h("button", { class: "block" }, "…") as HTMLButtonElement;
+  const toggle = h("button", { class: "btn" }, "…") as HTMLButtonElement;
   const lonely = h("p", { class: "warn", role: "status", hidden: "true" });
-  // A chain the node cannot see yet is named by its path.
-  const other = h("input", { type: "text", placeholder: "add a chain by its path, e.g. Nexus/testnet", spellcheck: "false", "aria-label": "Another chain" }) as HTMLInputElement;
+  const toast = h("div", { class: "toast", role: "status" });
   let running = false;
   let busy = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const again = (savedTo?: () => void) => nodeScreen(manager, reads, back, onPrefsChanged, savedTo);
   const leave = (go: () => void) => () => { clearTimeout(timer); go(); };
-  // Where a save goes once it is written. A save takes as long as the node
-  // takes to restart: whoever left this page meanwhile is not pulled back.
-  const after = (go: () => void) => () => { if (document.body.contains(table)) leave(go)(); };
-
-  // Hosting a chain or not is one press on its row; the node restarts to take it.
-  const host = async (change: (hosted: string[]) => string[], doing: string) => {
-    if (busy) return;
-    busy = true;
-    toast.textContent = doing;
-    try {
-      const prefs = await manager.prefs();
-      const next = { ...prefs, hostedChains: change(prefs.hostedChains) };
-      const problem = checkPrefs(next);
-      if (problem) { toast.textContent = problem; return; }
-      await manager.configure(next);
-      after(saved ?? (() => again()))();
-    } catch (e) {
-      toast.textContent = (e as Error).message;
-    } finally {
-      busy = false;
-    }
-  };
-  const addTyped = () => {
-    const typed = other.value.trim();
-    if (!typed) { toast.textContent = "Type the chain's path, e.g. Nexus/testnet."; return; }
-    void host((hosted) => chosenChains(hosted, typed), `adding ${typed} (the node restarts)…`);
-  };
-  other.addEventListener("keydown", (event) => { if ((event as KeyboardEvent).key === "Enter") addTyped(); });
+  const tree = chainTree((path) => leave(() => chainPage(pages, path))());
+  const screen = h("div", { class: "stack" });
 
   const refresh = async () => {
     clearTimeout(timer);
@@ -171,55 +264,25 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
         manager.prefs(),
       ]);
       running = chains.some((c) => c.state !== "down");
-      // Each chain's own peers: the node's peers that serve it.
-      const peers = new Map(await Promise.all(chains.map(async (c) =>
-        [c.path, c.state === "down" || c.state === "unreachable" ? undefined : await reads.peers(c.path).catch(() => undefined)] as const)));
-      // Chains the node can see but does not host: one press to add.
-      const hosted = new Set(chains.map((c) => c.path));
-      const offered = (await hostableChains(prefs.hostedChains, reads)).filter((chain) => !hosted.has(chain));
-      const nexus = peers.get("Nexus");
-      lonely.hidden = nexus !== 0;
-      lonely.textContent = nexus === 0 ? alone(prefs.peers) : "";
-      problem.hidden = true;
-      if (hostedRows.querySelector(".connect") === null || chains.length !== status.size || chains.some((c) => !status.has(c.path))) {
-        status.clear();
-        hostedRows.replaceChildren(...chains.flatMap((c) => {
-          const line = h("span", { class: "v" });
-          status.set(c.path, line);
-          return [
-            h("div", { class: "row" },
-              h("span", { class: "k mono" }, c.path),
-              line,
-              // Nexus is the root: always hosted. A chain goes with the chains under it.
-              ...(c.path === "Nexus" ? [] : [h("button", {
-                class: "btn", "aria-label": `Stop hosting ${c.path}`,
-                onclick: () => { void host((list) => list.filter((chain) => chain !== c.path && !chain.startsWith(c.path + "/")), `removing ${c.path} (the node restarts)…`); },
-              }, "Remove")]),
-            ),
-            // Whom a chain connects to is set once, if ever: folded away on its row.
-            h("details", { class: "connect" }, h("summary", { "aria-label": `Connect ${c.path} to` }, "Connect to"), connectForm(manager, prefs, c.path, after(() => again()))),
-          ];
-        }));
-      }
-      for (const c of chains) {
-        const count = peers.get(c.path);
-        status.get(c.path)!.textContent = statusLine(c, count !== 0) + (count === undefined ? "" : ` · ${peersLine(count)}`);
-      }
-      offeredRows.replaceChildren(...offered.map((chain) => h("div", { class: "row" },
-        h("span", { class: "k mono" }, chain),
-        h("span", { class: "v muted" }, "not hosted"),
-        h("button", { class: "btn", "aria-label": `Host ${chain}`, onclick: () => { void host((list) => chosenChains(list, chain), `adding ${chain} (the node restarts)…`); } }, "Add"),
-      )));
+      const rows = await treeRows(chains, prefs.hostedChains, reads);
+      tree.update(rows);
+      summary.textContent = nodeLine(chains);
+      // Without peers the node sees only itself; a child chain without them, on a node that has some, sees nothing new.
+      const count = (path: string) => rows.find((r) => r.path === path)?.peers;
+      const alones = count("Nexus") === 0 ? [alone(prefs.peers)]
+        : rows.filter((r) => r.status?.state === "active" && r.peers === 0 && (count(parentOf(r.path)) ?? 0) > 0).map((r) => aloneOn(r.path));
+      lonely.hidden = alones.length === 0;
+      lonely.textContent = alones.join(" ");
+      if (!busy) toast.textContent = "";
     } catch (e) {
-      problem.textContent = (e as Error).message;
-      problem.hidden = false;
+      toast.textContent = (e as Error).message;
     }
     if (!busy) {
       toggle.textContent = running ? "Stop node" : "Start node";
       // Starting is the step forward; stopping is not, so it is not the filled button.
-      toggle.className = running ? "btn block" : "block";
+      toggle.className = running ? "btn" : "btn btn--primary";
     }
-    if (document.body.contains(table)) timer = setTimeout(refresh, POLL_MS);
+    if (document.body.contains(screen)) timer = setTimeout(refresh, POLL_MS);
   };
 
   toggle.addEventListener("click", async () => {
@@ -239,27 +302,152 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
     }
   });
 
-  // Ports are set once, if ever: folded away until asked for.
-  const network = h("details", { class: "advanced" }, h("summary", {}, "Ports"));
-  void networkForm(manager, after(() => again()), onPrefsChanged)
-    .then((form) => network.append(form))
-    .catch((e) => network.append(h("p", { class: "warn" }, (e as Error).message)));
+  // Ports and pairing are set once, if ever: folded away until asked for.
+  const ports = h("div", {});
+  const advanced = h("details", { class: "advanced" }, h("summary", {}, "Advanced"), ports,
+    h("div", { class: "advanced-content" },
+      h("button", { class: "btn block", onclick: leave(() => pairScreen(manager, reads, () => nodePage(pages))) }, "Pair browser extension")));
+  void networkForm(manager, () => { if (document.body.contains(screen)) leave(() => nodePage(pages))(); }, pages.onPrefsChanged)
+    .then((form) => ports.append(form))
+    .catch((e) => ports.append(h("p", { class: "warn" }, (e as Error).message)));
 
-  render(
-    h("div", { class: "stack" },
-      h("h1", {}, "Your node"),
-      h("p", { class: "muted" }, "A full Lattice node on this computer. The wallet reads and sends only through it."),
-      table,
-      problem,
-      h("div", { class: "add-chain" }, other, h("button", { class: "btn", onclick: addTyped }, "Add chain")),
-      lonely,
-      toast,
+  screen.append(
+    h("div", { class: "node-head" },
+      h("div", {}, h("h1", {}, "Your node"), summary),
       toggle,
-      network,
-      h("button", { class: "btn block", onclick: leave(() => pairScreen(manager, reads, () => again())) }, "Pair browser extension"),
-      h("button", { class: "btn block", onclick: leave(back) }, "Back to wallet"),
     ),
+    tree.box,
+    lonely,
+    toast,
+    advanced,
+    h("button", { class: "btn block", onclick: leave(pages.back) }, "Back to wallet"),
   );
+  render(screen);
+  void refresh();
+}
+
+/**
+ * One chain's page, the same at every level: where it is in the tree, its
+ * block and peers, the chains under it (and a name to host another there),
+ * whom it connects to, and the way to stop hosting it. A chain the node sees
+ * and does not host has one thing on its page: hosting it.
+ */
+function chainPage(pages: NodePages, path: string) {
+  const { manager, reads } = pages;
+  const name = nameOf(path);
+  const parent = parentOf(path);
+  const screen = h("div", { class: "stack" });
+  const toast = h("div", { class: "toast", role: "status" });
+  let busy = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const leave = (go: () => void) => () => { clearTimeout(timer); go(); };
+  const up = leave(() => (parent ? chainPage(pages, parent) : nodePage(pages)));
+  const here = () => leave(() => chainPage(pages, path))();
+  const change = async (to: (hosted: string[]) => string[], doing: string, then: () => void) => {
+    if (busy) return;
+    busy = true;
+    try { await setHosted(pages, screen, toast, to, doing, leave(then)); } finally { busy = false; }
+  };
+
+  // Where this chain is: each chain above it is one press away.
+  const parts = path.split("/");
+  const crumbs = h("nav", { class: "crumbs", "aria-label": "Chain path" },
+    h("button", { class: "link", onclick: leave(() => nodePage(pages)) }, "Your node"),
+    ...parts.slice(0, -1).flatMap((part, i) => [
+      h("span", { "aria-hidden": "true" }, "/"),
+      h("button", { class: "link", onclick: leave(() => chainPage(pages, parts.slice(0, i + 1).join("/"))) }, part),
+    ]),
+    h("span", { "aria-hidden": "true" }, "/"), h("span", { "aria-current": "page" }, name),
+  );
+  const heading = [h("h1", { class: "chain-name" }, name), ...(parent ? [h("p", { class: "muted mono" }, path)] : [])];
+  const body = h("div", { class: "stack" }, h("p", { class: "muted" }, "…"));
+  screen.append(crumbs, ...heading, body, toast, h("button", { class: "btn block", onclick: up }, "Back"));
+  render(screen);
+
+  const block = h("span", { class: "v" });
+  const peers = h("span", { class: "v" });
+  const pending = h("span", { class: "v" });
+  const pendingRow = h("div", { class: "row", hidden: "true" }, h("span", { class: "k" }, "Pending"), pending);
+  const tree = chainTree((child) => leave(() => chainPage(pages, child))());
+  const none = h("p", { class: "muted" }, "None yet.");
+  let built: "hosted" | "seen" | undefined;
+
+  const buildHosted = (prefs: NodePrefs) => {
+    const other = h("input", { type: "text", placeholder: "name of a chain to host here", spellcheck: "false", "aria-label": `Name of a chain under ${path}` }) as HTMLInputElement;
+    const add = () => {
+      const typed = other.value.trim();
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(typed)) { toast.textContent = "Type the chain's name: letters, digits, - and _."; return; }
+      void change((hosted) => chosenChains(hosted, `${path}/${typed}`), `adding ${path}/${typed} (the node restarts)…`, () => chainPage(pages, path));
+    };
+    other.addEventListener("keydown", (event) => { if ((event as KeyboardEvent).key === "Enter") add(); });
+    const confirm = h("div", { class: "warn stack", hidden: "true" });
+    const stop = h("button", { class: "btn block", onclick: () => {
+      const under = prefs.hostedChains.filter((chain) => chain.startsWith(path + "/")).length;
+      confirm.replaceChildren(
+        h("p", {}, `Stop hosting ${name}${under ? ` and the ${under === 1 ? "chain" : `${under} chains`} under it` : ""}? The wallet can no longer use ${under ? "them" : "it"}, and mining stops paying there. The node restarts.`),
+        h("div", { class: "row-actions" },
+          h("button", { class: "btn", "aria-label": `Stop hosting ${path}`, onclick: () => { void change((list) => list.filter((chain) => chain !== path && !chain.startsWith(path + "/")), `removing ${path} (the node restarts)…`, () => nodePage(pages)); } }, "Stop hosting"),
+          h("button", { class: "btn", onclick: () => { confirm.hidden = true; stop.hidden = false; } }, "Keep it"),
+        ),
+      );
+      confirm.hidden = false;
+      stop.hidden = true;
+    } }, `Stop hosting ${name}`);
+    body.replaceChildren(
+      h("div", { class: "kv" },
+        h("div", { class: "row" }, h("span", { class: "k" }, "Block"), block),
+        h("div", { class: "row" }, h("span", { class: "k" }, "Peers"), peers),
+        pendingRow,
+      ),
+      h("div", { class: "stack" },
+        h("div", { class: "section" }, `Chains under ${name}`),
+        tree.box, none,
+        h("div", { class: "add-chain" }, other, h("button", { class: "btn", onclick: add }, "Add")),
+      ),
+      connectForm(manager, prefs, path, () => { if (document.body.contains(screen)) here(); }),
+      // Nexus is the root: always hosted. A chain goes with the chains under it.
+      ...(parent ? [stop, confirm] : []),
+    );
+  };
+  const buildSeen = () => {
+    body.replaceChildren(
+      h("p", {}, `Your node sees ${name} under ${parent} and does not host it. Hosting it lets the wallet use it, and lets you mine it.`),
+      h("p", { class: "muted" }, "The node restarts to take it."),
+      h("button", { class: "block", "aria-label": `Host ${path}`, onclick: () => { void change((hosted) => chosenChains(hosted, path), `adding ${path} (the node restarts)…`, () => chainPage(pages, path)); } }, `Host ${name}`),
+    );
+  };
+
+  const refresh = async () => {
+    clearTimeout(timer);
+    try {
+      const [chains, prefs] = await Promise.all([
+        manager.status().then((status) => withSync(status, reads)),
+        manager.prefs(),
+      ]);
+      const status = chains.find((c) => c.path === path);
+      const kind = status ? "hosted" : "seen";
+      if (built !== kind) { (status ? buildHosted : buildSeen)(prefs); built = kind; }
+      if (status) {
+        const rows = (await treeRows(chains, prefs.hostedChains, reads));
+        const own = rows.find((r) => r.path === path)?.peers;
+        const above = parent ? rows.find((r) => r.path === parent)?.peers : undefined;
+        block.textContent = status.state === "down" ? "node stopped" : status.state === "unreachable" ? "starting…"
+          : chainWords(status) ?? (status.height === undefined ? "" : status.height.toLocaleString());
+        peers.textContent = own === undefined ? "" : own === 0 ? "none yet"
+          : above === undefined ? own.toLocaleString() : `${own.toLocaleString()} of ${nameOf(parent)}'s ${above.toLocaleString()}`;
+        pendingRow.hidden = !status.mempool;
+        pending.textContent = status.mempool ? status.mempool.toLocaleString() : "";
+        const below = rows.filter((r) => r.path.startsWith(path + "/"));
+        tree.box.hidden = below.length === 0;
+        none.hidden = below.length !== 0;
+        tree.update(below);
+      }
+      if (!busy) toast.textContent = "";
+    } catch (e) {
+      if (!busy) toast.textContent = (e as Error).message;
+    }
+    if (document.body.contains(screen)) timer = setTimeout(refresh, POLL_MS);
+  };
   void refresh();
 }
 
@@ -312,8 +500,8 @@ function connectForm(manager: NodeManager, prefs: NodePrefs, chain: string, save
   mode.addEventListener("change", showPeers);
   showPeers();
   const err = h("div", { class: "toast", role: "status" });
-  return h("div", { class: "advanced-content stack" },
-    mode, peers,
+  return h("div", { class: "stack" },
+    h("label", { class: "k" }, "Connect to"), mode, peers,
     h("p", { class: "muted" }, "Saving restarts the node if it is running."),
     err,
     h("button", { class: "btn block", "aria-label": `Save peers of ${chain}`, onclick: async () => {
