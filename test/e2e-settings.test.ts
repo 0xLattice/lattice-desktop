@@ -1,6 +1,6 @@
 // End to end, headless: configuring the node and mining what it hosts, from
 // the desktop app's own screens, on the real `lattice` binaries with throwaway
-// storage and no peers. One session: Node settings typed wrong and then right,
+// storage and no peers. One session: the node's settings typed wrong and then right,
 // a port change that reloads the app, a child chain hosted from the Mining
 // screen, both chains mined to different accounts, the node restarted under
 // the miner, and a relaunch. Only the shell is replaced (see e2e-app.test.ts).
@@ -51,12 +51,11 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
       return shown && shown !== first ? shown : undefined;
     }, "a second account");
 
-    // ---- Node settings, typed wrong: each is refused with its reason and nothing is written ----
+    // ---- the node's settings, typed wrong: each is refused with its reason and nothing is written ----
     button("Node").click();
     await shows(/Your node/);
     await press("Start node");
     await shows(/Nexusrunning/);
-    button("Node settings").click();
     await shows(/Chains this node hosts/);
     const before = readFileSync(join(root, "lattice.json"), "utf8");
     const rpc = () => document.querySelector('input[aria-label="Local API port"]') as HTMLInputElement;
@@ -110,13 +109,12 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     }, "a balance read on the new port");
     button("Node").click();
     await shows(/Nexusrunning/);
-    button("Node settings").click();
     await shows(/Chains this node hosts/);
     assert.deepEqual([rpc().value, peerMode().value, peerList().value], [newRPC, "custom", peer]);
     // Back to a private node: no peers.
     peerMode().value = "none";
     button("Save").click();
-    await shows(/Your node/);
+    await until(() => (topology().peers?.length === 0 ? true : undefined), "the peers saved");
     assert.deepEqual(topology().peers, []);
     assert.equal(reloads, 1, "only a port change reloads");
     await shows(/Nexusrunning/);
@@ -124,12 +122,15 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     // ---- a child chain exists (made with the CLI), and mining is set up while only Nexus is hosted ----
     await run(join(bin!, "lattice"), ["child", "create", CHILD, "--root", root, "--reward", "100000"]);
     await until(async () => ((await app.manager.status())[0]?.state === "active" ? true : undefined), "the node back up");
-    button("Node settings").click();
-    await shows(/Chains this node hosts/);
+    // The chain was made outside the app: the page lists it when next opened.
+    button("Back to wallet").click();
+    await shows(/Balance/);
+    button("Node").click();
+    await until(() => (hostBox(CHILD) ? true : undefined), "the child chain listed");
     assert.equal(hostBox(CHILD)!.checked, true);
     hostBox(CHILD)!.checked = false;
     button("Save").click();
-    await shows(/Your node/);
+    await until(() => (topology().hostedChains === undefined ? true : undefined), "the child no longer hosted");
     await shows(/Nexusrunning/);
     button("Mining").click();
     await shows(/Chains mined are the chains hosted: Nexus\./);
@@ -206,11 +207,8 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await shows(/Balance/);
     button("Node").click();
     await shows(/Nexusrunning/);
-    button("Node settings").click();
     await shows(/Chains this node hosts/);
     assert.deepEqual([rpc().value, peerMode().value, peerList().value, hostBox(CHILD)?.checked ?? false], [newRPC, "custom", peer, false]);
-    button("Back").click();
-    await shows(/Your node/);
     button("Mining").click();
     await shows(/Statusmining on the (graphics chip|processor)/);
     assert.equal(recipient("Nexus")!.value, second);

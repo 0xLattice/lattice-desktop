@@ -18,8 +18,8 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   `~/Library/Application Support/Lattice/host`. On first run the app scaffolds it
   with `lattice init` and gives the node its own ports (RPC 18080, peers 14001)
   so that it doesn't clash with a CLI-managed host on 8080/4001. Nexus bootstrap
-  peers are the node's built-in defaults; you can change them in **Node →
-  Node settings** (built-in, your own list, or none). Opening the app starts
+  peers are the node's built-in defaults; you can change them on the **Node**
+  page (built-in, your own list, or none). Opening the app starts
   the node, and the wallet's home screen says what it is doing until it is in
   sync: stopped (with a Start button), starting, or how far along it is.
   Quitting the app stops the node cleanly (`lattice down`, which can take a
@@ -64,17 +64,20 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   signed in the app and submitted to the node's loopback operator route
   `POST /transactions`. The app checks the transaction CID the node returns
   against the CID it computed itself. There is no default endpoint and no relay.
-- **Idle lock.** The wallet locks after ten minutes without a request that
-  needs keys; looking at balances does not put it off. The screen stays as it
-  is, and the next step that needs keys asks for the password over it.
+- **Idle lock.** The wallet locks after ten minutes in which nothing needed
+  keys and no one touched the app, and as soon as the computer wakes from
+  sleep. Locked, the whole app is covered by the password prompt, the node and
+  mining screens included; what was on screen is underneath, as it was left,
+  once the password is given.
 - **Fees** can be set per transaction, with a default per chain. The app warns
   when a fee is below the node's `minRelayFee` but never clamps it.
 - **Status** comes from an inclusion lookup (block height), and **balances**
   are shown for Nexus and for the child chains the node hosts. There is one
   chain list, `hostedChains` in `lattice.json`: adding a chain in the wallet's
-  chain picker hosts it, and a chain added in Node settings appears in the
+  chain picker hosts it, and a chain added on the Node page appears in the
   picker (a running node restarts to take either).
-- **Node settings** list the chains the node can see as boxes to tick (a path
+- **The Node page** is the node in one place: what it is doing, Start and
+  Stop, and its settings. The chains the node can see are boxes to tick (a path
   is typed only for one it cannot), with the ports under Ports. Saving restarts
   a running node.
 - **Settings** open from the mark at the top left, which says so. The chain name beside it
@@ -160,15 +163,15 @@ publish artifacts or create a project signing key.
     Stop taking the miner with it. With `LATTICE_GPU_MINER=<a built
     lattice-miner-gpu>` it mines on the graphics chip first, where the
     machine has one it can use.
-  - `e2e-settings`: Node settings typed wrong (refused, nothing written) and
+  - `e2e-settings`: the node's settings typed wrong (refused, nothing written) and
     right, a port change that reloads the app, a child chain hosted from the
     Mining screen, both chains mined to different accounts with one paying no
     one, the node restarted under the miner, a chain dropped while mining
     still paid it, and a relaunch showing what was saved.
   - `e2e-first-run`: the app as it ships, starting its own node when it
     opens: a new wallet lands on a balance with no one pressing Start.
-  - `e2e-custody`: a `lattice key generate` key file, the idle lock firing
-    in the middle of a send, a fee replacement, pairing an extension, and a
+  - `e2e-custody`: a `lattice key generate` key file, the idle lock covering
+    a half-entered send, a fee replacement, pairing an extension, and a
     backup file restored on a second host.
 - The packaged app: `LATTICE_APP=<path to Lattice.app> npm test` launches the
   bundle with a throwaway home directory and a private host root, and checks

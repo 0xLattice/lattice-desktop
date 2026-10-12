@@ -244,7 +244,6 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await shows(/Miningoff/);
 
     // ---- node settings typed wrong: refused, and nothing changes ----
-    await press("Node settings");
     await shows(/Chains this node hosts/);
     const RPC = 'input[aria-label="Local API port"]';
     // The ports are folded away until asked for.
@@ -256,12 +255,12 @@ test("the app in its own window: a wallet, its node, mining, a transfer, and the
     await type(RPC, listen);
     await press("Save");
     await shows(/The RPC and peer ports must differ/);
-    await press("Back");
-    await shows(/Nexusrunning/);
-    await press("Node settings");
+    // Leave and come back: what was refused was never kept.
+    await press("Back to wallet");
+    await shows(/Balance on Nexus/);
+    await press("Node");
     await shows(/Chains this node hosts/);
     assert.equal(await valueOf(RPC), rpc, "the port is what it was");
-    await press("Back");
     await press("Back to wallet");
     await shows(/Balance on Nexus/);
 

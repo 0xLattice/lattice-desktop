@@ -143,7 +143,7 @@ test("pairing allows an extension origin in lattice.json (restarting a running n
   await manager.allowOrigin(origin);
   assert.deepEqual(running.calls.length, 3, "already allowed");
   assert.deepEqual(await manager.allowedOrigins(), [origin]);
-  // Node settings keep it.
+  // The node's settings keep it.
   await manager.configure({ ...(await manager.prefs()), peers: "none" });
   assert.deepEqual(running.state.topology?.rpcAllowedOrigins, [origin]);
 });
@@ -299,7 +299,7 @@ test("the home screen is told what the node is doing, with the one thing to do a
   assert.match(alone("default"), /no peers yet/);
   state.topology!.peers = [];
   assert.deepEqual((await nodeNotices(manager, reads, "Nexus")).map((n) => n.text), [alone("none")]);
-  assert.match(alone("none"), /set to connect to no one.*Node settings/);
+  assert.match(alone("none"), /set to connect to no one.*on the Node page/);
   peers = 3;
   // Mining is said wherever the person is.
   state.topology!.mine = { workers: 1, recipients: {} };

@@ -67,7 +67,7 @@ export interface Notice {
 /** What a node with no peers should say: it runs, and sees only itself. */
 export function alone(peers: NodePrefs["peers"]): string {
   return peers === "none"
-    ? "Your node is set to connect to no one, so it sees only its own blocks. To join the network, choose its peers in Node settings."
+    ? "Your node is set to connect to no one, so it sees only its own blocks. To join the network, choose its peers on the Node page."
     : "Your node has no peers yet, so it cannot see the network. It keeps trying.";
 }
 
@@ -94,7 +94,13 @@ export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "
   return notices;
 }
 
-export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void) {
+/**
+ * The node on one page: what it is doing, starting and stopping it, and its
+ * settings. `saved` is where a save of the settings goes instead of back to
+ * this page (the Mining screen sends people here to host a chain, and wants
+ * them back).
+ */
+export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void, saved?: () => void) {
   const table = h("div", { class: "kv" }, h("div", { class: "row" }, h("span", { class: "muted" }, "…")));
   const toast = h("div", { class: "toast", role: "status" });
   // One button, saying the one thing it will do: the node is either running or it is not.
@@ -103,8 +109,18 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
   let running = false;
   let busy = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const again = () => nodeScreen(manager, reads, back, onPrefsChanged);
+  const again = (savedTo?: () => void) => nodeScreen(manager, reads, back, onPrefsChanged, savedTo);
   const leave = (go: () => void) => () => { clearTimeout(timer); go(); };
+  // The node's settings, on the same page as what they change. Filled once
+  // read; the status above keeps refreshing without touching what is typed.
+  const settings = h("div", { class: "stack" });
+  void settingsForm(manager, reads, leave(saved ?? (() => again())), onPrefsChanged)
+    .then((form) => {
+      settings.replaceChildren(...form);
+      // Sent here to host a chain: bring that part into view.
+      if (saved) document.getElementById("hosted-chains")?.scrollIntoView?.();
+    })
+    .catch((e) => settings.replaceChildren(h("p", { class: "warn" }, (e as Error).message)));
 
   const refresh = async () => {
     clearTimeout(timer);
@@ -163,8 +179,8 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
       toggle,
       toast,
       h("button", { class: "btn block", onclick: leave(() => miningScreen(manager, reads, again, onPrefsChanged)) }, "Mining"),
-      h("button", { class: "btn block", onclick: leave(() => settingsScreen(manager, reads, again, onPrefsChanged)) }, "Node settings"),
-      h("button", { class: "btn block", onclick: leave(() => pairScreen(manager, reads, again)) }, "Pair browser extension"),
+      h("button", { class: "btn block", onclick: leave(() => pairScreen(manager, reads, () => again())) }, "Pair browser extension"),
+      settings,
       h("button", { class: "btn block", onclick: leave(back) }, "Back to wallet"),
     ),
   );
@@ -175,7 +191,7 @@ export function nodeScreen(manager: NodeManager, reads: NodeReads, back: () => v
 const byDepth = (a: string, b: string) => a.split("/").length - b.split("/").length || a.localeCompare(b);
 
 /**
- * The chains the settings screen offers: those hosted, and the child chains
+ * The chains the node page offers to host: those hosted, and the child chains
  * the hosted ones carry (what the node can see without being told a path).
  */
 export async function hostableChains(hosted: string[], reads: Pick<NodeReads, "children">): Promise<string[]> {
@@ -191,7 +207,8 @@ export function chosenChains(ticked: string[], typed: string): string[] {
   return [...new Set([...ticked, ...typed.split(/[\s,]+/).filter(Boolean)])].sort(byDepth);
 }
 
-async function settingsScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void) {
+/** The node's settings as a form: hosted chains, peers, ports, and Save. `saved` runs once they are written. */
+async function settingsForm(manager: NodeManager, reads: NodeReads, saved: () => void, onPrefsChanged: () => void) {
   const prefs = await manager.prefs();
   const offered = await hostableChains(prefs.hostedChains, reads);
   // Recognised, not recalled: the chains the node can see are ticked or not; a path is typed only for one it cannot.
@@ -216,46 +233,42 @@ async function settingsScreen(manager: NodeManager, reads: NodeReads, back: () =
   const rpc = h("input", { type: "text", inputmode: "numeric", "aria-label": "Local API port", value: String(prefs.rpc) }) as HTMLInputElement;
   const listen = h("input", { type: "text", inputmode: "numeric", "aria-label": "Peer port", value: String(prefs.listen) }) as HTMLInputElement;
   const err = h("div", { class: "toast", role: "status" });
-  render(
-    h("div", { class: "stack" },
-      h("h1", {}, "Node settings"),
-      h("p", { class: "section-label" }, "Chains this node hosts"),
-      h("div", { class: "kv" },
-        h("label", { class: "row check" }, h("span", {}, "Nexus"), h("span", { class: "muted" }, "always")),
-        ...boxes.map(({ chain, box }) => h("label", { class: "row check", for: box.id }, h("span", { class: "mono" }, chain), box)),
-      ),
-      other,
-      h("p", { class: "section-label" }, "Connect to"),
-      mode, peers,
-      // Rarely needed, so out of the way until asked for.
-      h("details", { class: "advanced" },
-        h("summary", {}, "Ports"),
-        h("div", { class: "advanced-content stack" },
-          h("label", { class: "k" }, "Local API port (this computer only)"), rpc,
-          h("label", { class: "k" }, "Peer port"), listen,
-        ),
-      ),
-      h("p", { class: "muted" }, "Saving restarts the node if it is running."),
-      err,
-      h("button", { class: "block", onclick: async () => {
-        const next: NodePrefs = {
-          rpc: Number(rpc.value.trim()),
-          listen: Number(listen.value.trim()),
-          peers: parsePeersField(mode.value, peers.value),
-          hostedChains: chosenChains(boxes.filter(({ box }) => box.checked).map(({ chain }) => chain), other.value),
-        };
-        const problem = checkPrefs(next);
-        if (problem) { err.textContent = problem; return; }
-        err.textContent = "saving…";
-        try {
-          await manager.configure(next);
-          if (next.rpc !== prefs.rpc) return onPrefsChanged();
-          back();
-        } catch (e) { err.textContent = (e as Error).message; }
-      } }, "Save"),
-      h("button", { class: "btn block", onclick: back }, "Back"),
+  return [
+    h("p", { class: "section-label", id: "hosted-chains" }, "Chains this node hosts"),
+    h("div", { class: "kv" },
+      h("label", { class: "row check" }, h("span", {}, "Nexus"), h("span", { class: "muted" }, "always")),
+      ...boxes.map(({ chain, box }) => h("label", { class: "row check", for: box.id }, h("span", { class: "mono" }, chain), box)),
     ),
-  );
+    other,
+    h("p", { class: "section-label" }, "Connect to"),
+    mode, peers,
+    // Rarely needed, so out of the way until asked for.
+    h("details", { class: "advanced" },
+      h("summary", {}, "Ports"),
+      h("div", { class: "advanced-content stack" },
+        h("label", { class: "k" }, "Local API port (this computer only)"), rpc,
+        h("label", { class: "k" }, "Peer port"), listen,
+      ),
+    ),
+    h("p", { class: "muted" }, "Saving restarts the node if it is running."),
+    err,
+    h("button", { class: "block", onclick: async () => {
+      const next: NodePrefs = {
+        rpc: Number(rpc.value.trim()),
+        listen: Number(listen.value.trim()),
+        peers: parsePeersField(mode.value, peers.value),
+        hostedChains: chosenChains(boxes.filter(({ box }) => box.checked).map(({ chain }) => chain), other.value),
+      };
+      const problem = checkPrefs(next);
+      if (problem) { err.textContent = problem; return; }
+      err.textContent = "saving…";
+      try {
+        await manager.configure(next);
+        if (next.rpc !== prefs.rpc) return onPrefsChanged();
+        saved();
+      } catch (e) { err.textContent = (e as Error).message; }
+    } }, "Save"),
+  ];
 }
 
 /** The recipient choices as entered: a chain set to pay no one is left out. */
@@ -276,7 +289,7 @@ const SEARCHERS: Record<Searcher, string> = { gpu: "the graphics chip", cpu: "th
  * to an account of this wallet. One search covers Nexus and the chains it
  * carries (merged mining), so the chains mined are the chains hosted.
  */
-async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => void, onPrefsChanged: () => void) {
+async function miningScreen(manager: NodeManager, reads: NodeReads, back: (saved?: () => void) => void, onPrefsChanged: () => void) {
   const [chains, saved, accounts, gpu] = await Promise.all([manager.chains(), manager.miningPrefs(), reads.accounts(), manager.canMineOnGPU()]);
   const again = () => miningScreen(manager, reads, back, onPrefsChanged);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -383,8 +396,8 @@ async function miningScreen(manager: NodeManager, reads: NodeReads, back: () => 
       toast,
       toggle,
       apply,
-      h("button", { class: "btn block", onclick: leave(() => settingsScreen(manager, reads, again, onPrefsChanged)) }, "Choose hosted chains"),
-      h("button", { class: "btn block", onclick: leave(back) }, "Back"),
+      h("button", { class: "btn block", onclick: leave(() => back(again)) }, "Choose hosted chains"),
+      h("button", { class: "btn block", onclick: leave(() => back()) }, "Back"),
     ),
   );
   await show();

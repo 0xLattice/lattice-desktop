@@ -115,14 +115,14 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await until(async () => ((await manager.status()).every((c) => c.state === "active") ? true : undefined), "both chains active");
     button("Node").click();
     await shows(/Nexus\/testnetrunning/);
-    button("Node settings").click();
     await shows(/Chains this node hosts/);
     // The chain is listed with its box ticked: hosting it or not is a tick, not a typed path.
     const hosted = document.querySelector('input[aria-label="Nexus/testnet"]') as HTMLInputElement;
     assert.equal(hosted.checked, true);
     hosted.checked = false;
     button("Save").click();
-    await shows(/Your node/);
+    // Saved, the page is the same page: the node, now hosting Nexus alone.
+    await until(async () => ((await manager.chains()).length === 1 ? true : undefined), "the child no longer hosted");
     await shows(/Nexusrunning/);
     assert.deepEqual(await manager.chains(), ["Nexus"]);
     button("Back to wallet").click();
