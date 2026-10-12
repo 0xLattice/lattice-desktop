@@ -133,13 +133,31 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     button("Back to wallet").click();
     await shows(/Balance/);
 
-    // The chain menu offers it, saying what choosing it does; choosing it hosts it.
-    document.getElementById("net-badge")!.click();
-    await shows(/testnetadd to node ›/);
-    const item = [...document.querySelectorAll(".chain-menu-item")].find((entry) => entry.firstChild?.textContent === "testnet") as HTMLButtonElement;
-    item.click();
+    // The chain menu is the same tree. It lists the chain under Nexus as one the
+    // node does not host, and only switches: choosing it opens the chain's own
+    // page, where hosting it is the one thing to do.
+    const badge = document.getElementById("net-badge")!;
+    const menuItem = (chain: string) => document.querySelector(`.chain-menu-item[data-chain="${chain}"]`) as HTMLButtonElement | null;
+    const menuShows = (chain: string, text: string) => until(() => (menuItem(chain)?.textContent === text ? true : undefined), `the menu to show ${text}`);
+    badge.click();
+    await menuShows("Nexus/testnet", "└ testnetnot hosted");
+    assert.equal(menuItem("Nexus")!.getAttribute("aria-current"), "true");
+    menuItem("Nexus/testnet")!.click();
+    await shows(/Your node sees testnet under Nexus and does not host it/);
+    assert.deepEqual(await manager.chains(), ["Nexus"], "opening its page hosts nothing");
+    button("Host testnet").click();
     await until(async () => ((await manager.chains()).includes("Nexus/testnet") ? true : undefined), "the node to host Nexus/testnet");
-    await until(() => (document.getElementById("net-badge")!.textContent === "Nexus/testnet ▾" ? true : undefined), "the wallet on Nexus/testnet");
+    await shows(/Stop hosting testnet/);
+    button("Your node").click();
+    await shows(/Your node(Running|Starting)/);
+    button("Back to wallet").click();
+    await shows(/Balance/);
+    // Hosted now, it is a chain like any other: one press switches to it.
+    assert.equal(badge.textContent, "Nexus▾");
+    badge.click();
+    await menuShows("Nexus/testnet", "└ testnet");
+    menuItem("Nexus/testnet")!.click();
+    await until(() => (badge.textContent === "Nexus/testnet▾" ? true : undefined), "the wallet on Nexus/testnet");
     // The node restarted to take the chain: the balance reads once it is back.
     await until(() => {
       if (funded()) return true;
@@ -147,13 +165,13 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
       return undefined;
     }, "the child-chain balance");
     assert.ok((await reads("Nexus/testnet").account(address)).balance > 0n);
-    document.getElementById("parent-chain")!.click();
-    await until(() => (document.getElementById("net-badge")!.textContent === "Nexus ▾" ? true : undefined), "the wallet back on Nexus");
+    // The way up is the row above: there is no button for it.
+    assert.equal(document.getElementById("parent-chain"), null);
+    badge.click();
+    await menuShows("Nexus/testnet", "└ testnetyou are here");
+    menuItem("Nexus")!.click();
+    await until(() => (badge.textContent === "Nexus▾" ? true : undefined), "the wallet back on Nexus");
     await shows(/Balance/);
-    document.getElementById("net-badge")!.click();
-    await shows(/testnet›/);
-    assert.doesNotMatch(pageText(), /add to node/);
-    document.getElementById("net-badge")!.click();
 
     // ---- the node dies under the app; the wallet says so and the node screen brings it back ----
     await run("pkill", ["-9", "-f", root]);

@@ -80,10 +80,11 @@ test("the app: sell on the child chain, buy on the parent, withdraw", { skip: !b
     // A sell order is signed on the chain it sells; on the wrong one the app says so and signs nothing.
     dropOrder(dom, sell);
     await shows(/Select Nexus\/testnet in the wallet before opening this request/);
-    const openMenu = async () => { document.getElementById("net-badge")!.click(); await shows(/testnet›/); };
-    await openMenu();
-    ([...document.querySelectorAll(".chain-menu-item")].find((entry) => entry.firstChild?.textContent === "testnet") as HTMLButtonElement).click();
-    await until(() => (document.getElementById("net-badge")!.textContent === `${CHILD} ▾` ? true : undefined), "the wallet on the child chain");
+    const childItem = () => document.querySelector(`.chain-menu-item[data-chain="${CHILD}"]`) as HTMLButtonElement | null;
+    document.getElementById("net-badge")!.click();
+    await until(() => (childItem() ? true : undefined), "the child chain in the menu");
+    childItem()!.click();
+    await until(() => (document.getElementById("net-badge")!.textContent === `${CHILD}▾` ? true : undefined), "the wallet on the child chain");
     await until(() => (funded() ? true : undefined), "a funded balance");
     dropOrder(dom, sell);
     await shows(/Review sell order/);
