@@ -1,6 +1,6 @@
 {
   "name": "lattice-desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Lattice Desktop — a full Lattice node and the Nexus Wallet in one macOS app",

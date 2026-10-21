@@ -1,6 +1,6 @@
 [package]
 name = "lattice-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "Lattice Desktop: a full Lattice node and the Nexus Wallet"
 edition = "2021"
 license = "MIT"
