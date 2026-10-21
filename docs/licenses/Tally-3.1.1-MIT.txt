@@ -1,6 +1,6 @@
-Tally 3.1.0
-Source: https://github.com/adalinxx/Tally/tree/f6c5e3571e0ab3cb67432bb720a0a65e9191da6a
-Revision: f6c5e3571e0ab3cb67432bb720a0a65e9191da6a
+Tally 3.1.1
+Source: https://github.com/adalinxx/Tally/tree/63919ea78de06bc493fe5913dcfcdaad4edabdf6
+Revision: 63919ea78de06bc493fe5913dcfcdaad4edabdf6
 
 This grant applies to copyright held by Lattice contributors in the source
 at the exact revision above. Existing third-party rights, copyright notices,
