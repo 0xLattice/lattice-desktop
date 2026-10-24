@@ -52,7 +52,7 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   a custom `mine.worker` set by hand in `lattice.json` is shown and kept, but
   set only by hand.
 - **The Lattice Wallet, shared.** The UI and signer come from
-  [lattice-wallet](https://github.com/adalinxx/lattice-wallet) (pinned submodule
+  [selfhold-wallet](https://github.com/adalinxx/selfhold-wallet) (pinned submodule
   `vendor/nexus-wallet`, which pins the lattice-sdk). Keys use BIP39 +
   SLIP-0010 `m/44'/7878'/n'`, the same as the extension. The vault uses the
   extension's keystore format (Argon2id + AES-256-GCM), stored at
