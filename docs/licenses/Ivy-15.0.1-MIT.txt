@@ -1,5 +1,5 @@
 Ivy 15.0.1
-Source: https://github.com/adalinxx/Ivy/tree/5afa2f5c52227d4a01a0c9b7462a96d01d488c37
+Source: https://github.com/0xLattice/Ivy/tree/5afa2f5c52227d4a01a0c9b7462a96d01d488c37
 Revision: 5afa2f5c52227d4a01a0c9b7462a96d01d488c37
 
 This grant applies to copyright held by Lattice contributors in the source

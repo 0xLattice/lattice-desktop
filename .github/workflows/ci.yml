@@ -48,7 +48,7 @@ jobs:
         run: echo "commit=$(tr -d '[:space:]' < NODE_COMMIT)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
-          repository: adalinxx/lattice-node
+          repository: 0xLattice/lattice-node
           ref: ${{ steps.node.outputs.commit }}
           path: .build-node
       - name: Select Xcode
@@ -73,7 +73,7 @@ jobs:
         run: echo "commit=$(tr -d '[:space:]' < MINER_GPU_COMMIT)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
-          repository: adalinxx/lattice-miner-gpu
+          repository: 0xLattice/lattice-miner-gpu
           ref: ${{ steps.gpu.outputs.commit }}
           path: .build-miner-gpu
       - name: Build the GPU mining worker at MINER_GPU_COMMIT

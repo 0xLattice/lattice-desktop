@@ -1,5 +1,5 @@
 Multikey 1.0.0
-Source: https://github.com/adalinxx/Multikey/tree/413c70e96c4de9af573e16b58ffc6a107911eb9f
+Source: https://github.com/0xLattice/Multikey/tree/413c70e96c4de9af573e16b58ffc6a107911eb9f
 Revision: 413c70e96c4de9af573e16b58ffc6a107911eb9f
 
 This grant applies to copyright held by Lattice contributors in the source

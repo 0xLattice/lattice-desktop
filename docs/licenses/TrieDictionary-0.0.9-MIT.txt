@@ -1,5 +1,5 @@
 TrieDictionary 0.0.9
-Source: https://github.com/adalinxx/TrieDictionary/tree/3ee63e31eb7d53cf56a5e7786e6671a7c4e422f5
+Source: https://github.com/0xLattice/TrieDictionary/tree/3ee63e31eb7d53cf56a5e7786e6671a7c4e422f5
 Revision: 3ee63e31eb7d53cf56a5e7786e6671a7c4e422f5
 
 This grant applies to copyright held by Lattice contributors in the source

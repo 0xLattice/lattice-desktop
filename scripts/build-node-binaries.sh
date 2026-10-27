@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Build the bundled node binaries (`lattice`, `lattice-node`, and the miner's
 # `lattice-mining-coordinator` and `lattice-miner`) from
-# adalinxx/lattice-node at the commit in NODE_COMMIT and stage them as Tauri
+# 0xLattice/lattice-node at the commit in NODE_COMMIT and stage them as Tauri
 # sidecars in src-tauri/binaries/<name>-<target-triple>, with the GPU mining
-# worker from adalinxx/lattice-miner-gpu at MINER_GPU_COMMIT.
+# worker from 0xLattice/lattice-miner-gpu at MINER_GPU_COMMIT.
 #
 # DEBUG configuration on purpose: Swift 6.3's -O miscompiles the node on
 # macOS (Task.sleep loops), so the Mac node is built unoptimized, exactly
 # as the Mac Nexus node is today. macOS binaries must be built on macOS.
 #
 # Usage: scripts/build-node-binaries.sh [path-to-lattice-node-checkout]
-#   Without a path, clones adalinxx/lattice-node into .build-node/.
+#   Without a path, clones 0xLattice/lattice-node into .build-node/.
 #   The checkout must be clean and at NODE_COMMIT (override: ALLOW_OTHER_COMMIT=1).
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,7 +22,7 @@ if [ "${LATTICE_RELEASE:-0}" = 1 ]; then
 fi
 
 if [ ! -d "$src/.git" ] && [ ! -f "$src/.git" ]; then
-  git clone --quiet https://github.com/adalinxx/lattice-node.git "$src"
+  git clone --quiet https://github.com/0xLattice/lattice-node.git "$src"
 fi
 if [ -z "${1:-}" ] || [ "${LATTICE_RELEASE:-0}" = 1 ]; then
   git -C "$src" fetch --quiet origin "$commit"
@@ -62,13 +62,13 @@ for name in $products; do
 done
 printf '%s\n' "$head" > "$out/COMMIT"
 
-# The GPU mining worker (Metal on macOS), from adalinxx/lattice-miner-gpu at the
+# The GPU mining worker (Metal on macOS), from 0xLattice/lattice-miner-gpu at the
 # commit in MINER_GPU_COMMIT. A plain compute program with no node code in it,
 # so it is built optimized.
 gpu_commit="$(tr -d '[:space:]' < "$here/MINER_GPU_COMMIT")"
 gpu_src="$here/.build-miner-gpu"
 if [ ! -d "$gpu_src/.git" ]; then
-  git clone --quiet https://github.com/adalinxx/lattice-miner-gpu.git "$gpu_src"
+  git clone --quiet https://github.com/0xLattice/lattice-miner-gpu.git "$gpu_src"
 fi
 git -C "$gpu_src" fetch --quiet origin "$gpu_commit"
 git -C "$gpu_src" checkout --quiet --detach "$gpu_commit"
