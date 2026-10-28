@@ -1,30 +1,30 @@
 {
   "Ivy": {
-    "repository": "https://github.com/adalinxx/Ivy",
+    "repository": "https://github.com/0xLattice/Ivy",
     "version": "15.0.1",
     "revision": "5afa2f5c52227d4a01a0c9b7462a96d01d488c37",
     "notice": "Ivy-15.0.1-MIT.txt"
   },
   "Ivy2": {
-    "repository": "https://github.com/adalinxx/Ivy2",
+    "repository": "https://github.com/0xLattice/Ivy2",
     "version": "2.3.0",
     "revision": "ed877d4da0a501c487db2e08f9e1812c2acc9dcd",
     "notice": "Ivy2-2.3.0-MIT.txt"
   },
   "Multikey": {
-    "repository": "https://github.com/adalinxx/Multikey",
+    "repository": "https://github.com/0xLattice/Multikey",
     "version": "1.0.0",
     "revision": "413c70e96c4de9af573e16b58ffc6a107911eb9f",
     "notice": "Multikey-1.0.0-MIT.txt"
   },
   "Tally": {
-    "repository": "https://github.com/adalinxx/Tally",
+    "repository": "https://github.com/0xLattice/Tally",
     "version": "3.1.1",
     "revision": "63919ea78de06bc493fe5913dcfcdaad4edabdf6",
     "notice": "Tally-3.1.1-MIT.txt"
   },
   "TrieDictionary": {
-    "repository": "https://github.com/adalinxx/TrieDictionary",
+    "repository": "https://github.com/0xLattice/TrieDictionary",
     "version": "0.0.9",
     "revision": "3ee63e31eb7d53cf56a5e7786e6671a7c4e422f5",
     "notice": "TrieDictionary-0.0.9-MIT.txt"

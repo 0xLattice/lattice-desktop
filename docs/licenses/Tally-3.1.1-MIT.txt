@@ -1,5 +1,5 @@
 Tally 3.1.1
-Source: https://github.com/adalinxx/Tally/tree/63919ea78de06bc493fe5913dcfcdaad4edabdf6
+Source: https://github.com/0xLattice/Tally/tree/63919ea78de06bc493fe5913dcfcdaad4edabdf6
 Revision: 63919ea78de06bc493fe5913dcfcdaad4edabdf6
 
 This grant applies to copyright held by Lattice contributors in the source

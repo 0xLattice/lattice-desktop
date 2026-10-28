@@ -3,9 +3,9 @@
 A full Lattice node and the Lattice Wallet in one macOS app (Tauri v2).
 
 The same app is packaged for Linux in
-[lattice-desktop-linux](https://github.com/adalinxx/lattice-desktop-linux) and
+[lattice-desktop-linux](https://github.com/0xLattice/lattice-desktop-linux) and
 for Windows in
-[lattice-desktop-windows](https://github.com/adalinxx/lattice-desktop-windows).
+[lattice-desktop-windows](https://github.com/0xLattice/lattice-desktop-windows).
 Both pin this repository and add only their packaging, so the code here runs
 on all three: the paths below are the macOS ones, a Linux package keeps the
 node binaries in its own resources, and on Windows the shell runs the Linux
@@ -31,7 +31,7 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   and mining's tuning, are left to the operator.
 - **Mining** (a button beside Send and Receive) runs the bundled `lattice mine` loop on this node,
   searching on this computer's graphics chip (the bundled worker from
-  [lattice-miner-gpu](https://github.com/adalinxx/lattice-miner-gpu), the
+  [lattice-miner-gpu](https://github.com/0xLattice/lattice-miner-gpu), the
   default) or on its processor. The graphics chip is offered only where the
   worker finds a hash on it when the app asks, once per launch: a machine
   with no chip or driver it can use mines on the processor, and settings
@@ -118,7 +118,7 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
 ## Build
 
 ```sh
-git clone --recurse-submodules https://github.com/adalinxx/lattice-desktop.git
+git clone --recurse-submodules https://github.com/0xLattice/lattice-desktop.git
 cd lattice-desktop
 npm ci                                   # also installs + builds the pinned wallet/SDK
 scripts/build-node-binaries.sh           # builds the node, CLI and miner binaries at NODE_COMMIT (debug), and the GPU worker
@@ -130,7 +130,7 @@ npx tauri dev                            # or run in development
 
 The app bundles the `lattice`, `lattice-node`, `lattice-mining-coordinator` and
 `lattice-miner` binaries from
-[adalinxx/lattice-node](https://github.com/adalinxx/lattice-node) at the commit
+[0xLattice/lattice-node](https://github.com/0xLattice/lattice-node) at the commit
 pinned in `NODE_COMMIT`. `scripts/build-node-binaries.sh` builds them from
 that commit and refuses a checkout that has local changes. It stages them as
 Tauri sidecars in `src-tauri/binaries/` and records the commit in
@@ -141,7 +141,7 @@ reason. macOS binaries have to be built on macOS. To bundle a newer node, bump
 `NODE_COMMIT` and rerun the script.
 
 The same script builds the GPU mining worker, `lattice-miner-gpu`, from
-[adalinxx/lattice-miner-gpu](https://github.com/adalinxx/lattice-miner-gpu) at
+[0xLattice/lattice-miner-gpu](https://github.com/0xLattice/lattice-miner-gpu) at
 the commit pinned in `MINER_GPU_COMMIT`, optimized: it is a plain compute
 program with no node code in it. It needs a Rust toolchain, as the shell does.
 

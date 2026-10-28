@@ -1,5 +1,5 @@
 Ivy2 2.3.0
-Source: https://github.com/adalinxx/Ivy2/tree/ed877d4da0a501c487db2e08f9e1812c2acc9dcd
+Source: https://github.com/0xLattice/Ivy2/tree/ed877d4da0a501c487db2e08f9e1812c2acc9dcd
 Revision: ed877d4da0a501c487db2e08f9e1812c2acc9dcd
 
 This grant applies to copyright held by Lattice contributors in the source

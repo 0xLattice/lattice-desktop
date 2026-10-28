@@ -46,7 +46,7 @@ reviewing it before publication. Toolchains are not yet pinned by this project;
 matching dependency locks alone is not a bit-for-bit reproducibility guarantee.
 
 ```sh
-git clone --recurse-submodules https://github.com/adalinxx/lattice-desktop.git
+git clone --recurse-submodules https://github.com/0xLattice/lattice-desktop.git
 cd lattice-desktop
 git checkout --detach <reviewed-release-commit>
 git submodule update --init --recursive
