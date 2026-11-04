@@ -18,11 +18,14 @@
 //! - `swap_*`: buying NEX with BTC, on lattice-swap's native engine (see
 //!   `swap`), its status sent to the page as events.
 //!
-//! On quit the shell stops the node with `lattice down`.
+//! On quit the shell stops the node with `lattice down`. While a swap needs
+//! the app, it keeps running in the tray, and a quit asks first (see
+//! `background`).
 //!
 //! On Windows the node runs in WSL (see `wsl`): the host root is inside the
 //! default distribution, and the CLI is run there.
 
+mod background;
 mod swap;
 mod wsl;
 
@@ -34,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow};
+use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow, WindowEvent};
 
 /// The RPC port the node was started on: read from lattice.json at launch
 /// (a node left running by an earlier session) and at each successful
@@ -721,7 +724,28 @@ async fn node_http(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
+        // First, as the plugin requires: a second launch shows this one.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            background::show(app)
+        }))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .on_menu_event(|app, event| background::menu_event(app, event.id().as_ref()))
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if background::close_to_tray(window) {
+                    api.prevent_close();
+                }
+            }
+        });
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(background::app_menu);
+    builder
         .setup(|app| {
             let handle = app.handle();
             if let Ok(resources) = handle.path().resource_dir() {
@@ -739,6 +763,8 @@ pub fn run() {
                 .filter(|p| root.as_deref().is_some_and(|r| node_accepts_cookie(*p, r)));
             app.manage(PinnedPort(Mutex::new(port)));
             app.manage(swap::Swaps::default());
+            // Before any swap reports.
+            background::start(handle)?;
             // Swaps that must carry on, resumed on their engine threads once
             // the node's port is pinned (here, or at the first `up`).
             sync_swaps(handle);
@@ -769,13 +795,21 @@ pub fn run() {
             swap::swap_status,
             swap::swap_backup,
             swap::swap_restore,
+            swap::swap_restore_file,
             swap::swap_withdraw,
             swap::swap_offers
         ])
         .build(tauri::generate_context!())
         .expect("error while building the app")
-        .run(|app, event| {
-            if let RunEvent::Exit = event {
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { api, .. } => {
+                if background::hold_exit(app) {
+                    api.prevent_exit();
+                }
+            }
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => background::show(app),
+            RunEvent::Exit => {
                 // A clean stop for the mining loop and the node this app
                 // runs (SIGTERM, then the CLI's own grace); each is a no-op
                 // when it is not running. Mining first: it mines on the node.
@@ -786,6 +820,7 @@ pub fn run() {
                 #[cfg(windows)]
                 wsl::release();
             }
+            _ => {}
         });
 }
 

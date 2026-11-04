@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "2", default-features = false, features = ["tls"] }
@@ -24,6 +24,10 @@ base64 = "0.22"
 swap = { git = "https://github.com/0xLattice/lattice-swap", rev = "91f6c94177406a4e20a9d60bcaa6c1b481866332" }
 swap-nexus-tx = { git = "https://github.com/0xLattice/lattice-swap", rev = "91f6c94177406a4e20a9d60bcaa6c1b481866332" }
 bitcoin = { version = "0.32", features = ["serde"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
 # Signs an offer for the relay listing's test.

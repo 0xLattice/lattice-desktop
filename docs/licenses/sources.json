@@ -86,5 +86,19 @@
   "hex_lit-0.1.1.txt": [
     "https://docs.rs/crate/hex_lit/0.1.1/source/Cargo.toml.orig",
     "https://github.com/spdx/license-list-data/blob/779ef2e5dff6d4af389c53de5e97116ab0bb52e8/text/MITNFA.txt"
+  ],
+  "objc2-security-0.3.2.txt": [
+    "https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md"
+  ],
+  "objc2-service-management-0.3.2.txt": [
+    "https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md"
+  ],
+  "mac-notification-sys-0.6.15.txt": [
+    "https://github.com/h4llow3En/mac-notification-sys/blob/deb559683962d314a7693478476bf8d052efa84e/LICENSE-Apache",
+    "https://github.com/h4llow3En/mac-notification-sys/blob/deb559683962d314a7693478476bf8d052efa84e/LICENSE-MIT"
+  ],
+  "tauri-plugin-2.7.2.txt": [
+    "https://github.com/tauri-apps/tauri/blob/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-APACHE-2.0",
+    "https://github.com/tauri-apps/tauri/blob/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-MIT"
   ]
 }
