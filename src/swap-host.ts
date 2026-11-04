@@ -1,0 +1,109 @@
+// The shell's swap commands and events, typed: buying NEX with BTC on
+// lattice-swap's native engine, which runs in the Rust shell (src-tauri/src/
+// swap.rs). The shapes are the website driver's (`Wallet` and `Buyer` in
+// lattice-swap's web/driver), as lattice-swap-web's screens use them.
+
+import { invoke } from "@tauri-apps/api/core";
+
+export type SwapNetwork = "bitcoin" | "signet";
+
+/** Where swaps run; an Esplora or relay left out is the default
+ * (mempool.space's, and lattice-swap-relay.fly.dev). */
+export interface SwapSettings {
+  network: SwapNetwork;
+  esplora?: string | null;
+  relay?: string | null;
+}
+
+export type SwapStep = "fund-wallet" | "swapping" | "finishing" | "done" | "refunding" | "refunded" | "offer-gone" | "cancelled";
+export type SwapOutcome = "swapped" | "refunded" | "punished" | "drained" | "aborted";
+
+export interface SwapDeadline {
+  height: number;
+  /** ms since the epoch */
+  eta: number;
+}
+
+/** A swap's status, as the driver's `Buyer#status()`. */
+export interface SwapStatus {
+  swapId: string;
+  step: SwapStep;
+  outcome: SwapOutcome | null;
+  wallet: { address: string; confirmed: number | null; unconfirmed: number | null };
+  need: number | null;
+  confirmations: { funding: number | null; lockSpend: number | null; cancelSpend: number | null; nexLock: number | null };
+  deadlines: { cancel: SwapDeadline | null; refund: { from: number; until: number } | null; punish: SwapDeadline | null };
+  mustStayOpen: boolean;
+  backupCovers: "wallet" | "lock";
+  running: boolean;
+  btc_amount: number;
+  price: number;
+  nex_amount: number;
+  btc_confirmations: number;
+  nex_confirmations: number;
+  nexAddress: string | null;
+  tip: number | null;
+  warning: string | null;
+}
+
+/** An offer as a relay's board lists it. */
+export interface SwapOffer {
+  quote: { price: number; min_btc_amount: number; max_btc_amount: number };
+  template: {
+    swap_id: string;
+    btc_fee: number;
+    nex_fee: number;
+    t1: number;
+    t2: number;
+    btc_confirmations: number;
+    nex_confirmations: number;
+    margin: number;
+    nexus_genesis: string;
+  };
+  btc_network: string;
+  relay: string | null;
+  seller: string;
+}
+
+/** An offer on the board: its text, which `swapStart` takes, and what it says. */
+export interface ListedOffer {
+  text: string;
+  offer: SwapOffer;
+}
+
+/** What the buyer agreed to (`btc_amount`, `price`) and its bounds on the rest. */
+export interface SwapPolicy {
+  btc_amount: number;
+  price: number;
+  [bound: string]: number | null;
+}
+
+/** Events the shell sends: a swap's status each poll and when its run ends,
+ * and a failed round of its run, which the shell runs again. Both name the
+ * swap: punished swaps resumed to ask for `s` report too. */
+export const SWAP_STATUS_EVENT = "swap-status";
+export const SWAP_ERROR_EVENT = "swap-error";
+export interface SwapError {
+  swapId: string;
+  error: string;
+}
+
+export const swapSettings = () => invoke<SwapSettings>("swap_settings");
+export const swapSetSettings = (settings: SwapSettings) => invoke<void>("swap_set_settings", { settings });
+export const swapWalletExists = () => invoke<boolean>("swap_wallet_exists");
+/** Opens the swap wallet, made if there is none, and resumes its swaps: its deposit address. */
+export const swapWalletOpen = () => invoke<string>("swap_wallet_open");
+export const swapBalance = () => invoke<{ confirmed: number; unconfirmed: number }>("swap_balance");
+export const swapNeed = (btcAmount: number) => invoke<{ enough: boolean; need: number }>("swap_need", { btcAmount });
+export const swapOffers = () => invoke<ListedOffer[]>("swap_offers");
+/** Starts a swap of an offer's text: its id. */
+export const swapStart = (offer: string, policy: SwapPolicy, nexAddress: string) =>
+  invoke<string>("swap_start", { offer, policy, nexAddress });
+export const swapCancel = () => invoke<void>("swap_cancel");
+export const swapStatus = () => invoke<SwapStatus | null>("swap_status");
+/** Saves the recovery file as a new file in ~/Downloads: its path. */
+export const swapBackup = () => invoke<string>("swap_backup");
+/** Restores the wallet in a recovery file's text: its address. */
+export const swapRestore = (file: string) => invoke<string>("swap_restore", { file });
+/** Sends the whole spendable balance to `address`: the txid. */
+export const swapWithdraw = (address: string) => invoke<string>("swap_withdraw", { address });

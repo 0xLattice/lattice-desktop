@@ -15,12 +15,15 @@
 //! - `save_backup`: an encrypted wallet backup as a new 0600 text file in
 //!   ~/Downloads (the webview has no downloads of its own).
 //! - `print_page`: the webview's print dialog (it has no `window.print`).
+//! - `swap_*`: buying NEX with BTC, on lattice-swap's native engine (see
+//!   `swap`), its status sent to the page as events.
 //!
 //! On quit the shell stops the node with `lattice down`.
 //!
 //! On Windows the node runs in WSL (see `wsl`): the host root is inside the
 //! default distribution, and the CLI is run there.
 
+mod swap;
 mod wsl;
 
 use serde::Serialize;
@@ -718,6 +721,14 @@ pub fn run() {
                 .and_then(|t| rpc_port(&t).ok())
                 .filter(|p| root.as_deref().is_some_and(|r| node_accepts_cookie(*p, r)));
             app.manage(PinnedPort(Mutex::new(port)));
+            app.manage(swap::Swaps::default());
+            // Swaps that must carry on, resumed on their engine threads.
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = swap::resume_at_launch(&handle) {
+                    eprintln!("lattice-desktop: could not resume swaps: {e}");
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -733,7 +744,20 @@ pub fn run() {
             gpu_worker_usable,
             mine_log,
             save_backup,
-            print_page
+            print_page,
+            swap::swap_settings,
+            swap::swap_set_settings,
+            swap::swap_wallet_exists,
+            swap::swap_wallet_open,
+            swap::swap_balance,
+            swap::swap_need,
+            swap::swap_start,
+            swap::swap_cancel,
+            swap::swap_status,
+            swap::swap_backup,
+            swap::swap_restore,
+            swap::swap_withdraw,
+            swap::swap_offers
         ])
         .build(tauri::generate_context!())
         .expect("error while building the app")

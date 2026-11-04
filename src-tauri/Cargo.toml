@@ -17,5 +17,14 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ureq = { version = "2", default-features = false }
+ureq = { version = "2", default-features = false, features = ["tls"] }
 base64 = "0.22"
+# The buyer's swap engine (lattice-swap's native `swap::app`), pinned by its
+# commit, and the Nexus it names by default. `bitcoin` is the version it uses.
+swap = { git = "https://github.com/0xLattice/lattice-swap", rev = "91f6c94177406a4e20a9d60bcaa6c1b481866332" }
+swap-nexus-tx = { git = "https://github.com/0xLattice/lattice-swap", rev = "91f6c94177406a4e20a9d60bcaa6c1b481866332" }
+bitcoin = { version = "0.32", features = ["serde"] }
+
+[dev-dependencies]
+# Signs an offer for the relay listing's test.
+ed25519-dalek = "2"
