@@ -375,9 +375,10 @@ pub fn show(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
-    app.state::<Background>()
-        .hidden
-        .store(false, Ordering::SeqCst);
+    // A second launch can come before setup has managed the state.
+    if let Some(background) = app.try_state::<Background>() {
+        background.hidden.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Whether closing the window should hide it instead: a swap needs the app.
