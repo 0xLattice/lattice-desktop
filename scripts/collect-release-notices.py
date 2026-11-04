@@ -60,7 +60,11 @@ def main():
     for manifest in [root / 'src-tauri/Cargo.toml', root / '.build-miner-gpu/Cargo.toml']:
         metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--format-version', '1', '--filter-platform', 'aarch64-apple-darwin', '--manifest-path', str(manifest)]))
         for package in metadata['packages']:
-            if package['source']:
+            if package['source'] and package['source'].startswith('git+'):
+                # A crate of a git workspace keeps its license at the repository's root.
+                checkout = next(d for d in Path(package['manifest_path']).parents if (d / '.git').exists())
+                collect(f"Cargo {package['name']} {package['version']}", checkout)
+            elif package['source']:
                 collect(f"Cargo {package['name']} {package['version']}", Path(package['manifest_path']).parent, recursive=True)
 
     # Multiple graphs can refer to the same package. Preserve each distinct notice once.

@@ -52,5 +52,39 @@
   "selectors-0.38.0.txt": [
     "https://github.com/servo/stylo/blob/572ecba2d1600e7c3d490586692a209faf703baa/selectors/lib.rs",
     "https://github.com/spdx/license-list-data/blob/779ef2e5dff6d4af389c53de5e97116ab0bb52e8/text/MPL-2.0.txt"
+  ],
+  "bitcoin-0.32.102.txt": [
+    "https://github.com/rust-bitcoin/rust-bitcoin/blob/ff5dc044d71a3ef8d59b29aa0328ffef9630d6d0/LICENSE"
+  ],
+  "base58ck-0.1.101.txt": [
+    "https://github.com/rust-bitcoin/rust-bitcoin/blob/a010f1e9fd7752ee5e7ca60a909d32a58e0d3297/LICENSE"
+  ],
+  "bitcoin-io-0.1.101.txt": [
+    "https://github.com/rust-bitcoin/rust-bitcoin/blob/a010f1e9fd7752ee5e7ca60a909d32a58e0d3297/LICENSE"
+  ],
+  "bitcoin-units-0.1.101.txt": [
+    "https://github.com/rust-bitcoin/rust-bitcoin/blob/a010f1e9fd7752ee5e7ca60a909d32a58e0d3297/LICENSE"
+  ],
+  "bitcoin_hashes-0.14.101.txt": [
+    "https://github.com/rust-bitcoin/rust-bitcoin/blob/a010f1e9fd7752ee5e7ca60a909d32a58e0d3297/LICENSE"
+  ],
+  "bitcoin-internals-0.7.0.txt": [
+    "https://github.com/rust-bitcoin/rust-bitcoin/blob/a53101246ec046340d0127d520192d00d39d261d/LICENSE"
+  ],
+  "bitcoin-consensus-encoding-1.3.0.txt": [
+    "https://github.com/rust-bitcoin/rust-bitcoin/blob/0cfc7908ff7c7c58e9c61c008c09cb2aeedb82cb/LICENSE"
+  ],
+  "secp256kfun_arithmetic_macros-0.2.0.txt": [
+    "https://github.com/LLFourn/secp256kfun/blob/2cc7300b5042525a9d870cd54a67469dcf93a48f/LICENSE"
+  ],
+  "sigma_fun-0.9.0.txt": [
+    "https://github.com/LLFourn/secp256kfun/blob/2cc7300b5042525a9d870cd54a67469dcf93a48f/LICENSE"
+  ],
+  "vrf_fun-0.12.1.txt": [
+    "https://github.com/LLFourn/secp256kfun/blob/a6bcc51e3c6a87415b367ad25084ef5817d99412/LICENSE"
+  ],
+  "hex_lit-0.1.1.txt": [
+    "https://docs.rs/crate/hex_lit/0.1.1/source/Cargo.toml.orig",
+    "https://github.com/spdx/license-list-data/blob/779ef2e5dff6d4af389c53de5e97116ab0bb52e8/text/MITNFA.txt"
   ]
 }
