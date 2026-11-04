@@ -100,7 +100,8 @@ export const swapCancel = () => invoke<void>("swap_cancel");
 export const swapStatus = () => invoke<SwapStatus | null>("swap_status");
 /** Saves the recovery file as a new file in ~/Downloads: its path. */
 export const swapBackup = () => invoke<string>("swap_backup");
-/** Restores the wallet in a recovery file's text: its address. */
+/** Restores the wallet in a recovery file's text: its address. Refused
+ * until the node runs. */
 export const swapRestore = (file: string) => invoke<string>("swap_restore", { file });
 /** Sends the whole spendable balance to `address`: the txid. */
 export const swapWithdraw = (address: string) => invoke<string>("swap_withdraw", { address });

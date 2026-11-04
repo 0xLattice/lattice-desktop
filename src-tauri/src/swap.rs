@@ -74,7 +74,7 @@ impl Default for Settings {
 }
 
 /// A URL the swap engine may read: https, or plain http only to this
-/// machine.
+/// machine; with a host, and no user name in front of it.
 fn check_url(url: &str) -> Result<()> {
     let refused = || {
         Err(format!(
@@ -84,19 +84,20 @@ fn check_url(url: &str) -> Result<()> {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return refused();
     }
-    if let Some(rest) = url.strip_prefix("https://") {
-        return if rest.is_empty() { refused() } else { Ok(()) };
-    }
-    let Some(rest) = url.strip_prefix("http://") else {
-        return refused();
+    let (secure, rest) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
+        (Some(rest), _) => (true, rest),
+        (None, Some(rest)) => (false, rest),
+        (None, None) => return refused(),
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return refused();
+    }
     let host = match authority.strip_prefix('[') {
         Some(v6) => v6.split(']').next().unwrap_or_default(),
         None => authority.split(':').next().unwrap_or_default(),
     };
-    let loopback = ["127.0.0.1", "localhost", "::1"].contains(&host);
-    if loopback && !authority.contains('@') {
+    if secure || ["127.0.0.1", "localhost", "::1"].contains(&host) {
         Ok(())
     } else {
         refused()
@@ -491,16 +492,53 @@ fn lock(engine: &Mutex<Engine>) -> Result<MutexGuard<'_, Engine>> {
     engine.lock().map_err(err)
 }
 
+/// How long a reopen waits for the wallet's last holder outside the engine
+/// (a balance read, a status read) to let it go.
+const OPEN_PATIENCE: Duration = Duration::from_secs(60);
+
+/// `Wallet::open`, tried again while the wallet is still held elsewhere in
+/// this app, for up to `patience`: a reopen must not lose to a read that
+/// is about to end, or a taken swap would go undriven.
+fn open_wallet(config: &Config, patience: Duration) -> Result<Arc<Wallet>> {
+    let start = Instant::now();
+    loop {
+        match Wallet::open(config.clone()).map_err(err) {
+            Err(e) if e.contains("is open elsewhere") && start.elapsed() < patience => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            opened => return opened,
+        }
+    }
+}
+
+/// The followed swap, while it runs: kept across a reopen even if it has
+/// not taken its offer and is waiting for its funds.
+fn waiting(held: &Engine) -> Option<String> {
+    held.followed
+        .as_ref()
+        .filter(|run| run.active())
+        .map(|run| run.swap_id.clone())
+}
+
 /// The wallet for `config`, opened if it is not and its swaps resumed. One
 /// open for another config (a node on a new port) is closed first, and its
 /// threads waited for off the lock.
 fn open_with(engine: &Mutex<Engine>, config: Config, emit: &Emit) -> Result<Arc<Wallet>> {
-    let detached = {
+    open_patiently(engine, config, emit, OPEN_PATIENCE)
+}
+
+fn open_patiently(
+    engine: &Mutex<Engine>,
+    config: Config,
+    emit: &Emit,
+    patience: Duration,
+) -> Result<Arc<Wallet>> {
+    let (waiting, detached) = {
         let mut held = lock(engine)?;
         if let Some(wallet) = held.serves(&config) {
             return Ok(wallet);
         }
-        held.detach()
+        (waiting(&held), held.detach())
     };
     detached.finish();
     let mut held = lock(engine)?;
@@ -510,8 +548,8 @@ fn open_with(engine: &Mutex<Engine>, config: Config, emit: &Emit) -> Result<Arc<
     if held.wallet.is_some() {
         return Err("refused: the swap wallet was opened meanwhile; try again".into());
     }
-    let wallet = Wallet::open(config).map_err(err)?;
-    held.hold(wallet, None, emit)
+    let wallet = open_wallet(&config, patience)?;
+    held.hold(wallet, waiting, emit)
 }
 
 /// The policy a swap is started under: the amount and the price the buyer
@@ -552,12 +590,7 @@ fn start_with(
 fn restore_with(engine: &Mutex<Engine>, config: Config, file: &str, emit: &Emit) -> Result<String> {
     let (waiting, detached) = {
         let mut held = lock(engine)?;
-        let waiting = held
-            .followed
-            .as_ref()
-            .filter(|run| run.active())
-            .map(|run| run.swap_id.clone());
-        (waiting, held.detach())
+        (waiting(&held), held.detach())
     };
     detached.finish();
     let existed = config.dir.join("wallet.json").exists();
@@ -569,7 +602,7 @@ fn restore_with(engine: &Mutex<Engine>, config: Config, file: &str, emit: &Emit)
         Ok(wallet) => Ok(held.hold(wallet, waiting, emit)?.address().to_string()),
         Err(e) => {
             if existed {
-                if let Ok(wallet) = Wallet::open(config) {
+                if let Ok(wallet) = open_wallet(&config, OPEN_PATIENCE) {
                     let _ = held.hold(wallet, waiting, emit);
                 }
             }
@@ -1067,6 +1100,8 @@ mod tests {
             "http://127.0.0.1.evil.example/api",
             "http://127.0.0.1@evil.example/api",
             "http://user@127.0.0.1/api",
+            "https://user@mempool.space/api",
+            "https://:pass@mempool.space/api",
             "http://localhost.evil.example",
             "http://[::2]:3000",
             "file:///etc/passwd",
@@ -1181,6 +1216,60 @@ mod tests {
         assert_eq!(moved.config().nexus, "http://127.0.0.1:10");
         assert_eq!(followed(&engine), Some(running), "resumed on the new port");
         drop(moved);
+        close(&engine);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reopen_waits_for_a_read_holding_the_wallet() {
+        let dir = temp("held");
+        let running = "88".repeat(32);
+        record(&dir, &running, true, json!({ "Locking": {} }));
+        let (emit, _) = collect();
+        let engine = Mutex::new(Engine::default());
+        let reader = open_with(&engine, offline_at(&dir, 9), &emit).unwrap();
+        // A balance read still holds the wallet when the node moves.
+        let releasing = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            drop(reader);
+        });
+        let moved = open_patiently(
+            &engine,
+            offline_at(&dir, 10),
+            &emit,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(moved.config().nexus, "http://127.0.0.1:10");
+        assert_eq!(
+            followed(&engine),
+            Some(running),
+            "the taken swap is driven again"
+        );
+        releasing.join().unwrap();
+        drop(moved);
+        close(&engine);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reopen_keeps_a_swap_waiting_for_its_funds() {
+        let dir = temp("waiting");
+        let waiting = "99".repeat(32);
+        record(&dir, &waiting, false, json!({ "Start": {} }));
+        let (emit, _) = collect();
+        let engine = Mutex::new(Engine::default());
+        let wallet = open_with(&engine, offline_at(&dir, 9), &emit).unwrap();
+        let run = Run::spawn(
+            wallet.resume(&waiting).unwrap(),
+            Duration::from_millis(100),
+            emit.clone(),
+        )
+        .unwrap();
+        lock(&engine).unwrap().followed = Some(run);
+        drop(wallet);
+        drop(open_with(&engine, offline_at(&dir, 10), &emit).unwrap());
+        assert_eq!(followed(&engine), Some(waiting));
         close(&engine);
         fs::remove_dir_all(dir).unwrap();
     }
