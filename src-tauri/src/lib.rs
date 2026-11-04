@@ -171,9 +171,26 @@ async fn lattice(app: AppHandle, pinned: State<'_, PinnedPort>, verb: String) ->
     if result.code == 0 {
         let mut pin = pinned.0.lock().map_err(err)?;
         let configured = rpc_port(&read_topology_at(&topology_path(&app)?)?).ok();
+        let before = *pin;
         *pin = next_pin(*pin, &verb_name, configured);
+        // The swap wallet reaches NEX on the pinned port: opened on one, and
+        // again on a new one.
+        if pin.is_some() && *pin != before {
+            sync_swaps(&app);
+        }
     }
     Ok(result)
+}
+
+/// Opens the swap wallet on the pinned port, off this thread, its swaps
+/// resumed (see `swap::sync`).
+fn sync_swaps(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = swap::sync(&app) {
+            eprintln!("lattice-desktop: could not resume swaps: {e}");
+        }
+    });
 }
 
 /// The pin after a successful lifecycle verb. `lattice up` against a running
@@ -722,13 +739,9 @@ pub fn run() {
                 .filter(|p| root.as_deref().is_some_and(|r| node_accepts_cookie(*p, r)));
             app.manage(PinnedPort(Mutex::new(port)));
             app.manage(swap::Swaps::default());
-            // Swaps that must carry on, resumed on their engine threads.
-            let handle = handle.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = swap::resume_at_launch(&handle) {
-                    eprintln!("lattice-desktop: could not resume swaps: {e}");
-                }
-            });
+            // Swaps that must carry on, resumed on their engine threads once
+            // the node's port is pinned (here, or at the first `up`).
+            sync_swaps(handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -746,7 +759,7 @@ pub fn run() {
             save_backup,
             print_page,
             swap::swap_settings,
-            swap::swap_set_settings,
+            swap::swap_set_network,
             swap::swap_wallet_exists,
             swap::swap_wallet_open,
             swap::swap_balance,

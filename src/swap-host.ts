@@ -7,8 +7,9 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type SwapNetwork = "bitcoin" | "signet";
 
-/** Where swaps run; an Esplora or relay left out is the default
- * (mempool.space's, and lattice-swap-relay.fly.dev). */
+/** Where swaps run. The page sets only the network; an Esplora or relay
+ * is the operator's, in settings.json (left out: mempool.space's, and
+ * lattice-swap-relay.fly.dev). */
 export interface SwapSettings {
   network: SwapNetwork;
   esplora?: string | null;
@@ -71,16 +72,10 @@ export interface ListedOffer {
   offer: SwapOffer;
 }
 
-/** What the buyer agreed to (`btc_amount`, `price`) and its bounds on the rest. */
-export interface SwapPolicy {
-  btc_amount: number;
-  price: number;
-  [bound: string]: number | null;
-}
-
 /** Events the shell sends: a swap's status each poll and when its run ends,
  * and a failed round of its run, which the shell runs again. Both name the
- * swap: punished swaps resumed to ask for `s` report too. */
+ * swap, and punished swaps resumed to ask for `s` report too: filter by
+ * `swapId`. */
 export const SWAP_STATUS_EVENT = "swap-status";
 export const SWAP_ERROR_EVENT = "swap-error";
 export interface SwapError {
@@ -89,16 +84,18 @@ export interface SwapError {
 }
 
 export const swapSettings = () => invoke<SwapSettings>("swap_settings");
-export const swapSetSettings = (settings: SwapSettings) => invoke<void>("swap_set_settings", { settings });
+export const swapSetNetwork = (network: SwapNetwork) => invoke<void>("swap_set_network", { network });
 export const swapWalletExists = () => invoke<boolean>("swap_wallet_exists");
-/** Opens the swap wallet, made if there is none, and resumes its swaps: its deposit address. */
+/** Opens the swap wallet, made if there is none, and resumes its swaps: its
+ * deposit address. Refused until the node runs. */
 export const swapWalletOpen = () => invoke<string>("swap_wallet_open");
 export const swapBalance = () => invoke<{ confirmed: number; unconfirmed: number }>("swap_balance");
 export const swapNeed = (btcAmount: number) => invoke<{ enough: boolean; need: number }>("swap_need", { btcAmount });
 export const swapOffers = () => invoke<ListedOffer[]>("swap_offers");
-/** Starts a swap of an offer's text: its id. */
-export const swapStart = (offer: string, policy: SwapPolicy, nexAddress: string) =>
-  invoke<string>("swap_start", { offer, policy, nexAddress });
+/** Starts a swap of an offer's text for `btcAmount` sat at `price`: its id.
+ * Every other bound is the engine's default. */
+export const swapStart = (offer: string, btcAmount: number, price: number, nexAddress: string) =>
+  invoke<string>("swap_start", { offer, btcAmount, price, nexAddress });
 export const swapCancel = () => invoke<void>("swap_cancel");
 export const swapStatus = () => invoke<SwapStatus | null>("swap_status");
 /** Saves the recovery file as a new file in ~/Downloads: its path. */
