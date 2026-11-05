@@ -794,7 +794,6 @@ pub fn run() {
             swap::swap_cancel,
             swap::swap_status,
             swap::swap_backup,
-            swap::swap_restore,
             swap::swap_restore_file,
             swap::swap_withdraw,
             swap::swap_offers

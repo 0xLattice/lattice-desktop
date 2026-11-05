@@ -46,3 +46,14 @@ h2.nav-label { margin: 0; font-size: var(--fs-12); text-transform: uppercase; le
 .tree.paying .cols, .tree.paying .chain { grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); align-items: center; }
 .tree.paying .pays { min-width: 0; text-align: right; overflow-wrap: anywhere; }
 .tree.paying .pays select { width: 100%; }
+
+/* The Swap screen (lattice-swap-web's page): its Esplora is the operator's,
+   set in the shell's swap/settings.json, so the page's field for it, and the
+   words about choosing servers, are not shown. */
+.lattice-swap .field:has(#esplora), .lattice-swap .field:has(#esplora) ~ span.small.muted { display: none; }
+/* Nor its calendar reminder (.ics) of a refund's deadline: the app stays in
+   the tray and notifies. Its only link button in such a box. */
+.lattice-swap .box.small.muted > button.link { display: none; }
+/* Nor its restore, whose file would pass through the page: the screen's
+   "Restore from file" has the shell read it. */
+.lattice-swap .field:has(#restore) { display: none; }

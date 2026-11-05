@@ -1,3 +1,6 @@
 [submodule "vendor/nexus-wallet"]
 	path = vendor/nexus-wallet
 	url = https://github.com/adalinxx/selfhold-wallet.git
+[submodule "vendor/lattice-swap-web"]
+	path = vendor/lattice-swap-web
+	url = https://github.com/0xLattice/lattice-swap-web.git
