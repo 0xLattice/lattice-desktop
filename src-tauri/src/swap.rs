@@ -427,6 +427,9 @@ pub struct Engine {
     followed: Option<Run>,
     /// Punished swaps resumed to ask the seller for `s`.
     punished: Vec<Run>,
+    /// Its runs detached to reopen the wallet, not yet held again: what it
+    /// holds says nothing of the swaps.
+    reopening: bool,
 }
 
 impl Engine {
@@ -505,22 +508,41 @@ pub struct Activity {
     pub held: Vec<String>,
     /// The punished swaps resumed to ask for `s`.
     pub punished: Vec<String>,
+    /// With no wallet open (before the node runs), whether the swap wallet
+    /// on disk has a swap to resume: one running or punished. False with a
+    /// wallet open, whose runs say it. None while that is not known: the
+    /// wallet is being reopened, or cannot be read.
+    pub stored: Option<bool>,
 }
 
 impl Engine {
-    fn activity(&self) -> Activity {
+    /// What the engine holds; `wallet_dir` is where the swap wallet is kept,
+    /// read only while none is open.
+    fn activity(&self, wallet_dir: Option<(PathBuf, Network)>) -> Activity {
         let runs = || self.followed.iter().chain(&self.punished);
+        let stored = if self.reopening {
+            None
+        } else if self.wallet.is_some() {
+            Some(false)
+        } else {
+            wallet_dir.and_then(|(dir, network)| has_swaps_to_run(&dir, network).ok())
+        };
         Activity {
             busy: runs().any(Run::busy),
             held: runs().map(|run| run.swap_id.clone()).collect(),
             punished: self.punished.iter().map(|run| run.swap_id.clone()).collect(),
+            stored,
         }
     }
 }
 
 /// What the app's engine holds now.
 pub fn activity(app: &AppHandle) -> Result<Activity> {
-    Ok(lock(&app.state::<Swaps>().0)?.activity())
+    let wallet_dir = app_root(app).ok().and_then(|root| {
+        let network = load_settings(&root).ok()?.network;
+        Some((root.join("swap").join(network.to_string()), network))
+    });
+    Ok(lock(&app.state::<Swaps>().0)?.activity(wallet_dir))
 }
 
 fn lock(engine: &Mutex<Engine>) -> Result<MutexGuard<'_, Engine>> {
@@ -573,10 +595,12 @@ fn open_patiently(
         if let Some(wallet) = held.serves(&config) {
             return Ok(wallet);
         }
+        held.reopening = true;
         (waiting(&held), held.detach())
     };
     detached.finish();
     let mut held = lock(engine)?;
+    held.reopening = false;
     if let Some(wallet) = held.serves(&config) {
         return Ok(wallet);
     }
@@ -625,11 +649,13 @@ fn start_with(
 fn restore_with(engine: &Mutex<Engine>, config: Config, file: &str, emit: &Emit) -> Result<String> {
     let (waiting, detached) = {
         let mut held = lock(engine)?;
+        held.reopening = true;
         (waiting(&held), held.detach())
     };
     detached.finish();
     let existed = config.dir.join("wallet.json").exists();
     let mut held = lock(engine)?;
+    held.reopening = false;
     if held.wallet.is_some() {
         return Err("refused: the swap wallet was opened meanwhile; try again".into());
     }
@@ -646,9 +672,9 @@ fn restore_with(engine: &Mutex<Engine>, config: Config, file: &str, emit: &Emit)
     }
 }
 
-/// The swaps running in the wallet in `dir`, read from its files; none if
-/// it holds no wallet.
-fn running_in(dir: &Path, network: Network) -> Result<Option<String>> {
+/// The wallet in `dir`, opened to read its files; none if it holds no
+/// wallet (none is made).
+fn stored_wallet(dir: &Path, network: Network) -> Result<Option<Arc<Wallet>>> {
     if !dir.join("wallet.json").exists() {
         return Ok(None);
     }
@@ -660,7 +686,25 @@ fn running_in(dir: &Path, network: Network) -> Result<Option<String>> {
         PathBuf::new(),
         String::new(),
     );
-    Wallet::open(config).map_err(err)?.running().map_err(err)
+    Wallet::open(config).map(Some).map_err(err)
+}
+
+/// The swaps running in the wallet in `dir`, read from its files; none if
+/// it holds no wallet.
+fn running_in(dir: &Path, network: Network) -> Result<Option<String>> {
+    match stored_wallet(dir, network)? {
+        Some(wallet) => wallet.running().map_err(err),
+        None => Ok(None),
+    }
+}
+
+/// Whether the wallet in `dir` has a swap to resume once it opens: one
+/// running, or a punished one; read from its files.
+fn has_swaps_to_run(dir: &Path, network: Network) -> Result<bool> {
+    let Some(wallet) = stored_wallet(dir, network)? else {
+        return Ok(false);
+    };
+    Ok(wallet.running().map_err(err)?.is_some() || !wallet.punished().map_err(err)?.is_empty())
 }
 
 /// Sets the network in `<root>/swap/settings.json`, the rest kept. Changing
@@ -898,8 +942,13 @@ pub async fn swap_restore(app: AppHandle, file: String) -> Result<String> {
     .await
 }
 
-/// A recovery file's text, read from `path`: refused past [`MAX_BODY`].
+/// A recovery file's text, read from `path`: refused past [`MAX_BODY`], and
+/// unless it is a regular file.
 fn read_recovery(path: &Path) -> Result<String> {
+    // Not a FIFO or a device, which would block the read or never end.
+    if !fs::metadata(path).map_err(err)?.is_file() {
+        return Err("not a recovery file".into());
+    }
     let mut text = String::new();
     fs::File::open(path)
         .map_err(err)?
@@ -1508,6 +1557,14 @@ mod tests {
         assert_eq!(read_recovery(&path).unwrap_err(), "not a recovery file");
         fs::write(&path, [0xff, 0xfe]).unwrap();
         assert_eq!(read_recovery(&path).unwrap_err(), "not a recovery file", "not text");
+        // A FIFO is refused, not read: the read would wait for a writer.
+        #[cfg(unix)]
+        {
+            let fifo = dir.join("fifo.json");
+            assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+            assert_eq!(read_recovery(&fifo).unwrap_err(), "not a recovery file");
+        }
+        assert!(read_recovery(&dir).is_err(), "a directory");
         assert!(read_recovery(&dir.join("missing.json")).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -1564,9 +1621,9 @@ mod tests {
         record(&dir, &punished, true, json!({ "Punished": {} }));
         let (emit, _) = collect();
         let engine = Mutex::new(Engine::default());
-        assert!(!lock(&engine).unwrap().activity().busy, "nothing held");
+        assert!(!lock(&engine).unwrap().activity(None).busy, "nothing held");
         open_with(&engine, offline(&dir), &emit).unwrap();
-        let activity = lock(&engine).unwrap().activity();
+        let activity = lock(&engine).unwrap().activity(None);
         assert!(activity.busy);
         assert_eq!(activity.held, [running, punished.clone()], "the followed one first");
         assert_eq!(activity.punished, [punished]);
@@ -1578,10 +1635,59 @@ mod tests {
             }
         }
         let deadline = Instant::now() + Duration::from_secs(10);
-        while lock(&engine).unwrap().activity().busy {
+        while lock(&engine).unwrap().activity(None).busy {
             assert!(Instant::now() < deadline, "still busy");
             std::thread::sleep(Duration::from_millis(20));
         }
+        close(&engine);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn before_the_wallet_opens_its_stored_swaps_count() {
+        let dir = temp("stored");
+        let at = || Some((dir.clone(), Network::Signet));
+        let engine = Mutex::new(Engine::default());
+        assert_eq!(lock(&engine).unwrap().activity(at()).stored, Some(false), "no wallet");
+        drop(Wallet::open(offline(&dir)).unwrap());
+        let ended = "56".repeat(32);
+        record(&dir, &ended, true, json!("Done"));
+        assert_eq!(lock(&engine).unwrap().activity(at()).stored, Some(false), "nothing to run");
+        // Taken and not ended, before the node runs and the wallet opens.
+        let running = "57".repeat(32);
+        record(&dir, &running, true, json!({ "Locking": {} }));
+        assert_eq!(lock(&engine).unwrap().activity(at()).stored, Some(true));
+        fs::remove_file(dir.join(format!("{running}.record"))).unwrap();
+        record(&dir, &"58".repeat(32), true, json!({ "Punished": {} }));
+        assert_eq!(lock(&engine).unwrap().activity(at()).stored, Some(true), "punished");
+        // Open, its runs say it.
+        let (emit, _) = collect();
+        let wallet = open_with(&engine, offline(&dir), &emit).unwrap();
+        let activity = lock(&engine).unwrap().activity(at());
+        assert_eq!((activity.stored, activity.busy), (Some(false), true));
+        // Held elsewhere (a reopen's detached wallet): not known.
+        close(&engine);
+        assert_eq!(lock(&engine).unwrap().activity(at()).stored, None, "the wallet is still held");
+        drop(wallet);
+        // Mid-reopen, whatever the disk says: not known.
+        lock(&engine).unwrap().reopening = true;
+        assert_eq!(lock(&engine).unwrap().activity(at()).stored, None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reopen_is_known_until_the_wallet_is_held_again() {
+        let dir = temp("reopening");
+        let (emit, _) = collect();
+        let engine = Mutex::new(Engine::default());
+        drop(open_with(&engine, offline_at(&dir, 9), &emit).unwrap());
+        drop(open_with(&engine, offline_at(&dir, 10), &emit).unwrap());
+        assert!(!lock(&engine).unwrap().reopening, "held again");
+        let file = lock(&engine).unwrap().wallet().unwrap().backup().unwrap().1;
+        restore_with(&engine, offline_at(&dir, 10), &file, &emit).unwrap();
+        assert!(!lock(&engine).unwrap().reopening, "restored");
+        assert!(restore_with(&engine, offline_at(&dir, 10), "not a file", &emit).is_err());
+        assert!(!lock(&engine).unwrap().reopening, "a failed restore too");
         close(&engine);
         fs::remove_dir_all(dir).unwrap();
     }

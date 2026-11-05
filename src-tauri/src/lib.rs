@@ -738,7 +738,7 @@ pub fn run() {
         .on_menu_event(|app, event| background::menu_event(app, event.id().as_ref()))
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if background::close_to_tray(window) {
+                if background::hold_close(window) {
                     api.prevent_close();
                 }
             }

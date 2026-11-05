@@ -2209,6 +2209,7 @@ dependencies = [
  "base64 0.22.1",
  "bitcoin",
  "ed25519-dalek",
+ "objc2",
  "serde",
  "serde_json",
  "swap",

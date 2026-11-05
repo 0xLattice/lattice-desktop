@@ -2,17 +2,21 @@
 //! (see `swap`), so while one is going the app must not stop:
 //!
 //! - **Needs the app:** a swap run is still going (its engine thread, or its
-//!   last status report), or a swap's status says `mustStayOpen`.
-//! - **Tray** (Tauri's `TrayIconBuilder`, the `tray-icon` feature): shown
-//!   only while a swap needs the app, with Open, the swap's status line and
-//!   Quit.
+//!   last status report), a swap's status says `mustStayOpen`, or, before
+//!   the wallet opens, the wallet on disk has a swap to resume. Nothing is
+//!   decided while the wallet is being reopened.
+//! - **Tray** (Tauri's `TrayIconBuilder`, the `tray-icon` feature): built
+//!   the first time a swap needs the app and shown only while one does,
+//!   with Open, the swap's status line and Quit.
 //! - **Close to tray:** closing the window then hides it; Open, the macOS
 //!   dock (`RunEvent::Reopen`) and a second launch (tauri-plugin-single-
 //!   instance) show it again. Once no swap needs the app, a window closed
-//!   this way quits the app as closing it would have.
+//!   this way quits the app as closing it would have. With no tray (Linux
+//!   without an appindicator library), the close asks first, as a quit.
 //! - **Quit confirm:** a quit (the app menu's Quit, Cmd+Q, the tray's Quit,
-//!   or the last window closing) while a swap needs the app is held for a
-//!   native confirm (tauri-plugin-dialog) that names the refund window.
+//!   the last window closing, and on macOS the Dock's Quit, a logout or a
+//!   restart) while a swap needs the app is held for a native confirm
+//!   (tauri-plugin-dialog) that names the refund window.
 //! - **Notifications** (tauri-plugin-notification) at a swap's steps that
 //!   matter, once per swap and step.
 //! - **Launch at login** (tauri-plugin-autostart): on while a swap needs the
@@ -20,6 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -46,6 +51,8 @@ enum Notice {
     Locked,
     /// The swap is cancelled and the BTC refund is under way.
     Refunding,
+    /// The seller took the BTC; the NEX is asked for.
+    Punished,
     Refunded,
     /// The NEX has arrived.
     Received,
@@ -65,6 +72,10 @@ impl Notice {
             Notice::Refunding => (
                 "Swap cancelled",
                 "Refunding your BTC. Keep Lattice running until the refund confirms.",
+            ),
+            Notice::Punished => (
+                "Swap punished",
+                "The seller took the BTC. Keep Lattice running: it is asking the seller for your NEX.",
             ),
             Notice::Refunded => ("BTC refunded", "Your BTC is back in your swap wallet."),
             Notice::Received => ("NEX received", "Your swap is complete."),
@@ -92,6 +103,7 @@ fn notice(status: &Value, punished: bool) -> Option<Notice> {
         (_, Some("swapped")) => Some(Notice::Received),
         (_, Some("drained")) if punished => Some(Notice::Unrecovered),
         (_, Some("refunded")) => Some(Notice::Refunded),
+        (_, Some("punished")) => Some(Notice::Punished),
         ("refunding", _) => Some(Notice::Refunding),
         ("swapping" | "finishing", _) if locked && !punished => Some(Notice::Locked),
         _ => None,
@@ -192,12 +204,14 @@ impl Tracker {
     }
 
     /// What the engine holds now: whether a swap needs the app, if that has
-    /// changed. Statuses of swaps no longer held are dropped.
+    /// changed. Statuses of swaps no longer held are dropped. Nothing is
+    /// decided while the engine cannot say (a reopen).
     fn look(&mut self, activity: &Activity) -> Option<bool> {
         self.last.retain(|id, _| activity.held.contains(id));
         self.punished.extend(activity.punished.iter().cloned());
         self.followed = activity.held.first().cloned();
-        let needs = needs_app(activity.busy, &self.last);
+        let stored = activity.stored?;
+        let needs = needs_app(activity.busy || stored, &self.last);
         (self.needs != Some(needs)).then(|| {
             self.needs = Some(needs);
             needs
@@ -255,6 +269,23 @@ fn launch_at_login(launch: &dyn LoginLaunch, marker: &Path, needs: bool) -> Resu
     Ok(())
 }
 
+/// [`launch_at_login`] at each look: when the decision `changed`, and again
+/// each look while a swap `needs` the app and the last try failed (`retry`).
+fn launch_tick(
+    launch: &dyn LoginLaunch,
+    marker: &Path,
+    changed: Option<bool>,
+    needs: bool,
+    retry: &AtomicBool,
+) -> Result<()> {
+    if changed.is_none() && !(needs && retry.load(Ordering::SeqCst)) {
+        return Ok(());
+    }
+    let tried = launch_at_login(launch, marker, needs);
+    retry.store(tried.is_err() && needs, Ordering::SeqCst);
+    tried
+}
+
 fn marker_path(app: &AppHandle) -> Result<PathBuf> {
     Ok(app_root(app)?.join("swap").join("launch-at-login"))
 }
@@ -271,18 +302,63 @@ pub struct Background {
     asking: AtomicBool,
     /// The user confirmed a quit: the exit goes through.
     confirmed: AtomicBool,
+    /// Launch at login failed to turn on: tried again each look.
+    retry_launch: AtomicBool,
     tracker: Mutex<Tracker>,
-    tray: OnceLock<(TrayIcon, MenuItem<Wry>)>,
+    /// The tray and its status line, built the first time a swap needs the
+    /// app; None if it could not be built.
+    tray: OnceLock<Option<(TrayIcon, MenuItem<Wry>)>>,
+}
+
+/// What closing the window does.
+#[derive(Debug, PartialEq)]
+enum Close {
+    /// Closes, as it always has: no swap needs the app.
+    Go,
+    /// Hides the window, to be shown again from the tray.
+    Hide,
+    /// Asks first, as a quit does: no tray to show the window again from.
+    Confirm,
+}
+
+fn on_close(needs: bool, tray: bool) -> Close {
+    match (needs, tray) {
+        (false, _) => Close::Go,
+        (true, true) => Close::Hide,
+        (true, false) => Close::Confirm,
+    }
+}
+
+/// Whether an exit waits for the user's confirm.
+fn holds_exit(needs: bool, confirmed: bool) -> bool {
+    needs && !confirmed
 }
 
 /// The ids of the tray's and the app menu's items.
 const OPEN: &str = "open";
 const QUIT: &str = "quit";
 
-/// The tray, hidden until a swap needs the app, and the thread that watches
-/// the engine. Managed before any swap can report.
+/// The background state, and the thread that watches the engine. Managed
+/// before any swap can report.
 pub fn start(app: &AppHandle) -> Result<()> {
     app.manage(Background::default());
+    #[cfg(target_os = "macos")]
+    if let Err(e) = terminate::install(app) {
+        eprintln!("lattice-desktop: the Dock's Quit is not held: {e}");
+    }
+    let app = app.clone();
+    std::thread::Builder::new()
+        .name("swap background".into())
+        .spawn(move || loop {
+            look(&app);
+            std::thread::sleep(TICK);
+        })
+        .map_err(err)?;
+    Ok(())
+}
+
+/// The tray: Open, the swap's status line, Quit.
+fn make_tray(app: &AppHandle) -> Result<(TrayIcon, MenuItem<Wry>)> {
     let status = MenuItem::new(app, "Swap in progress", false, None::<&str>).map_err(err)?;
     let menu = Menu::with_items(
         app,
@@ -300,19 +376,37 @@ pub fn start(app: &AppHandle) -> Result<()> {
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
-    let tray = tray.build(app).map_err(err)?;
-    tray.set_visible(false).map_err(err)?;
-    let _ = app.state::<Background>().tray.set((tray, status));
+    Ok((tray.build(app).map_err(err)?, status))
+}
 
+/// Builds the tray on the main thread, once. On Linux, building it panics
+/// when no appindicator library is installed: then there is no tray, and a
+/// close asks first instead of hiding the window.
+fn build_tray(app: &AppHandle) {
     let app = app.clone();
-    std::thread::Builder::new()
-        .name("swap background".into())
-        .spawn(move || loop {
-            look(&app);
-            std::thread::sleep(TICK);
-        })
-        .map_err(err)?;
-    Ok(())
+    let built = app.clone().run_on_main_thread(move || {
+        let background = app.state::<Background>();
+        if background.tray.get().is_some() {
+            return;
+        }
+        let tray = catch_unwind(AssertUnwindSafe(|| make_tray(&app)))
+            .unwrap_or_else(|_| Err("building it panicked".into()));
+        let tray = match tray {
+            Ok((tray, status)) => {
+                // The swap may have stopped needing the app meanwhile.
+                let _ = tray.set_visible(background.needs.load(Ordering::SeqCst));
+                Some((tray, status))
+            }
+            Err(e) => {
+                eprintln!("lattice-desktop: no tray: {e}");
+                None
+            }
+        };
+        let _ = background.tray.set(tray);
+    });
+    if let Err(e) = built {
+        eprintln!("lattice-desktop: no tray: {e}");
+    }
 }
 
 /// A look at the engine: the tray, launch at login and a hidden window
@@ -323,30 +417,42 @@ fn look(app: &AppHandle) {
         Err(e) => return eprintln!("lattice-desktop: swap activity: {e}"),
     };
     let background = app.state::<Background>();
-    let (changed, line) = {
+    let (changed, needs, line) = {
         let Ok(mut tracker) = background.tracker.lock() else {
             return;
         };
-        (tracker.look(&activity), tracker.line())
+        let changed = tracker.look(&activity);
+        (changed, tracker.needs == Some(true), tracker.line())
     };
-    if let Some((tray, status)) = background.tray.get() {
-        let _ = status.set_text(&line);
-        if let Some(needs) = changed {
-            let _ = tray.set_visible(needs);
-        }
+    if changed.is_some() {
+        background.needs.store(needs, Ordering::SeqCst);
     }
-    let Some(needs) = changed else {
-        return;
-    };
-    background.needs.store(needs, Ordering::SeqCst);
-    let launch =
-        marker_path(app).and_then(|marker| launch_at_login(&*app.autolaunch(), &marker, needs));
+    match background.tray.get() {
+        Some(Some((tray, status))) => {
+            let _ = status.set_text(&line);
+            if changed.is_some() {
+                let _ = tray.set_visible(needs);
+            }
+        }
+        Some(None) => {}
+        None if needs => build_tray(app),
+        None => {}
+    }
+    let launch = marker_path(app).and_then(|marker| {
+        launch_tick(
+            &*app.autolaunch(),
+            &marker,
+            changed,
+            needs,
+            &background.retry_launch,
+        )
+    });
     if let Err(e) = launch {
         eprintln!("lattice-desktop: launch at login: {e}");
     }
     // The window was closed while a swap needed the app: that close now
     // goes through.
-    if !needs && background.hidden.load(Ordering::SeqCst) {
+    if changed == Some(false) && background.hidden.load(Ordering::SeqCst) {
         app.exit(0);
     }
 }
@@ -381,23 +487,31 @@ pub fn show(app: &AppHandle) {
     }
 }
 
-/// Whether closing the window should hide it instead: a swap needs the app.
-/// The window is then hidden.
-pub fn close_to_tray(window: &tauri::Window) -> bool {
+/// Whether closing the window is held: while a swap needs the app, the
+/// window is hidden to the tray, or with no tray the close asks first, as a
+/// quit does.
+pub fn hold_close(window: &tauri::Window) -> bool {
     let background = window.state::<Background>();
-    if !background.needs.load(Ordering::SeqCst) {
-        return false;
+    let tray = matches!(background.tray.get(), Some(Some(_)));
+    match on_close(background.needs.load(Ordering::SeqCst), tray) {
+        Close::Go => false,
+        Close::Hide => {
+            background.hidden.store(true, Ordering::SeqCst);
+            let _ = window.hide();
+            true
+        }
+        Close::Confirm => hold_exit(window.app_handle()),
     }
-    background.hidden.store(true, Ordering::SeqCst);
-    let _ = window.hide();
-    true
 }
 
 /// Whether an exit must wait for the user: a swap needs the app and no quit
 /// was confirmed. If so, the confirm is asked; a confirmed one exits.
 pub fn hold_exit(app: &AppHandle) -> bool {
     let background = app.state::<Background>();
-    if background.confirmed.load(Ordering::SeqCst) || !background.needs.load(Ordering::SeqCst) {
+    if !holds_exit(
+        background.needs.load(Ordering::SeqCst),
+        background.confirmed.load(Ordering::SeqCst),
+    ) {
         return false;
     }
     if background.asking.swap(true, Ordering::SeqCst) {
@@ -464,6 +578,60 @@ pub fn app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     Ok(menu)
 }
 
+/// The Dock's Quit, a logout and a restart send `terminate:`, which tao
+/// lets through at once (its app delegate has no
+/// `applicationShouldTerminate:`). This adds that method to tao's delegate,
+/// as an AppKit app holds a quit: `NSTerminateCancel` while the exit is
+/// held, the confirm then asked; a confirmed quit exits as Quit does.
+#[cfg(target_os = "macos")]
+mod terminate {
+    use std::sync::OnceLock;
+
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::{class, msg_send, sel};
+    use tauri::AppHandle;
+
+    use crate::Result;
+
+    static APP: OnceLock<AppHandle> = OnceLock::new();
+
+    /// `NSApplicationTerminateReply`.
+    const CANCEL: usize = 0;
+    const NOW: usize = 1;
+
+    extern "C-unwind" fn should_terminate(_: &AnyObject, _: Sel, _: *mut AnyObject) -> usize {
+        match APP.get() {
+            Some(app) if super::hold_exit(app) => CANCEL,
+            _ => NOW,
+        }
+    }
+
+    /// Adds `applicationShouldTerminate:` to the app delegate's class. On
+    /// the main thread, once the event loop has set the delegate (setup).
+    pub fn install(app: &AppHandle) -> Result<()> {
+        let _ = APP.set(app.clone());
+        unsafe {
+            let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let delegate: *mut AnyObject = msg_send![ns_app, delegate];
+            let delegate = delegate.as_ref().ok_or("no app delegate")?;
+            let imp: Imp = std::mem::transmute(
+                should_terminate as extern "C-unwind" fn(&AnyObject, Sel, *mut AnyObject) -> usize,
+            );
+            let class = delegate.class() as *const AnyClass as *mut AnyClass;
+            let added = objc2::ffi::class_addMethod(
+                class,
+                sel!(applicationShouldTerminate:),
+                imp,
+                c"Q@:@".as_ptr(),
+            );
+            if !added.as_bool() {
+                return Err("the app delegate already answers applicationShouldTerminate:".into());
+            }
+        }
+        Ok(())
+    }
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -474,7 +642,7 @@ fn now() -> u64 {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     fn status(id: &str, step: &str, outcome: Option<&str>, funding: Option<u64>) -> Value {
         json!({
@@ -493,7 +661,66 @@ mod tests {
             busy,
             held: held.iter().map(|id| id.to_string()).collect(),
             punished: punished.iter().map(|id| id.to_string()).collect(),
+            stored: Some(false),
         }
+    }
+
+    #[test]
+    fn a_stored_swap_needs_the_app_and_a_reopen_decides_nothing() {
+        // At launch, before the node runs and the wallet opens: a swap on
+        // disk to resume needs the app; the first look does not say no.
+        let mut tracker = Tracker::default();
+        let before_open = Activity {
+            stored: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(tracker.look(&before_open), Some(true));
+        // Mid-reopen the engine holds nothing: nothing is decided.
+        let reopening = Activity {
+            stored: None,
+            ..Default::default()
+        };
+        assert_eq!(tracker.look(&reopening), None);
+        assert_eq!(tracker.needs, Some(true));
+        assert_eq!(
+            tracker.look(&activity(true, &["a"], &[])),
+            None,
+            "held again"
+        );
+        assert_eq!(tracker.look(&activity(false, &[], &[])), Some(false));
+        // Not known at the first look: undecided, not no.
+        let mut tracker = Tracker::default();
+        assert_eq!(tracker.look(&reopening), None);
+        assert_eq!(tracker.needs, None);
+    }
+
+    #[test]
+    fn the_page_gets_no_tray_permission() {
+        // `core:default` takes in `core:tray:default` with the `tray-icon`
+        // feature; the tray is the shell's own.
+        let capability: Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let permissions = capability["permissions"].as_array().unwrap();
+        assert!(permissions.iter().all(|p| {
+            let p = p.as_str().unwrap();
+            p != "core:default" && !p.starts_with("core:tray")
+        }));
+        assert!(permissions.contains(&json!("core:event:default")));
+    }
+
+    #[test]
+    fn a_close_hides_to_the_tray_or_with_none_asks_first() {
+        assert_eq!(on_close(false, true), Close::Go);
+        assert_eq!(on_close(false, false), Close::Go);
+        assert_eq!(on_close(true, true), Close::Hide);
+        assert_eq!(
+            on_close(true, false),
+            Close::Confirm,
+            "never hidden with no way back"
+        );
+        assert!(holds_exit(true, false));
+        assert!(!holds_exit(true, true), "a confirmed quit goes through");
+        assert!(!holds_exit(false, false));
     }
 
     #[test]
@@ -586,8 +813,12 @@ mod tests {
             tracker.report(&status("p", "done", Some("swapped"), None)),
             Some(Notice::Recovered)
         );
-        // Punished in this session: known from its status.
+        // Punished in this session: known from its status, and said.
         let mut tracker = Tracker::default();
+        assert_eq!(
+            tracker.report(&status("q", "done", Some("punished"), None)),
+            Some(Notice::Punished)
+        );
         assert_eq!(
             tracker.report(&status("q", "done", Some("punished"), None)),
             None
@@ -644,7 +875,7 @@ mod tests {
     #[derive(Default)]
     struct FakeLaunch {
         on: RefCell<bool>,
-        fail: bool,
+        fail: Cell<bool>,
     }
 
     impl LoginLaunch for FakeLaunch {
@@ -652,7 +883,7 @@ mod tests {
             Ok(*self.on.borrow())
         }
         fn enable(&self) -> Result<()> {
-            if self.fail {
+            if self.fail.get() {
                 return Err("refused".into());
             }
             *self.on.borrow_mut() = true;
@@ -687,14 +918,14 @@ mod tests {
         launch_at_login(&launch, &marker, true).unwrap();
         let relaunched = FakeLaunch {
             on: RefCell::new(true),
-            fail: false,
+            fail: Cell::new(false),
         };
         launch_at_login(&relaunched, &marker, false).unwrap();
         assert!(!relaunched.is_enabled().unwrap());
 
         // An enable that fails leaves no marker behind.
         let failing = FakeLaunch {
-            fail: true,
+            fail: Cell::new(true),
             ..Default::default()
         };
         assert!(launch_at_login(&failing, &marker, true).is_err());
@@ -703,11 +934,39 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_enable_is_tried_again_each_look_while_needed() {
+        let marker = marker("retry");
+        let launch = FakeLaunch {
+            fail: Cell::new(true),
+            ..Default::default()
+        };
+        let retry = AtomicBool::new(false);
+        assert!(launch_tick(&launch, &marker, Some(true), true, &retry).is_err());
+        assert!(retry.load(Ordering::SeqCst));
+        // Still failing: tried again, still pending.
+        assert!(launch_tick(&launch, &marker, None, true, &retry).is_err());
+        launch.fail.set(false);
+        launch_tick(&launch, &marker, None, true, &retry).unwrap();
+        assert!(launch.is_enabled().unwrap() && !retry.load(Ordering::SeqCst));
+        // Nothing pending, nothing changed: not touched.
+        *launch.on.borrow_mut() = false;
+        launch_tick(&launch, &marker, None, true, &retry).unwrap();
+        assert!(!launch.is_enabled().unwrap());
+        // No longer needed: no retry.
+        launch.fail.set(true);
+        let _ = fs::remove_file(&marker);
+        assert!(launch_tick(&launch, &marker, Some(true), true, &retry).is_err());
+        launch_tick(&launch, &marker, Some(false), false, &retry).unwrap();
+        assert!(!retry.load(Ordering::SeqCst));
+        fs::remove_dir_all(marker.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn launch_at_login_the_user_turned_on_is_left_on() {
         let marker = marker("users");
         let launch = FakeLaunch {
             on: RefCell::new(true),
-            fail: false,
+            fail: Cell::new(false),
         };
         launch_at_login(&launch, &marker, true).unwrap();
         assert!(!marker.exists(), "not ours");

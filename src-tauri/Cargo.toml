@@ -29,6 +29,10 @@ tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 
+# Holds the Dock's Quit (see `background::terminate`); the version tao uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
 [dev-dependencies]
 # Signs an offer for the relay listing's test.
 ed25519-dalek = "2"
