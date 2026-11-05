@@ -101,7 +101,13 @@ export const swapStatus = () => invoke<SwapStatus | null>("swap_status");
 /** Saves the recovery file as a new file in ~/Downloads: its path. */
 export const swapBackup = () => invoke<string>("swap_backup");
 /** Restores the wallet in a recovery file's text: its address. Refused
- * until the node runs. */
+ * until the node runs.
+ * @deprecated Use `swapRestoreFile`: its file is read in the shell, so the
+ * wallet key never passes through the page. */
 export const swapRestore = (file: string) => invoke<string>("swap_restore", { file });
+/** Restores the wallet in a recovery file the user picks in a native open
+ * dialog, read by the shell: its address, or null when none is picked.
+ * Refused until the node runs. */
+export const swapRestoreFile = () => invoke<string | null>("swap_restore_file");
 /** Sends the whole spendable balance to `address`: the txid. */
 export const swapWithdraw = (address: string) => invoke<string>("swap_withdraw", { address });

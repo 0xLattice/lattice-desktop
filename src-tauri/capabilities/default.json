@@ -1,7 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: core IPC only. App commands are the shell's own (lattice lifecycle, files under Lattice/, loopback node HTTP).",
+  "description": "The main window: core IPC only, without the tray (the shell's own). App commands are the shell's own (lattice lifecycle, files under Lattice/, loopback node HTTP).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:path:default",
+    "core:event:default",
+    "core:window:default",
+    "core:webview:default",
+    "core:app:default",
+    "core:image:default",
+    "core:resources:default",
+    "core:menu:default"
+  ]
 }
