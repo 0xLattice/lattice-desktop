@@ -4,7 +4,7 @@
 // page's only network reach is the host's loopback-only node HTTP. The host
 // is the Tauri shell in the app, and a Node harness in the end-to-end tests.
 
-import { startWallet } from "../vendor/nexus-wallet/src/popup/app.ts";
+import { h, render, startWallet } from "../vendor/nexus-wallet/src/popup/app.ts";
 import { createSigner, type VaultStorage } from "../vendor/nexus-wallet/src/lib/wallet/signer.ts";
 import { walletClient } from "../vendor/nexus-wallet/src/lib/wallet/client.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
@@ -156,6 +156,19 @@ export async function startApp(host: AppHost) {
       {
         label: "Mining", on: "home",
         run: (back) => miningScreen(manager, reads, (saved) => (saved ? nodeScreen(manager, reads, back, host.reload, saved) : back()), host.reload),
+      },
+      // Buying NEX with BTC, its NEX to the account in use unless changed.
+      // Loaded when opened: its screens are Preact (.tsx), which the Node
+      // harness that runs this file does not load.
+      {
+        label: "Swap", on: "home",
+        run: (back) => {
+          Promise.all([reads.accounts(), import("./swap-screen.ts")])
+            .then(([accounts, { swapScreen }]) => swapScreen(accounts[0]?.address ?? null, back))
+            .then(render, (e: Error) => render(h("div", { class: "stack" },
+              h("p", { class: "warn", role: "alert" }, e.message),
+              h("button", { class: "btn block", onclick: () => back() }, "Back"))));
+        },
       },
       // The node itself is set up once and left alone: it is in Settings.
       // Its row in Settings says what the node is doing, so checking on it needs no second page.

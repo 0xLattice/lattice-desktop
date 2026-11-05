@@ -14,7 +14,9 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.12.1"
+    "@tauri-apps/api": "2.12.1",
+    "preact": "10.29.8",
+    "qrcode-generator": "1.4.4"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.1",

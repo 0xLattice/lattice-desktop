@@ -1069,6 +1069,16 @@ mod tests {
     use super::*;
     use swap::offer::{Bounds, Place, Policy, Quote, Template};
 
+    /// The page's driver lists offers for the Nexus this engine runs on, and
+    /// shows the relay it reads when the settings name none.
+    #[test]
+    fn the_page_names_this_engines_nexus_and_relay() {
+        let driver = include_str!("../../src/swap-driver/index.ts");
+        assert!(driver.contains(&format!("\"{}\"", swap_nexus_tx::MAINNET_GENESIS)));
+        let screen = include_str!("../../src/swap-screen.ts");
+        assert!(screen.contains(&format!("\"{DEFAULT_RELAY}\"")));
+    }
+
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lattice-swap-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
