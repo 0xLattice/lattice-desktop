@@ -922,20 +922,6 @@ pub async fn swap_backup(app: AppHandle) -> Result<String> {
     .await
 }
 
-/// The wallet in the recovery `file`: its address. Superseded by
-/// [`swap_restore_file`], which keeps the file's key out of the page.
-#[tauri::command]
-pub async fn swap_restore(app: AppHandle, file: String) -> Result<String> {
-    if file.len() as u64 > MAX_BODY {
-        return Err("not a recovery file".into());
-    }
-    blocking(app, move |app, engine| {
-        let settings = load_settings(&app_root(app)?)?;
-        restore_with(engine, config(app, &settings)?, &file, &emitter(app))
-    })
-    .await
-}
-
 /// A recovery file's text, read from `path`: refused past [`MAX_BODY`], and
 /// unless it is a regular file.
 fn read_recovery(path: &Path) -> Result<String> {
@@ -1079,8 +1065,13 @@ mod tests {
         assert!(screen.contains(&format!("\"{DEFAULT_RELAY}\"")));
     }
 
+    /// A fresh directory of its own: named for the test, this process, and
+    /// a count, so no two tests, nor two runs of one, ever share it.
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lattice-swap-{name}-{}", std::process::id()));
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNT.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("lattice-swap-{name}-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

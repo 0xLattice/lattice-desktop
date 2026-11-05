@@ -1,6 +1,8 @@
 // The Swap screen: lattice-swap-web's page (its `App`), its driver aliased to
 // src/swap-driver over the shell's swap engine, with the one swap setting the
-// page may change, the Bitcoin network, above it. The Esplora and the relay
+// page may change, the Bitcoin network, and a restore from a recovery file
+// the shell reads (the page's own file input is hidden: its file's key would
+// pass through the page), above it. The Esplora and the relay
 // are the operator's (the shell's swap/settings.json), so the page's own
 // Esplora field is hidden (desktop.css), and NEX is read on this app's node.
 
@@ -10,7 +12,7 @@ import type { AppConfig } from "../vendor/lattice-swap-web/src/config.ts";
 import "../vendor/lattice-swap-web/src/style.css";
 import { h } from "../vendor/nexus-wallet/src/popup/app.ts";
 import { connecting, SAVED_BY_SHELL } from "./swap-driver/index.ts";
-import { swapSetNetwork, swapSettings, type SwapNetwork } from "./swap-host.ts";
+import { swapRestoreFile, swapSetNetwork, swapSettings, type SwapNetwork } from "./swap-host.ts";
 
 /** The relay the shell lists offers from when its settings name none
  * (swap.rs's `DEFAULT_RELAY`): shown only. */
@@ -88,14 +90,30 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
       show(network);
     } catch (e) {
       picker.value = settings.network;
-      note.textContent = (e as Error).message;
+      note.textContent = e instanceof Error ? e.message : String(e);
       return;
     }
     settings.network = network;
   });
 
+  const restore = h("button", { class: "btn" }, "Restore from file") as HTMLButtonElement;
+  restore.addEventListener("click", async () => {
+    note.textContent = "";
+    restore.disabled = true;
+    try {
+      const address = await swapRestoreFile();
+      if (address !== null) {
+        show(settings.network);
+        note.textContent = `Restored the wallet ${address}`;
+      }
+    } catch (e) {
+      note.textContent = e instanceof Error ? e.message : String(e);
+    }
+    restore.disabled = false;
+  });
+
   const screen = h("div", { class: "stack swap-screen" },
-    h("div", { class: "node-head" }, h("h1", {}, "Swap"), picker),
+    h("div", { class: "node-head" }, h("h1", {}, "Swap"), h("div", { class: "row-actions" }, picker, restore)),
     note,
     page,
     h("button", { class: "btn block", onclick: () => { leave(); back(); } }, "Back"),

@@ -6,7 +6,7 @@
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
-  SWAP_ERROR_EVENT, SWAP_STATUS_EVENT, swapBackup, swapBalance, swapCancel, swapNeed, swapOffers, swapRestore,
+  SWAP_ERROR_EVENT, SWAP_STATUS_EVENT, swapBackup, swapBalance, swapCancel, swapNeed, swapOffers,
   swapStart, swapStatus, swapWalletExists, swapWalletOpen, swapWithdraw,
   type SwapError, type SwapOffer, type SwapStatus,
 } from "../swap-host.ts";
@@ -99,8 +99,10 @@ export class Wallet {
     return new Wallet(await failed(swapWalletOpen()));
   }
 
-  static async restore(_config: unknown, file: string): Promise<Wallet> {
-    return new Wallet(await failed(swapRestore(file)));
+  /** Refused: a recovery file is read by the shell (`swapRestoreFile`, the
+   * screen's "Restore from file"), so its key never passes through the page. */
+  static async restore(_config: unknown, _file: string): Promise<Wallet> {
+    throw new Error("refused: restore with Restore from file, above");
   }
 
   balance() {

@@ -305,6 +305,50 @@ test("the reminder (.ics) is not offered: the app notifies from the tray", async
   assert.equal(window.getComputedStyle(reminder).display, "none");
 });
 
+test("a wallet is restored only from a file the shell reads", async (t) => {
+  const picks: (string | null)[] = [null, "refused: the file is for bitcoin, not signet", "tb1qrestored"];
+  const { window, doc, calls, text, button, mount, settle } = await page(t, (cmd) => {
+    if (cmd !== "swap_restore_file") return undefined;
+    const pick = picks.shift()!;
+    if (pick !== null && pick.startsWith("refused")) throw pick;
+    return pick;
+  });
+  const style = doc.createElement("style");
+  style.textContent = readFileSync(new URL("../src/desktop.css", import.meta.url), "utf8");
+  doc.head.append(style);
+  await mount();
+  // The page's own file input, whose file the page would read, is not shown.
+  button("Settings").click();
+  await until("the settings", () => !!doc.querySelector("input#restore"));
+  const field = doc.querySelector("input#restore")!.closest(".field")!;
+  assert.equal(window.getComputedStyle(field).display, "none");
+
+  // Were it reached, the page's restore would hand the file's text to the
+  // shim, which refuses it: no key leaves for the shell from the page.
+  const input = doc.querySelector("input#restore") as HTMLInputElement;
+  const file = new window.File(['{"wallet":"cV"}'], "lattice-swap.json");
+  // jsdom's File has no text().
+  Object.defineProperty(file, "text", { value: async () => '{"wallet":"cV"}' });
+  Object.defineProperty(input, "files", { value: [file] });
+  input.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await until("the shim's refusal", () => text().includes("refused: restore with Restore from file, above"));
+
+  // No file picked: nothing happens.
+  button("Restore from file").click();
+  await settle();
+  assert.equal(calls.filter(([cmd]) => cmd === "swap_restore_file").length, 1);
+  assert.ok(doc.querySelector("input#restore"));
+  // Refused: the shell's words.
+  button("Restore from file").click();
+  await until("the refusal", () => text().includes("refused: the file is for bitcoin, not signet"));
+  // Restored: the page starts again on the restored wallet.
+  const opened = calls.filter(([cmd]) => cmd === "swap_wallet_open").length;
+  button("Restore from file").click();
+  await until("restored", () => text().includes("Restored the wallet tb1qrestored"));
+  await until("the page again", () => !doc.querySelector("input#restore") && calls.filter(([cmd]) => cmd === "swap_wallet_open").length > opened);
+  assert.ok(!calls.some(([cmd]) => cmd === "swap_restore"));
+});
+
 test("isCid spells a CID as swap_nexus_tx::is_cid does", async () => {
   const dom = new JSDOM(``, { runScripts: "outside-only" });
   dom.window.eval(await bundle());

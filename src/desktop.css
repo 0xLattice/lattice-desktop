@@ -54,3 +54,6 @@ h2.nav-label { margin: 0; font-size: var(--fs-12); text-transform: uppercase; le
 /* Nor its calendar reminder (.ics) of a refund's deadline: the app stays in
    the tray and notifies. Its only link button in such a box. */
 .lattice-swap .box.small.muted > button.link { display: none; }
+/* Nor its restore, whose file would pass through the page: the screen's
+   "Restore from file" has the shell read it. */
+.lattice-swap .field:has(#restore) { display: none; }
