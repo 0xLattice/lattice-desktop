@@ -509,7 +509,8 @@ pub struct Activity {
     /// The punished swaps resumed to ask for `s`.
     pub punished: Vec<String>,
     /// With no wallet open (before the node runs), whether the swap wallet
-    /// on disk has a swap to resume: one running or punished. False with a
+    /// on disk has a running swap to resume (not a punished one: its ask
+    /// can wait for the next start). False with a
     /// wallet open, whose runs say it. None while that is not known: the
     /// wallet is being reopened, or cannot be read.
     pub stored: Option<bool>,
@@ -525,7 +526,9 @@ impl Engine {
         } else if self.wallet.is_some() {
             Some(false)
         } else {
-            wallet_dir.and_then(|(dir, network)| has_swaps_to_run(&dir, network).ok())
+            wallet_dir.and_then(|(dir, network)| {
+                running_in(&dir, network).ok().map(|id| id.is_some())
+            })
         };
         Activity {
             busy: runs().any(Run::busy),
@@ -696,15 +699,6 @@ fn running_in(dir: &Path, network: Network) -> Result<Option<String>> {
         Some(wallet) => wallet.running().map_err(err),
         None => Ok(None),
     }
-}
-
-/// Whether the wallet in `dir` has a swap to resume once it opens: one
-/// running, or a punished one; read from its files.
-fn has_swaps_to_run(dir: &Path, network: Network) -> Result<bool> {
-    let Some(wallet) = stored_wallet(dir, network)? else {
-        return Ok(false);
-    };
-    Ok(wallet.running().map_err(err)?.is_some() || !wallet.punished().map_err(err)?.is_empty())
 }
 
 /// Sets the network in `<root>/swap/settings.json`, the rest kept. Changing
@@ -1659,7 +1653,11 @@ mod tests {
         assert_eq!(lock(&engine).unwrap().activity(at()).stored, Some(true));
         fs::remove_file(dir.join(format!("{running}.record"))).unwrap();
         record(&dir, &"58".repeat(32), true, json!({ "Punished": {} }));
-        assert_eq!(lock(&engine).unwrap().activity(at()).stored, Some(true), "punished");
+        assert_eq!(
+            lock(&engine).unwrap().activity(at()).stored,
+            Some(false),
+            "a punished one alone does not hold the app"
+        );
         // Open, its runs say it.
         let (emit, _) = collect();
         let wallet = open_with(&engine, offline(&dir), &emit).unwrap();

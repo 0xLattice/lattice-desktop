@@ -28,7 +28,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -51,15 +51,14 @@ enum Notice {
     Locked,
     /// The swap is cancelled and the BTC refund is under way.
     Refunding,
-    /// The seller took the BTC; the NEX is asked for.
+    /// The seller took the BTC; the NEX was asked for, and is again at
+    /// each start.
     Punished,
     Refunded,
     /// The NEX has arrived.
     Received,
     /// A punished swap got its NEX after all.
     Recovered,
-    /// A punished swap could not get its NEX: the lock was already spent.
-    Unrecovered,
 }
 
 impl Notice {
@@ -75,17 +74,13 @@ impl Notice {
             ),
             Notice::Punished => (
                 "Swap punished",
-                "The seller took the BTC. Keep Lattice running: it is asking the seller for your NEX.",
+                "The seller took the BTC. Lattice asked the seller for your NEX and will ask again each time it starts.",
             ),
             Notice::Refunded => ("BTC refunded", "Your BTC is back in your swap wallet."),
             Notice::Received => ("NEX received", "Your swap is complete."),
             Notice::Recovered => (
                 "NEX recovered",
                 "The seller took the BTC, and Lattice claimed your NEX.",
-            ),
-            Notice::Unrecovered => (
-                "Swap ended",
-                "The seller took the BTC, and the NEX could not be claimed.",
             ),
         }
     }
@@ -101,9 +96,8 @@ fn notice(status: &Value, punished: bool) -> Option<Notice> {
     match (status["step"].as_str()?, status["outcome"].as_str()) {
         (_, Some("swapped")) if punished => Some(Notice::Recovered),
         (_, Some("swapped")) => Some(Notice::Received),
-        (_, Some("drained")) if punished => Some(Notice::Unrecovered),
         (_, Some("refunded")) => Some(Notice::Refunded),
-        (_, Some("punished")) => Some(Notice::Punished),
+        (_, Some("punished")) if !punished => Some(Notice::Punished),
         ("refunding", _) => Some(Notice::Refunding),
         ("swapping" | "finishing", _) if locked && !punished => Some(Notice::Locked),
         _ => None,
@@ -195,10 +189,12 @@ impl Tracker {
     /// A swap's status report: the notice it calls for, if not already shown.
     fn report(&mut self, status: &Value) -> Option<Notice> {
         let id = status["swapId"].as_str()?.to_string();
+        // Known punished before this report: a punish already said, or one
+        // resumed to ask again.
+        let notice = notice(status, self.punished.contains(&id));
         if status["outcome"] == "punished" {
             self.punished.insert(id.clone());
         }
-        let notice = notice(status, self.punished.contains(&id));
         self.last.insert(id.clone(), status.clone());
         notice.filter(|notice| self.notified.insert((id, *notice)))
     }
@@ -269,21 +265,43 @@ fn launch_at_login(launch: &dyn LoginLaunch, marker: &Path, needs: bool) -> Resu
     Ok(())
 }
 
-/// [`launch_at_login`] at each look: when the decision `changed`, and again
-/// each look while a swap `needs` the app and the last try failed (`retry`).
+/// How often a failed enable of launch at login is tried again.
+const LAUNCH_RETRY: Duration = Duration::from_secs(60);
+
+/// A failed launch-at-login enable, to try again.
+#[derive(Default)]
+struct LaunchRetry {
+    /// When the last try failed, while a swap needed the app.
+    failed: Option<Instant>,
+    /// Its failure has been logged: logged once, until one succeeds.
+    logged: bool,
+}
+
+/// [`launch_at_login`] at a look at `now`: when the decision `changed`, and
+/// again at most each [`LAUNCH_RETRY`] while a swap `needs` the app and the
+/// last try failed. The error to log, the first of a run of failures only.
 fn launch_tick(
     launch: &dyn LoginLaunch,
     marker: &Path,
     changed: Option<bool>,
     needs: bool,
-    retry: &AtomicBool,
-) -> Result<()> {
-    if changed.is_none() && !(needs && retry.load(Ordering::SeqCst)) {
-        return Ok(());
+    retry: &mut LaunchRetry,
+    now: Instant,
+) -> Option<String> {
+    let due = needs && retry.failed.is_some_and(|at| now - at >= LAUNCH_RETRY);
+    if changed.is_none() && !due {
+        return None;
     }
-    let tried = launch_at_login(launch, marker, needs);
-    retry.store(tried.is_err() && needs, Ordering::SeqCst);
-    tried
+    match launch_at_login(launch, marker, needs) {
+        Ok(()) => {
+            *retry = LaunchRetry::default();
+            None
+        }
+        Err(e) => {
+            retry.failed = needs.then_some(now);
+            (!std::mem::replace(&mut retry.logged, true)).then_some(e)
+        }
+    }
 }
 
 fn marker_path(app: &AppHandle) -> Result<PathBuf> {
@@ -302,8 +320,8 @@ pub struct Background {
     asking: AtomicBool,
     /// The user confirmed a quit: the exit goes through.
     confirmed: AtomicBool,
-    /// Launch at login failed to turn on: tried again each look.
-    retry_launch: AtomicBool,
+    /// Launch at login failed to turn on: tried again.
+    retry_launch: Mutex<LaunchRetry>,
     tracker: Mutex<Tracker>,
     /// The tray and its status line, built the first time a swap needs the
     /// app; None if it could not be built.
@@ -430,24 +448,25 @@ fn look(app: &AppHandle) {
     match background.tray.get() {
         Some(Some((tray, status))) => {
             let _ = status.set_text(&line);
-            if changed.is_some() {
-                let _ = tray.set_visible(needs);
-            }
+            let _ = tray.set_visible(needs);
         }
         Some(None) => {}
         None if needs => build_tray(app),
         None => {}
     }
-    let launch = marker_path(app).and_then(|marker| {
-        launch_tick(
+    let failed = match (marker_path(app), background.retry_launch.lock()) {
+        (Ok(marker), Ok(mut retry)) => launch_tick(
             &*app.autolaunch(),
             &marker,
             changed,
             needs,
-            &background.retry_launch,
-        )
-    });
-    if let Err(e) = launch {
+            &mut retry,
+            Instant::now(),
+        ),
+        (Err(e), _) => Some(e),
+        (_, Err(e)) => Some(err(e)),
+    };
+    if let Some(e) = failed {
         eprintln!("lattice-desktop: launch at login: {e}");
     }
     // The window was closed while a swap needed the app: that close now
@@ -517,6 +536,9 @@ pub fn hold_exit(app: &AppHandle) -> bool {
     if background.asking.swap(true, Ordering::SeqCst) {
         return true;
     }
+    // The dialog is a sheet on the window (rfd): on a hidden one it would
+    // not be seen, and the quit would wait on it unanswered.
+    show(app);
     let warning = match background.tracker.lock() {
         Ok(tracker) => quit_warning(tracker.last.values(), now()),
         Err(_) => quit_warning(std::iter::empty(), now()),
@@ -608,6 +630,8 @@ mod terminate {
 
     /// Adds `applicationShouldTerminate:` to the app delegate's class. On
     /// the main thread, once the event loop has set the delegate (setup).
+    /// Written against tao 0.37, whose delegate has no such method:
+    /// `class_addMethod` refuses (and this says so) if a later tao adds one.
     pub fn install(app: &AppHandle) -> Result<()> {
         let _ = APP.set(app.clone());
         unsafe {
@@ -813,7 +837,7 @@ mod tests {
             tracker.report(&status("p", "done", Some("swapped"), None)),
             Some(Notice::Recovered)
         );
-        // Punished in this session: known from its status, and said.
+        // Punished in this session: said once.
         let mut tracker = Tracker::default();
         assert_eq!(
             tracker.report(&status("q", "done", Some("punished"), None)),
@@ -823,11 +847,13 @@ mod tests {
             tracker.report(&status("q", "done", Some("punished"), None)),
             None
         );
+        // Resumed punished at a later start: not said again.
+        let mut tracker = Tracker::default();
+        tracker.look(&activity(true, &["q"], &["q"]));
         assert_eq!(
-            tracker.report(&status("q", "done", Some("drained"), None)),
-            Some(Notice::Unrecovered)
+            tracker.report(&status("q", "done", Some("punished"), None)),
+            None
         );
-        // Drained without a punish is no recovery.
         assert_eq!(
             tracker.report(&status("r", "done", Some("drained"), None)),
             None
@@ -934,30 +960,44 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_enable_is_tried_again_each_look_while_needed() {
+    fn a_failed_enable_is_tried_again_each_minute_while_needed() {
         let marker = marker("retry");
         let launch = FakeLaunch {
             fail: Cell::new(true),
             ..Default::default()
         };
-        let retry = AtomicBool::new(false);
-        assert!(launch_tick(&launch, &marker, Some(true), true, &retry).is_err());
-        assert!(retry.load(Ordering::SeqCst));
-        // Still failing: tried again, still pending.
-        assert!(launch_tick(&launch, &marker, None, true, &retry).is_err());
+        let mut retry = LaunchRetry::default();
+        let t0 = Instant::now();
+        let tick = |retry: &mut LaunchRetry, changed, needs, at| {
+            launch_tick(&launch, &marker, changed, needs, retry, at)
+        };
+        assert_eq!(
+            tick(&mut retry, Some(true), true, t0),
+            Some("refused".into()),
+            "logged"
+        );
+        // Not before a minute has passed.
         launch.fail.set(false);
-        launch_tick(&launch, &marker, None, true, &retry).unwrap();
-        assert!(launch.is_enabled().unwrap() && !retry.load(Ordering::SeqCst));
-        // Nothing pending, nothing changed: not touched.
-        *launch.on.borrow_mut() = false;
-        launch_tick(&launch, &marker, None, true, &retry).unwrap();
-        assert!(!launch.is_enabled().unwrap());
-        // No longer needed: no retry.
+        assert_eq!(
+            tick(&mut retry, None, true, t0 + Duration::from_secs(59)),
+            None
+        );
+        assert!(!launch.is_enabled().unwrap(), "not tried yet");
+        // Then tried; still failing, not logged again.
         launch.fail.set(true);
+        assert_eq!(tick(&mut retry, None, true, t0 + LAUNCH_RETRY), None);
+        assert_eq!(retry.failed, Some(t0 + LAUNCH_RETRY), "tried");
+        launch.fail.set(false);
+        assert_eq!(tick(&mut retry, None, true, t0 + 2 * LAUNCH_RETRY), None);
+        assert!(launch.is_enabled().unwrap());
+        assert!(retry.failed.is_none() && !retry.logged, "reset");
+        // A new run of failures is logged again; no longer needed, no retry.
+        launch.fail.set(true);
+        *launch.on.borrow_mut() = false;
         let _ = fs::remove_file(&marker);
-        assert!(launch_tick(&launch, &marker, Some(true), true, &retry).is_err());
-        launch_tick(&launch, &marker, Some(false), false, &retry).unwrap();
-        assert!(!retry.load(Ordering::SeqCst));
+        assert!(tick(&mut retry, Some(true), true, t0).is_some());
+        assert_eq!(tick(&mut retry, Some(false), false, t0), None);
+        assert!(retry.failed.is_none());
         fs::remove_dir_all(marker.parent().unwrap().parent().unwrap()).unwrap();
     }
 
