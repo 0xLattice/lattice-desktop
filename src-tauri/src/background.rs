@@ -77,7 +77,7 @@ impl Notice {
                 "The seller took the BTC. Lattice asked the seller for your NEX and will ask again each time it starts.",
             ),
             Notice::Refunded => ("BTC refunded", "Your BTC is back in your swap wallet."),
-            Notice::Received => ("NEX received", "Your swap is complete."),
+            Notice::Received => ("NEX received", "Your NEX is in your address."),
             Notice::Recovered => (
                 "NEX recovered",
                 "The seller took the BTC, and Lattice claimed your NEX.",
@@ -94,8 +94,8 @@ fn notice(status: &Value, punished: bool) -> Option<Notice> {
         (Some(depth), Some(needed)) if depth >= needed
     );
     match (status["step"].as_str()?, status["outcome"].as_str()) {
-        (_, Some("swapped")) if punished => Some(Notice::Recovered),
-        (_, Some("swapped")) => Some(Notice::Received),
+        ("received", _) | (_, Some("swapped")) if punished => Some(Notice::Recovered),
+        ("received", _) | (_, Some("swapped")) => Some(Notice::Received),
         (_, Some("refunded")) => Some(Notice::Refunded),
         (_, Some("punished")) if !punished => Some(Notice::Punished),
         ("refunding", _) => Some(Notice::Refunding),
@@ -133,6 +133,11 @@ fn status_line(status: Option<&Value>) -> String {
             _ => "Swap: in progress".into(),
         },
         ("finishing", _) => "Swap: claiming your NEX".into(),
+        ("received", _) => match status["confirmations"]["nexLock"].as_u64() {
+            Some(1) => "Swap: NEX received · 1 Nexus confirmation".into(),
+            Some(depth) => format!("Swap: NEX received · {depth} Nexus confirmations"),
+            None => "Swap: NEX received".into(),
+        },
         ("refunding", _) => "Swap: refunding your BTC".into(),
         ("cancelled", _) => "Swap cancelled".into(),
         ("offer-gone", _) => "Swap stopped: the offer is gone".into(),
@@ -801,6 +806,8 @@ mod tests {
             status("a", "done", Some("refunded"), None),
             // Another swap's own notices.
             status("b", "swapping", None, Some(3)),
+            // Received once the claim is in a block, not again once it ends.
+            status("b", "received", None, Some(9)),
             status("b", "done", Some("swapped"), None),
             status("b", "done", Some("swapped"), None),
             status("c", "cancelled", None, None),
@@ -834,8 +841,12 @@ mod tests {
             None
         );
         assert_eq!(
-            tracker.report(&status("p", "done", Some("swapped"), None)),
+            tracker.report(&status("p", "received", None, Some(31))),
             Some(Notice::Recovered)
+        );
+        assert_eq!(
+            tracker.report(&status("p", "done", Some("swapped"), None)),
+            None
         );
         // Punished in this session: said once.
         let mut tracker = Tracker::default();
@@ -869,6 +880,18 @@ mod tests {
         assert_eq!(
             status_line(Some(&status("a", "refunding", None, None))),
             "Swap: refunding your BTC"
+        );
+        let mut received = status("a", "received", None, Some(6));
+        assert_eq!(status_line(Some(&received)), "Swap: NEX received");
+        received["confirmations"]["nexLock"] = json!(1);
+        assert_eq!(
+            status_line(Some(&received)),
+            "Swap: NEX received · 1 Nexus confirmation"
+        );
+        received["confirmations"]["nexLock"] = json!(30);
+        assert_eq!(
+            status_line(Some(&received)),
+            "Swap: NEX received · 30 Nexus confirmations"
         );
         assert_eq!(status_line(None), "Swap in progress");
         let mut tracker = Tracker::default();
