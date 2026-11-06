@@ -146,7 +146,7 @@ export const connecting = new EventTarget();
 
 /** A start refused for a swap the page does not show, a punished one the
  * shell resumed to ask its seller for the NEX, in plain words. */
-async function plainly(e: Error): Promise<Error> {
+export async function plainly(e: Error): Promise<Error> {
   const busy = /swap (\S+) is in progress/.exec(e.message);
   if (busy === null) return e;
   const followed = await swapStatus().catch(() => null);

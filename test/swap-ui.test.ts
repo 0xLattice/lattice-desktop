@@ -117,7 +117,7 @@ async function page(t: { after(fn: () => void): void }, engine: Engine = () => u
     const answer = engine(cmd, args);
     if (answer !== undefined) return answer;
     switch (cmd) {
-      case "swap_settings": return { network: "signet", esplora: null, relay: null };
+      case "swap_settings": return { network: "signet", esplora: {}, relay: null };
       case "swap_wallet_exists": return true;
       case "swap_wallet_open": return "tb1qwallet";
       case "swap_balance": return { confirmed: 0, unconfirmed: 0 };
@@ -355,13 +355,13 @@ test("Bitcoin is read through mempool.space until your own Esplora is saved, ref
   let saved: string | null = null;
   let refusals = 1;
   const { doc, calls, text, button, type, mount, window } = await page(t, (cmd, args) => {
-    if (cmd === "swap_settings") return { network: "signet", esplora: saved, relay: null };
+    if (cmd === "swap_settings") return { network: "signet", esplora: saved === null ? {} : { signet: saved }, relay: null };
     if (cmd === "swap_set_esplora") {
-      if (refusals-- > 0) throw `${OWN}: refused: the Esplora's genesis is 000000000019d6, not signet's`;
+      if (refusals-- > 0) throw "refused: the Esplora's genesis is 000000000019d6, not signet's";
       saved = args.esplora as string | null;
       return null;
     }
-    if (cmd === "swap_check_esplora" && saved !== null) throw `${OWN}: timed out`;
+    if (cmd === "swap_check_esplora" && saved !== null) throw `${OWN}/block-height/0: timed out`;
   });
   await mount();
   const server = doc.querySelector('select[aria-label="Bitcoin server"]') as HTMLSelectElement;
@@ -373,16 +373,22 @@ test("Bitcoin is read through mempool.space until your own Esplora is saved, ref
 
   server.value = "own";
   server.dispatchEvent(new window.Event("change", { bubbles: true }));
-  assert.ok(!url.hidden && trust.hidden);
+  // The trust note is the saved choice's, until it is saved.
+  assert.ok(!url.hidden && !trust.hidden);
   type('input[aria-label="Your Esplora URL"]', OWN);
-  // Refused: the shell's words, nothing saved.
+  // Refused: the shell's words, nothing saved; gone once the choice changes.
   button("Save").click();
   await until("the refusal", () => text().includes("not signet's"));
   assert.equal(saved, null);
-  button("Save").click();
-  await until("your Esplora's status", () => text().includes(`${OWN}: timed out`));
-  assert.equal(saved, OWN);
+  assert.equal(server.value, "public", "the screen shows what is saved");
+  server.value = "own";
+  server.dispatchEvent(new window.Event("change", { bubbles: true }));
   assert.ok(!text().includes("not signet's"));
+  type('input[aria-label="Your Esplora URL"]', OWN);
+  button("Save").click();
+  await until("your Esplora's status", () => text().includes(`${OWN}/block-height/0: timed out`));
+  assert.equal(saved, OWN);
+  assert.ok(trust.hidden);
 
   // Back to the public one.
   server.value = "public";
@@ -390,7 +396,95 @@ test("Bitcoin is read through mempool.space until your own Esplora is saved, ref
   button("Save").click();
   await until("public's status again", () => text().includes("Connected to mempool.space"));
   assert.equal(saved, null);
-  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_esplora").map(([, args]) => args.esplora), [OWN, OWN, null]);
+  assert.ok(!trust.hidden);
+  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_esplora").map(([, args]) => [args.network, args.esplora]),
+    [["signet", OWN], ["signet", OWN], ["signet", null]]);
+});
+
+test("each network shows its own Esplora, and plain http off this machine is warned of", async (t) => {
+  const LAN = "http://umbrel.local:3006/api";
+  let network = "signet";
+  const { doc, text, mount, type, window } = await page(t, (cmd, args) => {
+    if (cmd === "swap_settings") return { network, esplora: { bitcoin: LAN }, relay: null };
+    if (cmd === "swap_set_network") {
+      network = args.network as string;
+      return null;
+    }
+  });
+  await mount();
+  const picker = doc.querySelector('select[aria-label="Bitcoin network"]') as HTMLSelectElement;
+  const server = doc.querySelector('select[aria-label="Bitcoin server"]') as HTMLSelectElement;
+  const url = doc.querySelector('input[aria-label="Your Esplora URL"]') as HTMLInputElement;
+  const warned = () => [...doc.querySelectorAll("p")].some((p) => !p.hidden && p.textContent?.startsWith("Plain http"));
+  await until("signet's status", () => text().includes("Connected to mempool.space"));
+  assert.equal(server.value, "public");
+  assert.ok(!warned());
+
+  picker.value = "bitcoin";
+  picker.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await until("mainnet's own", () => server.value === "own");
+  assert.equal(url.value, LAN);
+  assert.ok(warned());
+  type('input[aria-label="Your Esplora URL"]', "http://127.0.0.1:3002/api");
+  assert.ok(!warned());
+});
+
+test("one save at a time, and the screen shows what was saved when the wallet then fails", async (t) => {
+  const OWN = "http://127.0.0.1:3002/api";
+  let disk = { network: "signet", esplora: {} as Record<string, string>, relay: null };
+  let finish: (() => void) | null = null;
+  const { doc, text, button, mount, type, window } = await page(t, (cmd, args) => {
+    if (cmd === "swap_settings") return disk;
+    if (cmd === "swap_set_esplora") {
+      // Saved, then the wallet fails to open on it.
+      disk = { ...disk, esplora: { [args.network as string]: args.esplora as string } };
+      return new Promise((_, reject) => { finish = () => reject("the node is not running: swaps reach NEX through it"); });
+    }
+    if (cmd === "swap_set_network") {
+      disk = { ...disk, network: args.network as string };
+      throw "refused: the swap wallet was opened meanwhile; try again";
+    }
+  });
+  await mount();
+  const picker = doc.querySelector('select[aria-label="Bitcoin network"]') as HTMLSelectElement;
+  const server = doc.querySelector('select[aria-label="Bitcoin server"]') as HTMLSelectElement;
+  server.value = "own";
+  server.dispatchEvent(new window.Event("change", { bubbles: true }));
+  type('input[aria-label="Your Esplora URL"]', OWN);
+  button("Save").click();
+  await until("the save under way", () => finish !== null);
+  assert.ok(picker.disabled && button("Save").disabled, "no network chosen while it saves");
+  finish!();
+  await until("the failure", () => text().includes("the node is not running"));
+  assert.ok(!picker.disabled && !button("Save").disabled);
+  assert.equal(server.value, "own");
+  assert.equal((doc.querySelector('input[aria-label="Your Esplora URL"]') as HTMLInputElement).value, OWN);
+
+  // A network saved, its wallet then refused: the picker shows the one
+  // saved.
+  picker.value = "bitcoin";
+  picker.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await until("the network's failure", () => text().includes("opened meanwhile"));
+  assert.equal(picker.value, "bitcoin");
+  assert.equal(server.value, "public", "mainnet has no Esplora of yours");
+});
+
+test("a save refused for a running swap says so plainly", async (t) => {
+  const { doc, text, button, mount, state } = await page(t, (cmd) => {
+    if (cmd === "swap_set_esplora") throw "refused: swap swap-a is in progress; one swap at a time";
+    if (cmd === "swap_set_network") throw "refused: swap swap-z is running on signet";
+  });
+  state.followed = status("swap-a", { running: true });
+  await mount();
+  button("Save").click();
+  await until("the refusal", () => text().includes("A swap is running: change this once it ends."));
+  assert.ok(!text().includes("swap-a is"));
+  const picker = doc.querySelector('select[aria-label="Bitcoin network"]') as HTMLSelectElement;
+  picker.value = "bitcoin";
+  picker.dispatchEvent(new (doc.defaultView!).Event("change", { bubbles: true }));
+  await until("the network's refusal", () => [...doc.querySelectorAll("p")].some((p) => p.textContent === "A swap is running: change this once it ends."));
+  assert.equal(picker.value, "signet");
+  assert.ok(!text().includes("swap-z"));
 });
 
 test("isCid spells a CID as swap_nexus_tx::is_cid does", async () => {
