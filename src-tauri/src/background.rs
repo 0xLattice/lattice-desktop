@@ -197,8 +197,13 @@ impl Tracker {
         let id = status["swapId"].as_str()?.to_string();
         // Known punished before this report: a punish already said, or one
         // resumed to ask again. A punish in this run goes from refunding
-        // straight to asking the seller for the NEX, with no outcome yet.
-        let notice = notice(status, self.punished.contains(&id));
+        // straight to asking the seller for the NEX, with no outcome yet;
+        // one resumed asking reports that first, maybe before the engine
+        // says it was punished, and is not said again.
+        let resumed_asking = status["step"] == "asking"
+            && !(self.last.get(&id)).is_some_and(|last| last["step"] != "asking");
+        let punished = self.punished.contains(&id) || resumed_asking;
+        let notice = notice(status, punished);
         if status["outcome"] == "punished" || status["step"] == "asking" {
             self.punished.insert(id.clone());
         }
@@ -865,6 +870,14 @@ mod tests {
         assert_eq!(tracker.report(&status("r", "finishing", None, None)), None);
         assert_eq!(
             tracker.report(&status("r", "received", None, None)),
+            Some(Notice::Recovered)
+        );
+        // Resumed asking, reported before the engine says it was punished:
+        // not said again, and its NEX is recovered.
+        let mut tracker = Tracker::default();
+        assert_eq!(tracker.report(&status("s", "asking", None, None)), None);
+        assert_eq!(
+            tracker.report(&status("s", "received", None, None)),
             Some(Notice::Recovered)
         );
         // Punished in this session: said once.
