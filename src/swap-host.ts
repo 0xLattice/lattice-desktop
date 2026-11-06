@@ -16,7 +16,7 @@ export interface SwapSettings {
   relay?: string | null;
 }
 
-export type SwapStep = "fund-wallet" | "swapping" | "finishing" | "done" | "refunding" | "refunded" | "offer-gone" | "cancelled";
+export type SwapStep = "fund-wallet" | "swapping" | "finishing" | "asking" | "received" | "done" | "refunding" | "refunded" | "offer-gone" | "cancelled";
 export type SwapOutcome = "swapped" | "refunded" | "punished" | "drained" | "aborted";
 
 export interface SwapDeadline {
