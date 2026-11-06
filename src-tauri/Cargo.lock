@@ -1114,7 +1114,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1310,7 +1310,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3509,7 +3509,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4141,7 +4141,7 @@ checksum = "734676eb262c623cec13c3155096e08d1f8f29adce39ba17948b18dad1e54142"
 [[package]]
 name = "swap"
 version = "0.1.0"
-source = "git+https://github.com/0xLattice/lattice-swap?rev=f745f87d77a84f9cf1532d7d43d22284c30f257b#f745f87d77a84f9cf1532d7d43d22284c30f257b"
+source = "git+https://github.com/0xLattice/lattice-swap?rev=67c3f365c5dbde0b00c939b7eecb744ba712da6a#67c3f365c5dbde0b00c939b7eecb744ba712da6a"
 dependencies = [
  "base64 0.22.1",
  "bitcoin",
@@ -4169,7 +4169,7 @@ dependencies = [
 [[package]]
 name = "swap-bitcoin"
 version = "0.1.0"
-source = "git+https://github.com/0xLattice/lattice-swap?rev=f745f87d77a84f9cf1532d7d43d22284c30f257b#f745f87d77a84f9cf1532d7d43d22284c30f257b"
+source = "git+https://github.com/0xLattice/lattice-swap?rev=67c3f365c5dbde0b00c939b7eecb744ba712da6a#67c3f365c5dbde0b00c939b7eecb744ba712da6a"
 dependencies = [
  "bitcoin",
  "rand_core 0.6.4",
@@ -4180,7 +4180,7 @@ dependencies = [
 [[package]]
 name = "swap-core"
 version = "0.1.0"
-source = "git+https://github.com/0xLattice/lattice-swap?rev=f745f87d77a84f9cf1532d7d43d22284c30f257b#f745f87d77a84f9cf1532d7d43d22284c30f257b"
+source = "git+https://github.com/0xLattice/lattice-swap?rev=67c3f365c5dbde0b00c939b7eecb744ba712da6a#67c3f365c5dbde0b00c939b7eecb744ba712da6a"
 dependencies = [
  "curve25519-dalek",
  "curve25519-dalek-ng",
@@ -4197,7 +4197,7 @@ dependencies = [
 [[package]]
 name = "swap-nexus"
 version = "0.1.0"
-source = "git+https://github.com/0xLattice/lattice-swap?rev=f745f87d77a84f9cf1532d7d43d22284c30f257b#f745f87d77a84f9cf1532d7d43d22284c30f257b"
+source = "git+https://github.com/0xLattice/lattice-swap?rev=67c3f365c5dbde0b00c939b7eecb744ba712da6a#67c3f365c5dbde0b00c939b7eecb744ba712da6a"
 dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
@@ -4209,7 +4209,7 @@ dependencies = [
 [[package]]
 name = "swap-nexus-tx"
 version = "0.1.0"
-source = "git+https://github.com/0xLattice/lattice-swap?rev=f745f87d77a84f9cf1532d7d43d22284c30f257b#f745f87d77a84f9cf1532d7d43d22284c30f257b"
+source = "git+https://github.com/0xLattice/lattice-swap?rev=67c3f365c5dbde0b00c939b7eecb744ba712da6a#67c3f365c5dbde0b00c939b7eecb744ba712da6a"
 dependencies = [
  "base64 0.22.1",
  "data-encoding",
@@ -4709,7 +4709,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5510,7 +5510,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

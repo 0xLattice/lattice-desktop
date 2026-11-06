@@ -21,8 +21,8 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 base64 = "0.22"
 # The buyer's swap engine (lattice-swap's native `swap::app`), pinned by its
 # commit, and the Nexus it names by default. `bitcoin` is the version it uses.
-swap = { git = "https://github.com/0xLattice/lattice-swap", rev = "f745f87d77a84f9cf1532d7d43d22284c30f257b" }
-swap-nexus-tx = { git = "https://github.com/0xLattice/lattice-swap", rev = "f745f87d77a84f9cf1532d7d43d22284c30f257b" }
+swap = { git = "https://github.com/0xLattice/lattice-swap", rev = "67c3f365c5dbde0b00c939b7eecb744ba712da6a" }
+swap-nexus-tx = { git = "https://github.com/0xLattice/lattice-swap", rev = "67c3f365c5dbde0b00c939b7eecb744ba712da6a" }
 bitcoin = { version = "0.32", features = ["serde"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"

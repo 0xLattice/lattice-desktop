@@ -131,6 +131,7 @@ async function page(t: { after(fn: () => void): void }, engine: Engine = () => u
         state.followed = status("swap-a", { step: "cancelled" });
         return null;
       case "swap_backup": return "/Users/someone/Downloads/lattice-swap-tb1qwallet.json";
+      case "swap_check_esplora": return null;
       default: throw new Error(`unexpected ${cmd}`);
     }
   }, { shouldMockEvents: true });
@@ -347,6 +348,49 @@ test("a wallet is restored only from a file the shell reads", async (t) => {
   await until("restored", () => text().includes("Restored the wallet tb1qrestored"));
   await until("the page again", () => !doc.querySelector("input#restore") && calls.filter(([cmd]) => cmd === "swap_wallet_open").length > opened);
   assert.ok(!calls.some(([cmd]) => cmd === "swap_restore"));
+});
+
+test("Bitcoin is read through mempool.space until your own Esplora is saved, refused off its network", async (t) => {
+  const OWN = "https://esplora.example/api";
+  let saved: string | null = null;
+  let refusals = 1;
+  const { doc, calls, text, button, type, mount, window } = await page(t, (cmd, args) => {
+    if (cmd === "swap_settings") return { network: "signet", esplora: saved, relay: null };
+    if (cmd === "swap_set_esplora") {
+      if (refusals-- > 0) throw `${OWN}: refused: the Esplora's genesis is 000000000019d6, not signet's`;
+      saved = args.esplora as string | null;
+      return null;
+    }
+    if (cmd === "swap_check_esplora" && saved !== null) throw `${OWN}: timed out`;
+  });
+  await mount();
+  const server = doc.querySelector('select[aria-label="Bitcoin server"]') as HTMLSelectElement;
+  const url = doc.querySelector('input[aria-label="Your Esplora URL"]') as HTMLInputElement;
+  const trust = [...doc.querySelectorAll("p")].find((p) => p.textContent?.includes("keep amounts small"))!;
+  await until("public's status", () => text().includes("Connected to mempool.space"));
+  assert.equal(server.value, "public");
+  assert.ok(url.hidden && !trust.hidden);
+
+  server.value = "own";
+  server.dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(!url.hidden && trust.hidden);
+  type('input[aria-label="Your Esplora URL"]', OWN);
+  // Refused: the shell's words, nothing saved.
+  button("Save").click();
+  await until("the refusal", () => text().includes("not signet's"));
+  assert.equal(saved, null);
+  button("Save").click();
+  await until("your Esplora's status", () => text().includes(`${OWN}: timed out`));
+  assert.equal(saved, OWN);
+  assert.ok(!text().includes("not signet's"));
+
+  // Back to the public one.
+  server.value = "public";
+  server.dispatchEvent(new window.Event("change", { bubbles: true }));
+  button("Save").click();
+  await until("public's status again", () => text().includes("Connected to mempool.space"));
+  assert.equal(saved, null);
+  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_esplora").map(([, args]) => args.esplora), [OWN, OWN, null]);
 });
 
 test("isCid spells a CID as swap_nexus_tx::is_cid does", async () => {

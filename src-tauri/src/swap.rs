@@ -7,9 +7,13 @@
 //!   through this app's own node, on the pinned loopback RPC port with its
 //!   cookie, which the engine reads again whenever the node restarts. The
 //!   wallet opens only once a port is pinned, and opens again on a new one.
-//! - The page chooses only the Bitcoin network (mainnet by default, signet to
-//!   test). The Esplora and the relay are the operator's, edited by hand in
-//!   `<app_root>/swap/settings.json`: https, or http to loopback.
+//! - The page chooses the Bitcoin network (mainnet by default, signet to
+//!   test) and the Esplora: mempool.space's by default, or the user's own,
+//!   refused unless it is on that network, as Sparrow chooses between a
+//!   public server and your own. Neither changes while a swap runs: it
+//!   keeps the Esplora it started with. The relay is the operator's, edited
+//!   by hand in `<app_root>/swap/settings.json`. Every URL is https, or
+//!   http to loopback.
 //! - The swap wallet is a single key of its own in
 //!   `<app_root>/swap/<network>/` (0700), not derived from the vault, so a
 //!   refund needs no unlock.
@@ -35,6 +39,7 @@ use bitcoin::Network;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use swap::app::{default_esplora, Buy, Config, Wallet};
+use swap::esplora::Esplora;
 use swap::offer::Offer;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
@@ -52,8 +57,8 @@ const NETWORKS: [Network; 2] = [Network::Bitcoin, Network::Signet];
 const MAX_BODY: u64 = 8 * 1024 * 1024;
 
 /// Where swaps run: the Bitcoin network, and the Esplora and relay when not
-/// the defaults. Kept in `<app_root>/swap/settings.json`; the page sets only
-/// the network.
+/// the defaults. Kept in `<app_root>/swap/settings.json`; the page sets the
+/// network and the Esplora.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -129,6 +134,16 @@ impl Settings {
     fn relay(&self) -> &str {
         self.relay.as_deref().unwrap_or(DEFAULT_RELAY)
     }
+}
+
+/// Refuses an Esplora that cannot be read, or is on another chain than
+/// `network`, by the engine's own check (`Esplora::check_network`, which
+/// reads only block 0: the key is a throwaway).
+fn check_esplora(url: &str, network: Network) -> Result<()> {
+    let key = swap::wallet::Key::new(&network.to_string())?;
+    Esplora::new(url, key, Duration::from_secs(20))
+        .check_network(network)
+        .map_err(|e| format!("{url}: {e}"))
 }
 
 fn settings_path(root: &Path) -> PathBuf {
@@ -707,22 +722,26 @@ fn running_in(dir: &Path, network: Network) -> Result<Option<String>> {
     }
 }
 
-/// Sets the network in `<root>/swap/settings.json`, the rest kept. Changing
-/// it closes the wallet, refused while a swap runs on the one it leaves.
-fn set_network_with(engine: &Mutex<Engine>, root: &Path, network: Network) -> Result<()> {
-    let mut settings = load_settings(root)?;
-    if settings.network == network {
+/// Saves `next` as `<root>/swap/settings.json`: refused if the user's own
+/// Esplora is not on its network, and while a swap runs on the settings it
+/// leaves, which keep to its end. The wallet open is closed, to be opened
+/// again on the new settings.
+fn save_with(engine: &Mutex<Engine>, root: &Path, next: Settings) -> Result<()> {
+    let leaving = load_settings(root)?;
+    if leaving == next {
         return Ok(());
     }
-    settings.network = network;
-    settings.check()?;
+    next.check()?;
+    if let Some(url) = &next.esplora {
+        check_esplora(url, next.network)?;
+    }
     let detached = {
         let mut held = lock(engine)?;
         held.refuse_running()?;
         if held.wallet.is_none() {
-            let leaving = load_settings(root)?.network;
-            if let Some(id) = running_in(&root.join("swap").join(leaving.to_string()), leaving)? {
-                return Err(format!("refused: swap {id} is running on {leaving}"));
+            let network = leaving.network;
+            if let Some(id) = running_in(&root.join("swap").join(network.to_string()), network)? {
+                return Err(format!("refused: swap {id} is running on {network}"));
             }
         }
         held.detach()
@@ -731,9 +750,27 @@ fn set_network_with(engine: &Mutex<Engine>, root: &Path, network: Network) -> Re
     private_dir(&root.join("swap"))?;
     write_atomically(
         &settings_path(root),
-        &serde_json::to_vec_pretty(&settings).map_err(err)?,
+        &serde_json::to_vec_pretty(&next).map_err(err)?,
         0o600,
     )
+}
+
+/// Sets the network, the rest kept.
+fn set_network_with(engine: &Mutex<Engine>, root: &Path, network: Network) -> Result<()> {
+    let settings = load_settings(root)?;
+    save_with(engine, root, Settings { network, ..settings })
+}
+
+/// Sets the Esplora: the user's own at `esplora`, or none for the public
+/// default. The rest kept.
+fn set_esplora_with(engine: &Mutex<Engine>, root: &Path, esplora: Option<String>) -> Result<()> {
+    let esplora = match esplora.as_deref().map(str::trim) {
+        None => None,
+        Some("") => return Err("refused: give your Esplora's URL".into()),
+        Some(url) => Some(url.trim_end_matches('/').to_string()),
+    };
+    let settings = load_settings(root)?;
+    save_with(engine, root, Settings { esplora, ..settings })
 }
 
 /// The engine, as the app manages it.
@@ -804,6 +841,28 @@ pub async fn swap_set_network(app: AppHandle, network: Network) -> Result<()> {
         sync(app)
     })
     .await
+}
+
+/// Chooses the Esplora swaps read Bitcoin through: the user's own, or
+/// mempool.space's when `esplora` is null. Refused while a swap runs, and
+/// for an Esplora on another network.
+#[tauri::command]
+pub async fn swap_set_esplora(app: AppHandle, esplora: Option<String>) -> Result<()> {
+    blocking(app, move |app, engine| {
+        set_esplora_with(engine, &app_root(app)?, esplora)?;
+        sync(app)
+    })
+    .await
+}
+
+/// Whether the Esplora is reachable and on the network swaps run on: the
+/// refusal if not.
+#[tauri::command]
+pub async fn swap_check_esplora(app: AppHandle) -> Result<()> {
+    let settings = load_settings(&app_root(&app)?)?;
+    tauri::async_runtime::spawn_blocking(move || check_esplora(&settings.esplora()?, settings.network))
+        .await
+        .map_err(err)?
 }
 
 /// Whether there is a swap wallet, none made: as the driver's
@@ -1267,11 +1326,11 @@ mod tests {
     }
 
     #[test]
-    fn the_page_sets_only_the_network_and_never_off_a_running_swap() {
+    fn the_page_sets_the_network_and_never_off_a_running_swap() {
         let root = temp("network");
         let engine = Mutex::new(Engine::default());
         fs::create_dir_all(root.join("swap")).unwrap();
-        let operator = json!({ "network": "bitcoin", "esplora": "http://127.0.0.1:3002/api", "relay": "https://relay.example" });
+        let operator = json!({ "network": "bitcoin", "relay": "https://relay.example" });
         fs::write(settings_path(&root), operator.to_string()).unwrap();
         set_network_with(&engine, &root, Network::Signet).unwrap();
         let mut expected: Settings = serde_json::from_value(operator).unwrap();
@@ -1279,7 +1338,7 @@ mod tests {
         assert_eq!(
             load_settings(&root).unwrap(),
             expected,
-            "the operator's URLs are kept"
+            "the operator's relay is kept"
         );
         assert!(set_network_with(&engine, &root, Network::Regtest).is_err());
 
@@ -1304,6 +1363,76 @@ mod tests {
         set_network_with(&engine, &root, Network::Bitcoin).unwrap();
         assert!(lock(&engine).unwrap().wallet.is_none());
         assert_eq!(load_settings(&root).unwrap().network, Network::Bitcoin);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An Esplora whose block 0 is `network`'s genesis, on loopback: its
+    /// URL. Every request is answered with that hash.
+    fn esplora_on(network: Network) -> String {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api", listener.local_addr().unwrap());
+        let genesis = bitcoin::constants::genesis_block(network).block_hash().to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    genesis.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(genesis.as_bytes());
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn the_esplora_is_public_by_default_and_ones_own_only_on_its_network() {
+        let root = temp("esplora");
+        let engine = Mutex::new(Engine::default());
+        assert_eq!(load_settings(&root).unwrap().esplora, None);
+        let mainnet = esplora_on(Network::Bitcoin);
+        let signet = esplora_on(Network::Signet);
+
+        // Your own, on the network swaps run on: saved, its trailing slash
+        // dropped.
+        set_esplora_with(&engine, &root, Some(format!(" {mainnet}/ "))).unwrap();
+        assert_eq!(load_settings(&root).unwrap().esplora, Some(mainnet.clone()));
+        assert_eq!(load_settings(&root).unwrap().esplora().unwrap(), mainnet);
+
+        // Refused, nothing written: one on another network, one that cannot
+        // be read, no URL, and one neither https nor http to loopback.
+        let refused = set_esplora_with(&engine, &root, Some(signet.clone())).unwrap_err();
+        assert!(refused.contains("genesis"), "{refused}");
+        assert!(set_esplora_with(&engine, &root, Some("http://127.0.0.1:9".into())).is_err());
+        assert!(set_esplora_with(&engine, &root, Some("  ".into())).is_err());
+        assert!(set_esplora_with(&engine, &root, Some("http://lying.example/api".into())).is_err());
+        // Nor is the network changed under it.
+        let refused = set_network_with(&engine, &root, Network::Signet).unwrap_err();
+        assert!(refused.contains("genesis"), "{refused}");
+        assert_eq!(load_settings(&root).unwrap().esplora, Some(mainnet.clone()));
+        assert_eq!(load_settings(&root).unwrap().network, Network::Bitcoin);
+
+        // A swap running keeps the Esplora it started with.
+        let wallet = swap_dir(&root, Network::Bitcoin).unwrap();
+        let mainnet_wallet = Config {
+            network: Network::Bitcoin,
+            ..offline(&wallet)
+        };
+        drop(Wallet::open(mainnet_wallet).unwrap());
+        let running = "66".repeat(32);
+        record(&wallet, &running, true, json!({ "Locking": {} }));
+        let refused = set_esplora_with(&engine, &root, None).unwrap_err();
+        assert!(refused.contains(&running), "{refused}");
+        assert_eq!(load_settings(&root).unwrap().esplora, Some(mainnet));
+
+        // Ended, the public one is chosen again.
+        record(&wallet, &running, true, json!("Done"));
+        set_esplora_with(&engine, &root, None).unwrap();
+        assert_eq!(load_settings(&root).unwrap(), Settings::default());
         fs::remove_dir_all(root).unwrap();
     }
 
