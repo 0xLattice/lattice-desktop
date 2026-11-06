@@ -14,7 +14,7 @@
 //!   swap runs: it keeps the Esplora it started with. The relay is the
 //!   operator's, edited by hand in `<app_root>/swap/settings.json`. Every
 //!   URL is https, or plain http to this machine or a local network (a
-//!   private or link-local address, a name of one label, `.local`, `.lan`,
+//!   private or link-local address, `localhost`, `.local`, `.lan`,
 //!   `.home.arpa`) or an onion, as the engine's client parses it.
 //! - The swap wallet is a single key of its own in
 //!   `<app_root>/swap/<network>/` (0700), not derived from the vault, so a
@@ -130,9 +130,10 @@ impl TryFrom<Stored> for Settings {
 }
 
 /// Whether plain http to `host` stays on this machine or a local network,
-/// or goes to an onion: a loopback, private or link-local address, a name
-/// of one label (no public DNS name), or one under `.local`, `.lan`,
-/// `.home.arpa` (RFC 8375) or `.onion`.
+/// or goes to an onion: a loopback, private or link-local address,
+/// `localhost`, or a name under `.local`, `.lan`, `.home.arpa` (RFC 8375)
+/// or `.onion`. Not a name of one label: some top-level domains have an
+/// address (`ws`), and a search domain can make one public.
 fn local(host: &url::Host<&str>) -> bool {
     use std::net::Ipv4Addr;
     let v4 = |ip: Ipv4Addr| ip.is_loopback() || ip.is_private() || ip.is_link_local();
@@ -142,9 +143,8 @@ fn local(host: &url::Host<&str>) -> bool {
             Some(mapped) => v4(mapped),
             None => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
         },
-        // A single label with a trailing dot is a top-level domain.
         url::Host::Domain(name) => {
-            !name.contains('.')
+            *name == "localhost"
                 || [".local", ".lan", ".home.arpa", ".onion"]
                     .iter()
                     .any(|suffix| name.strip_suffix('.').unwrap_or(name).ends_with(suffix))
@@ -811,24 +811,11 @@ fn running_in(dir: &Path, network: Network) -> Result<Option<String>> {
     }
 }
 
-/// A swap in the wallet in `dir` still to run on the settings it started
-/// with: a running one, or a punished one, to ask the seller for `s` once
-/// resumed. None if it holds no wallet.
-fn unfinished_in(dir: &Path, network: Network) -> Result<Option<String>> {
-    match stored_wallet(dir, network)? {
-        Some(wallet) => Ok(match wallet.running().map_err(err)? {
-            Some(id) => Some(id),
-            None => wallet.punished().map_err(err)?.into_iter().next(),
-        }),
-        None => Ok(None),
-    }
-}
-
 /// Saves `<root>/swap/settings.json` as `change` makes it of the settings
 /// saved, one save at a time (`saving` held through it): refused if the
 /// user's own Esplora it sets is not on its network, while a swap runs on
-/// the settings it leaves, which keep to its end (a punished one too, with
-/// the wallet closed), and while the wallet is reopened, which may resume
+/// the settings it leaves, which keep to its end, and while the wallet is
+/// reopened, which may resume
 /// a swap on them. Written on the
 /// engine's lock, the wallet open taken out there, to be opened again on
 /// the new settings: no swap starts, nor wallet opens, on the settings
@@ -859,7 +846,7 @@ fn save_with(
         }
         if held.wallet.is_none() {
             let network = leaving.network;
-            if let Some(id) = unfinished_in(&root.join("swap").join(network.to_string()), network)? {
+            if let Some(id) = running_in(&root.join("swap").join(network.to_string()), network)? {
                 return Err(format!("refused: swap {id} is running on {network}"));
             }
         }
@@ -1430,8 +1417,6 @@ mod tests {
             "http://[fd00::1]:3000/api",
             "http://[fe80::1]/api",
             "http://explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion/api",
-            "http://umbrel:3006/api",
-            "http://UMBREL:3006/api",
             "http://umbrel.local./api",
             "http://node.lan/api",
             "http://node.home.arpa/api",
@@ -1461,6 +1446,9 @@ mod tests {
             "http://172.32.0.1/api",
             "http://192.168.1.20.evil.example/api",
             "http://umbrel.local.evil.example/api",
+            // One label: `ws` has an address of its own.
+            "http://umbrel:3006/api",
+            "http://ws/api",
             "http://onion.example/api",
             "http://[2001:db8::1]/api",
             // `\` is `/` in an http URL: the host is the public one.
@@ -1588,13 +1576,14 @@ mod tests {
         assert_eq!(load_settings(&root).unwrap().network, Network::Signet);
         close(&engine);
 
-        // Ended, a punished one asking for `s`, its wallet closed, keeps
-        // signet too: resumed, it asks on the Esplora it started with.
+        // Ended, a punished one asking for `s`, its wallet closed, holds no
+        // save: its ask has no deadline, and waits for the next start on
+        // signet, as it does with the wallet open.
         record(&signet, &running, true, json!("Done"));
         let punished = "66".repeat(32);
         record(&signet, &punished, true, json!({ "Punished": {} }));
-        let refused = set_network_with(&engine, &saving, &root, Network::Bitcoin).unwrap_err();
-        assert!(refused.contains(&punished), "{refused}");
+        set_network_with(&engine, &saving, &root, Network::Bitcoin).unwrap();
+        set_network_with(&engine, &saving, &root, Network::Signet).unwrap();
         fs::remove_file(signet.join(format!("{punished}.record"))).unwrap();
         // Nor is it left while the wallet is reopened: the reopen may resume
         // a swap waiting for its funds on signet.
