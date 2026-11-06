@@ -552,23 +552,29 @@ fn lock(engine: &Mutex<Engine>) -> Result<MutexGuard<'_, Engine>> {
     engine.lock().map_err(err)
 }
 
-/// How long a reopen waits for the wallet's last holder outside the engine
-/// (a balance read, a status read) to let it go.
+/// How long a reopen or a restore waits for the wallet's last holder
+/// outside the engine (a balance read, a status read, a process this app
+/// spawns, which holds the directory's lock until it starts) to let it go.
 const OPEN_PATIENCE: Duration = Duration::from_secs(60);
 
-/// `Wallet::open`, tried again while the wallet is still held elsewhere in
-/// this app, for up to `patience`: a reopen must not lose to a read that
-/// is about to end, or a taken swap would go undriven.
-fn open_wallet(config: &Config, patience: Duration) -> Result<Arc<Wallet>> {
+/// `hold`, tried again while the wallet is still held elsewhere in this
+/// app, for up to `patience`.
+fn patiently(patience: Duration, hold: impl Fn() -> Result<Arc<Wallet>>) -> Result<Arc<Wallet>> {
     let start = Instant::now();
     loop {
-        match Wallet::open(config.clone()).map_err(err) {
+        match hold() {
             Err(e) if e.contains("is open elsewhere") && start.elapsed() < patience => {
                 std::thread::sleep(Duration::from_millis(100));
             }
-            opened => return opened,
+            held => return held,
         }
     }
+}
+
+/// `Wallet::open`, patiently: a reopen must not lose to a read that is
+/// about to end, or a taken swap would go undriven.
+fn open_wallet(config: &Config, patience: Duration) -> Result<Arc<Wallet>> {
+    patiently(patience, || Wallet::open(config.clone()).map_err(err))
 }
 
 /// The followed swap, while it runs: kept across a reopen even if it has
@@ -662,7 +668,7 @@ fn restore_with(engine: &Mutex<Engine>, config: Config, file: &str, emit: &Emit)
     if held.wallet.is_some() {
         return Err("refused: the swap wallet was opened meanwhile; try again".into());
     }
-    match Wallet::restore(config.clone(), file).map_err(err) {
+    match patiently(OPEN_PATIENCE, || Wallet::restore(config.clone(), file).map_err(err)) {
         Ok(wallet) => Ok(held.hold(wallet, waiting, emit)?.address().to_string()),
         Err(e) => {
             if existed {
@@ -1532,12 +1538,32 @@ mod tests {
             .unwrap()
             .address()
             .to_string();
-        assert!(restore_with(&engine, offline(&other), &file, &emit)
-            .unwrap_err()
-            .contains("another wallet"));
+        let refused = restore_with(&engine, offline(&other), &file, &emit).unwrap_err();
+        assert!(refused.contains("another wallet"), "{refused}");
         assert_eq!(lock(&engine).unwrap().wallet().unwrap().address(), kept);
         close(&engine);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_restore_waits_for_a_read_holding_the_wallet() {
+        let dir = temp("restore-held");
+        let (emit, _) = collect();
+        let engine = Mutex::new(Engine::default());
+        let reader = open_with(&engine, offline(&dir), &emit).unwrap();
+        let (address, file) = (reader.address().to_string(), reader.backup().unwrap().1);
+        // A balance read still holds the wallet when the restore begins.
+        let releasing = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            drop(reader);
+        });
+        assert_eq!(
+            restore_with(&engine, offline(&dir), &file, &emit).unwrap(),
+            address
+        );
+        releasing.join().unwrap();
+        close(&engine);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
