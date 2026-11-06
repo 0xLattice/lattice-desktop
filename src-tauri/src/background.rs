@@ -74,7 +74,7 @@ impl Notice {
             ),
             Notice::Punished => (
                 "Swap punished",
-                "The seller took the BTC. Lattice asked the seller for your NEX and will ask again each time it starts.",
+                "The seller took the BTC. If it locked NEX, Lattice asks it to release the NEX, and asks again each time it starts.",
             ),
             Notice::Refunded => ("BTC refunded", "Your BTC is back in your swap wallet."),
             Notice::Received => ("NEX received", "Your NEX is in your address."),
@@ -97,7 +97,7 @@ fn notice(status: &Value, punished: bool) -> Option<Notice> {
         ("received", _) | (_, Some("swapped")) if punished => Some(Notice::Recovered),
         ("received", _) | (_, Some("swapped")) => Some(Notice::Received),
         (_, Some("refunded")) => Some(Notice::Refunded),
-        (_, Some("punished")) if !punished => Some(Notice::Punished),
+        (_, Some("punished")) | ("asking", _) if !punished => Some(Notice::Punished),
         ("refunding", _) => Some(Notice::Refunding),
         ("swapping" | "finishing", _) if locked && !punished => Some(Notice::Locked),
         _ => None,
@@ -132,6 +132,7 @@ fn status_line(status: Option<&Value>) -> String {
             }
             _ => "Swap: in progress".into(),
         },
+        ("asking", _) => "Swap punished: asking the seller for the NEX".into(),
         ("finishing", _) => "Swap: claiming your NEX".into(),
         ("received", _) => match status["confirmations"]["nexLock"].as_u64() {
             Some(1) => "Swap: NEX received · 1 Nexus confirmation".into(),
@@ -195,9 +196,10 @@ impl Tracker {
     fn report(&mut self, status: &Value) -> Option<Notice> {
         let id = status["swapId"].as_str()?.to_string();
         // Known punished before this report: a punish already said, or one
-        // resumed to ask again.
+        // resumed to ask again. A punish in this run goes from refunding
+        // straight to asking the seller for the NEX, with no outcome yet.
         let notice = notice(status, self.punished.contains(&id));
-        if status["outcome"] == "punished" {
+        if status["outcome"] == "punished" || status["step"] == "asking" {
             self.punished.insert(id.clone());
         }
         self.last.insert(id.clone(), status.clone());
@@ -848,6 +850,23 @@ mod tests {
             tracker.report(&status("p", "done", Some("swapped"), None)),
             None
         );
+        // Punished in this run: refunding goes straight to asking, said
+        // once as punished, and the NEX that follows is recovered.
+        let mut tracker = Tracker::default();
+        assert_eq!(
+            tracker.report(&status("r", "refunding", None, Some(80))),
+            Some(Notice::Refunding)
+        );
+        assert_eq!(
+            tracker.report(&status("r", "asking", None, None)),
+            Some(Notice::Punished)
+        );
+        assert_eq!(tracker.report(&status("r", "asking", None, None)), None);
+        assert_eq!(tracker.report(&status("r", "finishing", None, None)), None);
+        assert_eq!(
+            tracker.report(&status("r", "received", None, None)),
+            Some(Notice::Recovered)
+        );
         // Punished in this session: said once.
         let mut tracker = Tracker::default();
         assert_eq!(
@@ -880,6 +899,10 @@ mod tests {
         assert_eq!(
             status_line(Some(&status("a", "refunding", None, None))),
             "Swap: refunding your BTC"
+        );
+        assert_eq!(
+            status_line(Some(&status("a", "asking", None, None))),
+            "Swap punished: asking the seller for the NEX"
         );
         let mut received = status("a", "received", None, Some(6));
         assert_eq!(status_line(Some(&received)), "Swap: NEX received");
