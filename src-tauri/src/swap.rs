@@ -1794,5 +1794,5 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "swap-e2e"))]
 mod e2e;

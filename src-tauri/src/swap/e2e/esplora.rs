@@ -189,10 +189,12 @@ pub fn esplora(node: Bitcoind) -> String {
                 },
             ),
         )
-        // Regtest has no fee estimates: 1 sat/vB, its relay floor, for all.
+        // Regtest has no fee estimates: the targets the engine reads, as
+        // mempool.space answers them, above the relay floor so a rate the
+        // engine misreads shows.
         .route(
             "/fee-estimates",
-            get(|| async { Json(json!({ "6": 1.0 })) }),
+            get(|| async { Json(json!({ "1": 2.0, "2": 2.0, "6": 2.0 })) }),
         )
         .route(
             "/address/{address}/utxo",

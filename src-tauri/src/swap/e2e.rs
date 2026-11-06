@@ -7,10 +7,11 @@
 //! terms and the engine takes them under its default bounds, as the app
 //! does. The test, not the parties, mines blocks on both chains.
 //!
-//! Ignored by a plain `cargo test`; run with `LATTICE_NODE_BIN` naming the
-//! directory holding lattice-node and lattice-mining-coordinator,
-//! `LATTICE_SWAP_BIN` a lattice-swap built at the pinned rev, and
-//! `-- --ignored`.
+//! Built only with the `swap-e2e` feature, which downloads bitcoind, and
+//! ignored even then: run with `--features swap-e2e`, `LATTICE_NODE_BIN`
+//! naming the directory holding lattice-node and
+//! lattice-mining-coordinator, `LATTICE_SWAP_BIN` a lattice-swap built at
+//! the pinned rev, and `-- --ignored`.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -36,7 +37,7 @@ mod esplora;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const BTC_AMOUNT: Amount = Amount::from_sat(50_000_000);
-const BTC_FEE: Amount = Amount::from_sat(1_000);
+const BTC_FEE: Amount = Amount::from_sat(2_000);
 /// A sat below 50 a base unit: `BTC_AMOUNT` buys `NEX_AMOUNT`, rounded
 /// down.
 const PRICE: u64 = 49_999_999;
@@ -576,11 +577,8 @@ fn a_swap_the_engine_reopens_mid_way_completes() {
         "{steps:?}"
     );
     again.assert_swapped(&id);
-    let received = again
-        .notices()
-        .iter()
-        .filter(|n| **n == Notice::Received)
-        .count();
-    assert_eq!(received, 1, "{:?}", again.notices());
+    // The relaunched app's tracker is new: it says the confirmed lock
+    // again, then the NEX, once each.
+    assert_eq!(again.notices(), [Notice::Locked, Notice::Received]);
     world.assert_balances(&wallet);
 }

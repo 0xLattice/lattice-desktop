@@ -117,8 +117,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .build-node/.build
-          key: node-debug-macos-${{ steps.node.outputs.commit }}
-          restore-keys: node-debug-macos-
+          key: node-debug-macos-swap-e2e-${{ steps.node.outputs.commit }}
+          restore-keys: node-debug-macos-swap-e2e-
       - name: Build node binaries at NODE_COMMIT
         working-directory: .build-node
         run: |
@@ -136,6 +136,13 @@ jobs:
         with:
           node-version: 24
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .build-swap/target
+            src-tauri/target
+          key: swap-e2e-cargo-${{ steps.swap.outputs.rev }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: swap-e2e-cargo-${{ steps.swap.outputs.rev }}-
       - name: Build the lattice-swap seller at the pinned rev
         working-directory: .build-swap
         run: cargo build --locked -p lattice-swap
@@ -150,4 +157,4 @@ jobs:
         run: |
           LATTICE_NODE_BIN="$PWD/.build-node/.build/debug" \
           LATTICE_SWAP_BIN="$PWD/.build-swap/target/debug/lattice-swap" \
-          cargo test --manifest-path src-tauri/Cargo.toml swap::e2e -- --ignored --test-threads 1 --nocapture
+          cargo test --manifest-path src-tauri/Cargo.toml --features swap-e2e swap::e2e -- --ignored --test-threads 1 --nocapture
