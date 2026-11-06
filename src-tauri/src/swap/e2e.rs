@@ -437,7 +437,7 @@ impl World {
         let wallet = open_with(engine, self.config(), emit).unwrap();
         let id = start_with(
             engine,
-            self.config(),
+            || Ok(self.config()),
             offer,
             (BTC_AMOUNT.to_sat(), PRICE),
             &self.buyer_nex,

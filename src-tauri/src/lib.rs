@@ -786,6 +786,8 @@ pub fn run() {
             print_page,
             swap::swap_settings,
             swap::swap_set_network,
+            swap::swap_set_esplora,
+            swap::swap_check_esplora,
             swap::swap_wallet_exists,
             swap::swap_wallet_open,
             swap::swap_balance,

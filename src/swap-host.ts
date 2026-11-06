@@ -7,12 +7,12 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type SwapNetwork = "bitcoin" | "signet";
 
-/** Where swaps run. The page sets only the network; an Esplora or relay
- * is the operator's, in settings.json (left out: mempool.space's, and
- * lattice-swap-relay.fly.dev). */
+/** Where swaps run. The page sets the network and your own Esplora on each
+ * network (one missing: mempool.space's); a relay is the operator's, in
+ * settings.json (null: lattice-swap-relay.fly.dev). */
 export interface SwapSettings {
   network: SwapNetwork;
-  esplora?: string | null;
+  esplora?: Partial<Record<SwapNetwork, string>> | null;
   relay?: string | null;
 }
 
@@ -85,6 +85,12 @@ export interface SwapError {
 
 export const swapSettings = () => invoke<SwapSettings>("swap_settings");
 export const swapSetNetwork = (network: SwapNetwork) => invoke<void>("swap_set_network", { network });
+/** Chooses your own Esplora at `esplora` for `network`, or mempool.space's
+ * when null. Refused while a swap runs, for one on another network, and
+ * once swaps run on another network. */
+export const swapSetEsplora = (network: SwapNetwork, esplora: string | null) => invoke<void>("swap_set_esplora", { network, esplora });
+/** Refused unless the Esplora is reachable and on the swaps' network. */
+export const swapCheckEsplora = () => invoke<void>("swap_check_esplora");
 export const swapWalletExists = () => invoke<boolean>("swap_wallet_exists");
 /** Opens the swap wallet, made if there is none, and resumes its swaps: its
  * deposit address. Refused until the node runs. */
