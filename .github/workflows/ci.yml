@@ -93,3 +93,61 @@ jobs:
           LATTICE_APP="$PWD/src-tauri/target/release/bundle/macos/Lattice.app" \
           LATTICE_GPU_MINER="$PWD/.build-miner-gpu/target/release/lattice-miner-gpu" \
           npm test
+
+  # A whole BTC->NEX swap through the desktop's swap engine (src-tauri/src/
+  # swap/e2e.rs) on real chains: a regtest bitcoind, lattice-node at
+  # NODE_COMMIT, and a lattice-swap seller at the rev src-tauri/Cargo.toml
+  # pins.
+  swap-e2e:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - id: node
+        run: echo "commit=$(tr -d '[:space:]' < NODE_COMMIT)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: 0xLattice/lattice-node
+          ref: ${{ steps.node.outputs.commit }}
+          path: .build-node
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+      - uses: actions/cache@v4
+        with:
+          path: .build-node/.build
+          key: node-debug-macos-${{ steps.node.outputs.commit }}
+          restore-keys: node-debug-macos-
+      - name: Build node binaries at NODE_COMMIT
+        working-directory: .build-node
+        run: |
+          for product in lattice-node lattice-mining-coordinator; do
+            swift build -c debug --product "$product"
+          done
+      - id: swap
+        run: echo "rev=$(sed -n 's/^swap = .*rev = "\([0-9a-f]*\)".*/\1/p' src-tauri/Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: 0xLattice/lattice-swap
+          ref: ${{ steps.swap.outputs.rev }}
+          path: .build-swap
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the lattice-swap seller at the pinned rev
+        working-directory: .build-swap
+        run: cargo build --locked -p lattice-swap
+      - run: npm ci
+      - run: npm run build
+      - name: Stage placeholder sidecars
+        run: |
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/binaries
+          for n in lattice lattice-node lattice-mining-coordinator lattice-miner lattice-miner-gpu; do printf '#!/bin/sh\nexit 1\n' > "src-tauri/binaries/$n-$triple"; chmod +x "src-tauri/binaries/$n-$triple"; done
+      - name: The swap engine on real chains
+        run: |
+          LATTICE_NODE_BIN="$PWD/.build-node/.build/debug" \
+          LATTICE_SWAP_BIN="$PWD/.build-swap/target/debug/lattice-swap" \
+          cargo test --manifest-path src-tauri/Cargo.toml swap::e2e -- --ignored --test-threads 1 --nocapture

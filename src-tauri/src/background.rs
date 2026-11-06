@@ -46,7 +46,7 @@ const TICK: Duration = Duration::from_secs(1);
 
 /// A step a swap is notified at, once per swap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Notice {
+pub(crate) enum Notice {
     /// The BTC lock has its confirmations: the swap is under way.
     Locked,
     /// The swap is cancelled and the BTC refund is under way.
@@ -177,7 +177,7 @@ fn quit_warning<'a>(statuses: impl Iterator<Item = &'a Value>, now: u64) -> Stri
 /// What the shell knows of the swaps, from their status reports and the
 /// engine.
 #[derive(Default)]
-struct Tracker {
+pub(crate) struct Tracker {
     /// Each held swap's last status.
     last: HashMap<String, Value>,
     /// The followed swap, whose status the tray shows.
@@ -193,7 +193,7 @@ struct Tracker {
 
 impl Tracker {
     /// A swap's status report: the notice it calls for, if not already shown.
-    fn report(&mut self, status: &Value) -> Option<Notice> {
+    pub(crate) fn report(&mut self, status: &Value) -> Option<Notice> {
         let id = status["swapId"].as_str()?.to_string();
         // Known punished before this report: a punish already said, or one
         // resumed to ask again. A punish in this run goes from refunding
