@@ -33,6 +33,17 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 
+[features]
+# Builds the real-chain swap test (src/swap/e2e.rs): corepc-node downloads
+# bitcoind when it builds.
+swap-e2e = ["corepc-node/download"]
+
 [dev-dependencies]
 # Signs an offer for the relay listing's test.
 ed25519-dalek = "2"
+# The real-chain swap (src/swap/e2e.rs), as lattice-swap's own e2e runs
+# one: a regtest bitcoind, downloaded only with `swap-e2e`, and an Esplora
+# shim over it.
+corepc-node = { version = "0.12", features = ["30_2"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }

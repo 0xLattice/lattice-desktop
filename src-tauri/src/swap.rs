@@ -1793,3 +1793,6 @@ mod tests {
         assert!(listed("<html>", Network::Bitcoin, genesis).is_err());
     }
 }
+
+#[cfg(all(test, feature = "swap-e2e"))]
+mod e2e;
