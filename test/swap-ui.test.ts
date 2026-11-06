@@ -376,15 +376,19 @@ test("Bitcoin is read through mempool.space until your own Esplora is saved, ref
   // The trust note is the saved choice's, until it is saved.
   assert.ok(!url.hidden && !trust.hidden);
   type('input[aria-label="Your Esplora URL"]', OWN);
-  // Refused: the shell's words, nothing saved; gone once the choice changes.
+  // Refused: the shell's words, nothing saved, the choice and the URL
+  // typed kept to fix; the words gone once it changes.
+  const reads = () => calls.filter(([cmd]) => cmd === "swap_settings").length;
+  const before = reads();
   button("Save").click();
   await until("the refusal", () => text().includes("not signet's"));
   assert.equal(saved, null);
-  assert.equal(server.value, "public", "the screen shows what is saved");
-  server.value = "own";
-  server.dispatchEvent(new window.Event("change", { bubbles: true }));
-  assert.ok(!text().includes("not signet's"));
+  assert.ok(reads() > before, "the settings on disk are read again");
+  assert.equal(server.value, "own", "the choice is kept");
+  assert.equal(url.value, OWN, "the URL typed is kept");
+  assert.ok(!url.hidden && !trust.hidden, "the trust note is still the one saved's");
   type('input[aria-label="Your Esplora URL"]', OWN);
+  assert.ok(!text().includes("not signet's"));
   button("Save").click();
   await until("your Esplora's status", () => text().includes(`${OWN}/block-height/0: timed out`));
   assert.equal(saved, OWN);

@@ -44,7 +44,8 @@ const plainHttp = (url: string) =>
  * whether the one saved answers on the swaps' network; Nexus through this
  * app's node. A change is for the next swap: the shell refuses it while one
  * runs. `save` saves your own Esplora (null: the public one), the refusal
- * if any, and the screen then shows the settings on disk (`show`).
+ * if any, and the screen then shows the settings on disk (`show`), unless
+ * it refused the save and they are unchanged.
  */
 function serversForm(save: (esplora: string | null) => Promise<string | null>) {
   const bitcoin = h("select", { class: "picker", "aria-label": "Bitcoin server" },
@@ -174,8 +175,9 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
 
   /** `act`, a save, one at a time: the network picker and the servers'
    * Save held until it ends, and then the settings on disk shown, whatever
-   * it did (a save can be written and the wallet then fail to open). The
-   * refusal, if any. */
+   * it did (a save can be written and the wallet then fail to open), except
+   * that a refused save that left them as they were keeps the servers as
+   * typed. The refusal, if any. */
   const saving = async (act: () => Promise<void>): Promise<string | null> => {
     picker.disabled = true;
     servers.hold(true);
@@ -192,8 +194,9 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
       refused ??= message(e);
     }
     picker.value = settings.network;
-    if (settings.network !== before.network || ownEsplora(settings) !== ownEsplora(before)) show(settings.network);
-    servers.show(settings);
+    const changed = settings.network !== before.network || ownEsplora(settings) !== ownEsplora(before);
+    if (changed) show(settings.network);
+    if (changed || refused === null) servers.show(settings);
     picker.disabled = false;
     servers.hold(false);
     return refused;

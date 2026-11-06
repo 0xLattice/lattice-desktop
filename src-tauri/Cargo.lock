@@ -2387,6 +2387,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "ureq",
+ "url",
 ]
 
 [[package]]
