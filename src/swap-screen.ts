@@ -14,7 +14,7 @@ import type { AppConfig } from "../vendor/lattice-swap-web/src/config.ts";
 import "../vendor/lattice-swap-web/src/style.css";
 import { h } from "../vendor/nexus-wallet/src/popup/app.ts";
 import { connecting, plainly, SAVED_BY_SHELL } from "./swap-driver/index.ts";
-import { swapCheckEsplora, swapCheckNexus, swapRestoreFile, swapSetEsplora, swapSetNetwork, swapSetNexus, swapSettings, type SwapNetwork, type SwapSettings } from "./swap-host.ts";
+import { swapCheckEsplora, swapCheckNexus, swapRestoreFile, swapSetNetwork, swapSetServers, swapSettings, type SwapNetwork, type SwapSettings } from "./swap-host.ts";
 
 /** The relay the shell lists offers from when its settings name none
  * (swap.rs's `DEFAULT_RELAY`): shown only. */
@@ -226,10 +226,7 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
     return refused;
   };
 
-  const servers = serversForm((esplora, own) => saving(async () => {
-    await swapSetEsplora(settings.network, esplora);
-    await swapSetNexus(settings.network, own);
-  }));
+  const servers = serversForm((esplora, own) => saving(() => swapSetServers(settings.network, esplora, own)));
   servers.show(settings);
 
   picker.addEventListener("change", async () => {

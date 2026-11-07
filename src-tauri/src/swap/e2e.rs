@@ -432,7 +432,7 @@ impl World {
     /// wallet deposits what it needs: the swap's id and the wallet's
     /// address.
     fn take(&self, engine: &Mutex<Engine>, offer: &str, emit: &Emit) -> (String, String) {
-        let wallet = open_with(engine, self.config(), emit).unwrap();
+        let wallet = open_with(engine, || Ok(self.config()), emit).unwrap();
         let id = start_with(
             engine,
             || Ok(self.config()),
@@ -559,7 +559,7 @@ fn a_swap_the_engine_reopens_mid_way_completes() {
 
     let engine = Mutex::new(Engine::default());
     let (emit, again) = Seen::emitter();
-    drop(open_with(&engine, world.config(), &emit).unwrap());
+    drop(open_with(&engine, || Ok(world.config()), &emit).unwrap());
     let followed = lock(&engine)
         .unwrap()
         .followed
