@@ -4,14 +4,18 @@
 //! engine in its Tauri backend.
 //!
 //! - Bitcoin is read through an Esplora, mempool.space's by default; NEX
-//!   through this app's own node, on the pinned loopback RPC port with its
-//!   cookie, which the engine reads again whenever the node restarts. The
-//!   wallet opens only once a port is pinned, and opens again on a new one.
+//!   through the public read node [`PUBLIC_NEXUS`] by default, with no
+//!   cookie, or this app's own node, on the pinned loopback RPC port with
+//!   its cookie, which the engine reads again whenever the node restarts.
+//!   On its own node, the wallet opens only once a port is pinned, and
+//!   opens again on a new one.
 //! - The page chooses the Bitcoin network (mainnet by default, signet to
-//!   test) and the Esplora: mempool.space's by default, or the user's own,
+//!   test), the Esplora: mempool.space's by default, or the user's own,
 //!   one per network, refused unless it is on that network, as Sparrow
-//!   chooses between a public server and your own. Neither changes while a
-//!   swap runs: it keeps the Esplora it started with. The relay is the
+//!   chooses between a public server and your own; and the Nexus node, per
+//!   network: the public one, refused unless it is on the Nexus and takes
+//!   transactions, or this app's. None changes while a swap runs: it keeps
+//!   the Esplora and the Nexus node it started with. The relay is the
 //!   operator's, edited by hand in `<app_root>/swap/settings.json`. Every
 //!   URL is https, or plain http to this machine or a local network (a
 //!   private or link-local address, `localhost`, `.local`, `.lan`,
@@ -28,7 +32,7 @@
 //!   taken its offer and not ended is resumed, and every punished one, to ask
 //!   the seller for `s` again.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -54,15 +58,21 @@ use crate::{
 
 /// The relay whose offers are listed unless the settings name another.
 pub const DEFAULT_RELAY: &str = "https://lattice-swap-relay.fly.dev";
+/// The Nexus node read unless the settings choose this app's own: a public
+/// read port that takes submits, as lattice-swap's CLI reads by default.
+/// One for every Bitcoin network: there is one Nexus,
+/// [`swap_nexus_tx::MAINNET_GENESIS`]'s, and signet swaps trade on it too.
+pub const PUBLIC_NEXUS: &str = "https://lattice-mainnet-read.fly.dev";
 /// The Bitcoin networks a swap may run on: mainnet, and signet to test.
 const NETWORKS: [Network; 2] = [Network::Bitcoin, Network::Signet];
 /// The most a relay's offer board or a recovery file may hold.
 const MAX_BODY: u64 = 8 * 1024 * 1024;
 
 /// Where swaps run: the Bitcoin network, the user's own Esplora on each
-/// network that has one, and the relay when not the default. Kept in
-/// `<app_root>/swap/settings.json`; the page sets the network and the
-/// Esplora.
+/// network that has one, the networks whose swaps read Nexus on this app's
+/// own node, and the relay when not the default. Kept in
+/// `<app_root>/swap/settings.json`; the page sets the network, the Esplora
+/// and the Nexus node.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", try_from = "Stored")]
 pub struct Settings {
@@ -71,6 +81,10 @@ pub struct Settings {
     /// a build from before one per network still reads the file.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub esplora: BTreeMap<Network, String>,
+    /// [`PUBLIC_NEXUS`] on a network missing here. Left out when empty, as
+    /// a build from before it ignores it.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub own_nexus: BTreeSet<Network>,
     pub relay: Option<String>,
 }
 
@@ -79,6 +93,7 @@ impl Default for Settings {
         Self {
             network: Network::Bitcoin,
             esplora: BTreeMap::new(),
+            own_nexus: BTreeSet::new(),
             relay: None,
         }
     }
@@ -91,6 +106,8 @@ struct Stored {
     network: Network,
     #[serde(default)]
     esplora: Option<Esploras>,
+    #[serde(default, rename = "ownNexus")]
+    own_nexus: BTreeSet<Network>,
     #[serde(default)]
     relay: Option<String>,
 }
@@ -124,6 +141,7 @@ impl TryFrom<Stored> for Settings {
         Ok(Self {
             network: stored.network,
             esplora,
+            own_nexus: stored.own_nexus,
             relay: stored.relay,
         })
     }
@@ -206,6 +224,12 @@ impl Settings {
     fn relay(&self) -> &str {
         self.relay.as_deref().unwrap_or(DEFAULT_RELAY)
     }
+
+    /// Whether swaps on the network they run on read Nexus on this app's
+    /// own node, not [`PUBLIC_NEXUS`].
+    fn own_nexus(&self) -> bool {
+        self.own_nexus.contains(&self.network)
+    }
 }
 
 /// Refuses an Esplora that cannot be read, or is on another chain than
@@ -215,7 +239,29 @@ fn check_esplora(url: &str, network: Network) -> Result<()> {
     let key = swap::wallet::Key::new(&network.to_string())?;
     Esplora::new(url, key, Duration::from_secs(20))
         .check_network(network)
+        .map_err(err)?
         .map_err(err)
+}
+
+/// Refuses a Nexus node that cannot be read, that takes no transactions,
+/// or that is on another Nexus than [`swap_nexus_tx::MAINNET_GENESIS`]'s or
+/// cannot say how deep a transaction is (`swap::session::check_nexus`), as
+/// the engine refuses one for a new swap: a public read port at `url`, with
+/// no cookie, or this app's node with its cookie.
+fn check_nexus(url: &str, cookie: Option<&Path>) -> Result<()> {
+    use swap_nexus_tx::rpc::Client;
+    let timeout = Duration::from_secs(20);
+    let client = match cookie {
+        None => Client::public(url, timeout),
+        Some(cookie) => Client::from_cookie_file(url, cookie, timeout),
+    };
+    let read = |e: swap_nexus_tx::rpc::Error| format!("{url}: {e}");
+    if cookie.is_none() && client.chain_info().map_err(read)?["acceptsSubmit"] != true {
+        return Err(format!("refused: {url} takes no transactions"));
+    }
+    swap::session::check_nexus(&client, swap_nexus_tx::MAINNET_GENESIS)
+        .map_err(read)?
+        .map_err(|refusal| refusal.to_string())
 }
 
 fn settings_path(root: &Path) -> PathBuf {
@@ -262,17 +308,27 @@ fn wallet_exists(root: &Path, network: Network) -> bool {
         .exists()
 }
 
-/// The engine's config: the wallet's directory, the Esplora, and the app's
-/// node on the pinned port, the one port its cookie goes to. None pinned,
-/// none: the wallet waits for the node.
-fn config_at(root: &Path, host: &Path, pinned: Option<u16>, settings: &Settings) -> Result<Config> {
+/// The app's node on the pinned port, the one port its cookie goes to.
+fn own_node(pinned: Option<u16>) -> Result<String> {
     let port = pinned.ok_or("the node is not running: swaps reach NEX through it")?;
+    Ok(format!("http://127.0.0.1:{port}"))
+}
+
+/// The engine's config: the wallet's directory, the Esplora, and the Nexus
+/// node: [`PUBLIC_NEXUS`] with no cookie, or the app's own with its cookie
+/// ([`own_node`]; none pinned, none: the wallet waits for the node).
+fn config_at(root: &Path, host: &Path, pinned: Option<u16>, settings: &Settings) -> Result<Config> {
+    let (nexus, cookie) = if settings.own_nexus() {
+        (own_node(pinned)?, Some(cookie_path(host)))
+    } else {
+        (PUBLIC_NEXUS.to_string(), None)
+    };
     Ok(Config::new(
         swap_dir(root, settings.network)?,
         settings.network,
         settings.esplora()?,
-        format!("http://127.0.0.1:{port}"),
-        cookie_path(host),
+        nexus,
+        cookie,
         swap_nexus_tx::MAINNET_GENESIS.into(),
     ))
 }
@@ -676,7 +732,7 @@ fn waiting(held: &Engine) -> Option<String> {
 /// The wallet for `config`, opened if it is not and its swaps resumed. One
 /// open for another config (a node on a new port) is closed first, and its
 /// threads waited for off the lock; refused if that would leave a running
-/// swap's wallet or Esplora, which it keeps to its end.
+/// swap's wallet, Esplora or Nexus node, which it keeps to its end.
 fn open_with(engine: &Mutex<Engine>, config: Config, emit: &Emit) -> Result<Arc<Wallet>> {
     open_patiently(engine, config, emit, OPEN_PATIENCE)
 }
@@ -694,7 +750,11 @@ fn open_patiently(
         }
         if let (Some(open), Some(id)) = (&held.wallet, held.running()) {
             let open = open.config();
-            if open.dir != config.dir || open.esplora != config.esplora {
+            // Its node may move to a new port, not to another Nexus node.
+            if open.dir != config.dir
+                || open.esplora != config.esplora
+                || open.nexus_cookie.is_some() != config.nexus_cookie.is_some()
+            {
                 return Err(format!(
                     "refused: swap {id} is in progress on the settings it started with"
                 ));
@@ -813,7 +873,8 @@ fn running_in(dir: &Path, network: Network) -> Result<Option<String>> {
 
 /// Saves `<root>/swap/settings.json` as `change` makes it of the settings
 /// saved, one save at a time (`saving` held through it): refused if the
-/// user's own Esplora it sets is not on its network, while a swap runs on
+/// user's own Esplora it sets is not on its network (and as `change`
+/// refuses, a public Nexus node that will not do), while a swap runs on
 /// the settings it leaves, which keep to its end, and while the wallet is
 /// reopened, which may resume
 /// a swap on them. Written on the
@@ -902,6 +963,34 @@ fn set_esplora_with(
     })
 }
 
+/// Sets `network`'s Nexus node: this app's own when `own`, else the public
+/// one at `public`, refused unless [`check_nexus`] passes it; one saved
+/// before is not read again. The rest kept. Refused once swaps run on
+/// another network, as [`set_esplora_with`].
+fn set_nexus_with(
+    engine: &Mutex<Engine>,
+    saving: &Mutex<()>,
+    root: &Path,
+    network: Network,
+    own: bool,
+    public: &str,
+) -> Result<()> {
+    save_with(engine, saving, root, |mut settings| {
+        if settings.network != network {
+            return Err(format!(
+                "refused: swaps now run on {}, not {network}",
+                settings.network
+            ));
+        }
+        if own {
+            settings.own_nexus.insert(network);
+        } else if settings.own_nexus.remove(&network) {
+            check_nexus(public, None)?;
+        }
+        Ok(settings)
+    })
+}
+
 /// The engine, as the app manages it, and the lock held through each save
 /// of the settings (see `save_with`).
 #[derive(Default)]
@@ -940,13 +1029,13 @@ async fn with_wallet<T: Send + 'static>(
     .await
 }
 
-/// Opens the swap wallet, if there is one, once the node's port is pinned,
-/// and again when it moves: at launch and after `lattice up`. Its swaps
-/// carry on.
+/// Opens the swap wallet, if there is one, at launch; on this app's own
+/// Nexus node, once the node's port is pinned, and again when it moves
+/// (after `lattice up`). Its swaps carry on.
 pub fn sync(app: &AppHandle) -> Result<()> {
     let root = app_root(app)?;
     let settings = load_settings(&root)?;
-    if !wallet_exists(&root, settings.network) || pinned(app)?.is_none() {
+    if !wallet_exists(&root, settings.network) || (settings.own_nexus() && pinned(app)?.is_none()) {
         return Ok(());
     }
     open_with(
@@ -994,6 +1083,34 @@ pub async fn swap_check_esplora(app: AppHandle) -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || check_esplora(&settings.esplora()?, settings.network))
         .await
         .map_err(err)?
+}
+
+/// Chooses the Nexus node swaps on `network` read: this app's own when
+/// `own`, else [`PUBLIC_NEXUS`]. Refused while a swap runs, for a public
+/// node that will not do, and once swaps run on another network.
+#[tauri::command]
+pub async fn swap_set_nexus(app: AppHandle, network: Network, own: bool) -> Result<()> {
+    blocking(app, move |app, engine| {
+        let saving = &app.state::<Swaps>().1;
+        set_nexus_with(engine, saving, &app_root(app)?, network, own, PUBLIC_NEXUS)?;
+        sync(app)
+    })
+    .await
+}
+
+/// Whether the Nexus node swaps read is reachable, on the Nexus, and (a
+/// public one) takes transactions: the refusal if not.
+#[tauri::command]
+pub async fn swap_check_nexus(app: AppHandle) -> Result<()> {
+    let settings = load_settings(&app_root(&app)?)?;
+    let own = settings.own_nexus().then(|| host_root(&app)).transpose()?;
+    let pinned = pinned(&app)?;
+    tauri::async_runtime::spawn_blocking(move || match own {
+        None => check_nexus(PUBLIC_NEXUS, None),
+        Some(host) => check_nexus(&own_node(pinned)?, Some(&cookie_path(&host))),
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Whether there is a swap wallet, none made: as the driver's
@@ -1258,6 +1375,8 @@ mod tests {
         assert!(driver.contains(&format!("\"{}\"", swap_nexus_tx::MAINNET_GENESIS)));
         let screen = include_str!("../../src/swap-screen.ts");
         assert!(screen.contains(&format!("\"{DEFAULT_RELAY}\"")));
+        let host = PUBLIC_NEXUS.strip_prefix("https://").unwrap();
+        assert!(screen.contains(&format!("\"{host}\"")));
     }
 
     /// A fresh directory of its own: named for the test, this process, and
@@ -1522,10 +1641,12 @@ mod tests {
                 (Network::Bitcoin, "http://umbrel.local:3006/api".into()),
                 (Network::Signet, "https://signet.example/api".into()),
             ]),
+            own_nexus: BTreeSet::from([Network::Signet]),
             relay: Some("https://relay.example".into()),
         };
         let saved = serde_json::to_value(&own).unwrap();
         assert_eq!(saved["esplora"]["signet"], "https://signet.example/api");
+        assert_eq!(saved["ownNexus"], json!(["signet"]));
         assert_eq!(serde_json::from_value::<Settings>(saved).unwrap(), own);
         // One URL, as such a build saves it: the network's it was saved for.
         let old: Settings = serde_json::from_value(
@@ -1798,7 +1919,13 @@ mod tests {
             esplora: "http://127.0.0.1:10".into(),
             ..offline(&dir)
         };
-        for config in [offline(&other), elsewhere] {
+        // Nor one reading Nexus on another node: on a new port it may.
+        let public = Config {
+            nexus: PUBLIC_NEXUS.into(),
+            nexus_cookie: None,
+            ..offline(&dir)
+        };
+        for config in [offline(&other), elsewhere, public] {
             let refused = open_with(&engine, config, &emit).err().unwrap();
             assert!(refused.contains(&waiting), "{refused}");
             assert_eq!(lock(&engine).unwrap().running(), Some(waiting.as_str()));
@@ -1810,19 +1937,136 @@ mod tests {
     }
 
     #[test]
-    fn nex_is_reached_only_on_the_pinned_port() {
+    fn nex_is_read_publicly_by_default_and_on_ones_own_node_only_on_the_pinned_port() {
         let root = temp("config");
         let host = root.join("host");
-        let settings = Settings::default();
+        // Public: no node needed, and no cookie sent.
+        let public = Settings::default();
+        for pinned in [None, Some(18080)] {
+            let config = config_at(&root, &host, pinned, &public).unwrap();
+            assert_eq!(config.nexus, PUBLIC_NEXUS);
+            assert_eq!(config.nexus_cookie, None);
+        }
+        // Your node, on this network only.
+        let own = Settings {
+            own_nexus: BTreeSet::from([Network::Bitcoin]),
+            ..Settings::default()
+        };
         assert!(
-            config_at(&root, &host, None, &settings).is_err(),
+            config_at(&root, &host, None, &own).is_err(),
             "no pin, no wallet"
         );
-        let config = config_at(&root, &host, Some(18080), &settings).unwrap();
+        let config = config_at(&root, &host, Some(18080), &own).unwrap();
         assert_eq!(config.nexus, "http://127.0.0.1:18080");
-        assert_eq!(config.nexus_cookie, host.join("chains/Nexus/.cookie"));
+        assert_eq!(config.nexus_cookie, Some(host.join("chains/Nexus/.cookie")));
         assert_eq!(config.dir, root.join("swap").join("bitcoin"));
+        let signet = Settings {
+            network: Network::Signet,
+            ..own
+        };
+        assert_eq!(config_at(&root, &host, None, &signet).unwrap().nexus, PUBLIC_NEXUS);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A public Nexus read port on loopback, on the Nexus of `genesis`,
+    /// taking transactions if `accepts`: its URL.
+    fn nexus_on(genesis: &str, accepts: bool) -> String {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let genesis = genesis.to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut request = [0u8; 4096];
+                let n = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..n]).to_string();
+                let body = if request.starts_with("GET /api/chain/info ") {
+                    json!({
+                        "chain": ["Nexus"], "genesisHash": genesis,
+                        "height": "1", "tipCID": "tip", "acceptsSubmit": accepts,
+                    })
+                } else {
+                    json!({ "phase": "active", "height": "1", "tipCID": "tip" })
+                }
+                .to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn the_nexus_node_is_public_by_default_and_ones_own_by_choice() {
+        let root = temp("nexus");
+        let engine = Mutex::new(Engine::default());
+        let saving = Mutex::new(());
+        let genesis = swap_nexus_tx::MAINNET_GENESIS;
+        let good = nexus_on(genesis, true);
+        let set = |network, own, public: &str| {
+            set_nexus_with(&engine, &saving, &root, network, own, public)
+        };
+        let own = || load_settings(&root).unwrap().own_nexus;
+        assert!(!load_settings(&root).unwrap().own_nexus());
+
+        // Yours: saved, for this network only, with nothing to read.
+        set(Network::Bitcoin, true, "http://127.0.0.1:9").unwrap();
+        assert_eq!(own(), BTreeSet::from([Network::Bitcoin]));
+        let saved: Value = serde_json::from_slice(&fs::read(settings_path(&root)).unwrap()).unwrap();
+        assert_eq!(saved["ownNexus"], json!(["bitcoin"]));
+
+        // The public one, refused, nothing written: one on another Nexus,
+        // one that takes no transactions, one that cannot be read, and one
+        // for a network swaps do not run on now.
+        let refused = set(Network::Bitcoin, false, &nexus_on("bafyreianothergenesis", true)).unwrap_err();
+        assert!(refused.contains("genesis"), "{refused}");
+        let refused = set(Network::Bitcoin, false, &nexus_on(genesis, false)).unwrap_err();
+        assert!(refused.contains("takes no transactions"), "{refused}");
+        assert!(set(Network::Bitcoin, false, "http://127.0.0.1:9").is_err());
+        let refused = set(Network::Signet, true, &good).unwrap_err();
+        assert!(refused.contains("now run on bitcoin"), "{refused}");
+        assert_eq!(own(), BTreeSet::from([Network::Bitcoin]));
+
+        // A swap running on your node keeps it, its wallet closed or open.
+        let wallet = swap_dir(&root, Network::Bitcoin).unwrap();
+        let mainnet_wallet = Config {
+            network: Network::Bitcoin,
+            ..offline(&wallet)
+        };
+        drop(Wallet::open(mainnet_wallet.clone()).unwrap());
+        let running = "67".repeat(32);
+        record(&wallet, &running, true, json!({ "Locking": {} }));
+        let refused = set(Network::Bitcoin, false, &good).unwrap_err();
+        assert!(refused.contains(&running), "{refused}");
+        let (emit, _) = collect();
+        open_with(&engine, mainnet_wallet, &emit).unwrap();
+        let refused = set(Network::Bitcoin, false, &good).unwrap_err();
+        assert!(refused.contains(&running), "{refused}");
+        assert_eq!(own(), BTreeSet::from([Network::Bitcoin]));
+        close(&engine);
+
+        // Ended, the public one is chosen again, once it passes.
+        record(&wallet, &running, true, json!("Done"));
+        set(Network::Bitcoin, false, &good).unwrap();
+        assert_eq!(own(), BTreeSet::new());
+        let saved: Value = serde_json::from_slice(&fs::read(settings_path(&root)).unwrap()).unwrap();
+        assert_eq!(saved.get("ownNexus"), None, "left out, as a build before it wrote");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn settings_saved_before_a_nexus_choice_read_the_public_one() {
+        let before: Settings = serde_json::from_value(
+            json!({ "network": "signet", "esplora": { "signet": "https://signet.example/api" }, "relay": null }),
+        )
+        .unwrap();
+        assert!(before.own_nexus.is_empty());
+        assert!(!before.own_nexus());
+        assert!(serde_json::from_value::<Settings>(json!({ "network": "bitcoin", "ownNexus": ["mainnet"] })).is_err());
     }
 
     #[test]

@@ -124,17 +124,15 @@ impl Nexus {
             cookie: data.join(".cookie"),
         };
         wait_for("the node's RPC", || {
-            nexus.try_client()?.min_relay_fee().ok()
+            nexus.client().min_relay_fee().ok()
         });
         nexus
     }
 
-    fn try_client(&self) -> Option<Client> {
-        Client::from_cookie_file(&self.url, &self.cookie, TIMEOUT).ok()
-    }
-
+    /// The node's RPC, which reads its cookie at each request until it has
+    /// one.
     fn client(&self) -> Client {
-        self.try_client().expect("the node's cookie")
+        Client::from_cookie_file(&self.url, &self.cookie, TIMEOUT)
     }
 
     fn balance(&self, address: &str) -> u64 {
@@ -325,7 +323,7 @@ impl World {
         bitcoind.client.generate_to_address(1, &miner).unwrap();
         // The parties refuse a node whose index is still catching up.
         wait_for("the txindex", || {
-            wallet_client(&bitcoind, "buyer").check_node().ok()
+            wallet_client(&bitcoind, "buyer").check_node().ok().and_then(|ready| ready.ok())
         });
         let esplora = esplora::esplora(wallet_client(&bitcoind, ""));
 

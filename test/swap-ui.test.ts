@@ -132,6 +132,9 @@ async function page(t: { after(fn: () => void): void }, engine: Engine = () => u
         return null;
       case "swap_backup": return "/Users/someone/Downloads/lattice-swap-tb1qwallet.json";
       case "swap_check_esplora": return null;
+      case "swap_set_esplora": return null;
+      case "swap_set_nexus": return null;
+      case "swap_check_nexus": return null;
       default: throw new Error(`unexpected ${cmd}`);
     }
   }, { shouldMockEvents: true });
@@ -403,6 +406,65 @@ test("Bitcoin is read through mempool.space until your own Esplora is saved, ref
   assert.ok(!trust.hidden);
   assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_esplora").map(([, args]) => [args.network, args.esplora]),
     [["signet", OWN], ["signet", OWN], ["signet", null]]);
+});
+
+test("Nexus is read on the public node until your node is chosen, a refused save kept as typed", async (t) => {
+  let own: string[] = [];
+  let refusals = 1;
+  const { window, doc, calls, text, button, mount } = await page(t, (cmd, args) => {
+    if (cmd === "swap_settings") return { network: "signet", esplora: {}, ownNexus: own, relay: null };
+    if (cmd === "swap_set_nexus") {
+      const network = args.network as string;
+      if (!args.own && own.includes(network) && refusals-- > 0) throw "refused: https://lattice-mainnet-read.fly.dev takes no transactions";
+      own = args.own ? [...new Set([...own, network])] : own.filter((n) => n !== network);
+      return null;
+    }
+    if (cmd === "swap_check_nexus" && own.length > 0) throw "the node is not running: swaps reach NEX through it";
+  });
+  const style = doc.createElement("style");
+  style.textContent = readFileSync(new URL("../src/desktop.css", import.meta.url), "utf8");
+  doc.head.append(style);
+  await mount();
+  const server = doc.querySelector('select[aria-label="Nexus server"]') as HTMLSelectElement;
+  const trust = [...doc.querySelectorAll("p")].find((p) => p.textContent?.includes("how deep the seller's NEX lock is"))!;
+  const choose = (value: string) => {
+    server.value = value;
+    server.dispatchEvent(new window.Event("change", { bubbles: true }));
+  };
+  await until("public's status", () => text().includes("Connected to lattice-mainnet-read.fly.dev"));
+  assert.equal(server.value, "public");
+  assert.equal(trust.textContent, "You trust lattice-mainnet-read.fly.dev for how deep the seller's NEX lock is: keep amounts small.");
+  assert.ok(!trust.hidden);
+
+  // Your node: saved, its status its own, no trust note.
+  choose("own");
+  button("Save").click();
+  await until("your node's status", () => text().includes("the node is not running: swaps reach NEX through it"));
+  assert.deepEqual(own, ["signet"]);
+  assert.equal(server.value, "own");
+  assert.ok(trust.hidden);
+
+  // Back to the public one, refused: the shell's words, the choice kept
+  // as typed, the trust note still the saved one's.
+  choose("public");
+  button("Save").click();
+  await until("the refusal", () => text().includes("takes no transactions"));
+  assert.deepEqual(own, ["signet"]);
+  assert.equal(server.value, "public", "the choice is kept");
+  assert.ok(trust.hidden);
+  button("Save").click();
+  await until("public's status again", () => text().includes("Connected to lattice-mainnet-read.fly.dev"));
+  assert.deepEqual(own, []);
+  assert.ok(!trust.hidden);
+  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_nexus").map(([, args]) => [args.network, args.own]),
+    [["signet", true], ["signet", false], ["signet", false]]);
+
+  // The page's own Nexus field is not shown: the Servers above choose it.
+  button("Settings").click();
+  await until("the settings", () => !!doc.querySelector("input#esplora"));
+  const field = doc.querySelector("input#esplora")!.closest(".field")!.nextElementSibling!;
+  assert.ok(field.textContent?.includes("Nexus"));
+  assert.equal(window.getComputedStyle(field).display, "none");
 });
 
 test("each network shows its own Esplora, and plain http off this machine is warned of", async (t) => {

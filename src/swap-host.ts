@@ -7,12 +7,15 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type SwapNetwork = "bitcoin" | "signet";
 
-/** Where swaps run. The page sets the network and your own Esplora on each
- * network (one missing: mempool.space's); a relay is the operator's, in
- * settings.json (null: lattice-swap-relay.fly.dev). */
+/** Where swaps run. The page sets the network, your own Esplora on each
+ * network (one missing: mempool.space's), and the networks whose swaps read
+ * Nexus on this app's node (one missing: the public lattice-mainnet-read.
+ * fly.dev); a relay is the operator's, in settings.json (null:
+ * lattice-swap-relay.fly.dev). */
 export interface SwapSettings {
   network: SwapNetwork;
   esplora?: Partial<Record<SwapNetwork, string>> | null;
+  ownNexus?: SwapNetwork[] | null;
   relay?: string | null;
 }
 
@@ -91,6 +94,14 @@ export const swapSetNetwork = (network: SwapNetwork) => invoke<void>("swap_set_n
 export const swapSetEsplora = (network: SwapNetwork, esplora: string | null) => invoke<void>("swap_set_esplora", { network, esplora });
 /** Refused unless the Esplora is reachable and on the swaps' network. */
 export const swapCheckEsplora = () => invoke<void>("swap_check_esplora");
+/** Chooses this app's node (`own`) or the public one for `network`'s swaps
+ * to read Nexus on. Refused while a swap runs, for a public node that is
+ * unreachable, on another Nexus or takes no transactions, and once swaps
+ * run on another network. */
+export const swapSetNexus = (network: SwapNetwork, own: boolean) => invoke<void>("swap_set_nexus", { network, own });
+/** Refused unless the Nexus node is reachable, on the Nexus, and (a public
+ * one) takes transactions. */
+export const swapCheckNexus = () => invoke<void>("swap_check_nexus");
 export const swapWalletExists = () => invoke<boolean>("swap_wallet_exists");
 /** Opens the swap wallet, made if there is none, and resumes its swaps: its
  * deposit address. Refused until the node runs. */
