@@ -535,16 +535,16 @@ test("one save at a time, and the screen shows what was saved when the wallet th
   assert.equal(server.value, "public", "mainnet has no Esplora of yours");
 });
 
-test("a save refused for a running swap says so plainly", async (t) => {
-  const { doc, text, button, mount, state } = await page(t, (cmd) => {
-    if (cmd === "swap_set_esplora") throw "refused: swap swap-a is in progress; one swap at a time";
+test("a running swap's servers can change, its network is refused plainly", async (t) => {
+  const { doc, calls, text, button, mount, state } = await page(t, (cmd) => {
     if (cmd === "swap_set_network") throw "refused: swap swap-z is running on signet";
   });
   state.followed = status("swap-a", { running: true });
   await mount();
+  assert.ok(text().includes("A running swap continues on the servers you save."));
   button("Save").click();
-  await until("the refusal", () => text().includes("A swap is running: change this once it ends."));
-  assert.ok(!text().includes("swap-a is"));
+  await until("the save", () => calls.some(([cmd]) => cmd === "swap_set_nexus"));
+  assert.ok(!text().includes("A swap is running"));
   const picker = doc.querySelector('select[aria-label="Bitcoin network"]') as HTMLSelectElement;
   picker.value = "bitcoin";
   picker.dispatchEvent(new (doc.defaultView!).Event("change", { bubbles: true }));

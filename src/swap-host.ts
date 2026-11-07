@@ -89,15 +89,15 @@ export interface SwapError {
 export const swapSettings = () => invoke<SwapSettings>("swap_settings");
 export const swapSetNetwork = (network: SwapNetwork) => invoke<void>("swap_set_network", { network });
 /** Chooses your own Esplora at `esplora` for `network`, or mempool.space's
- * when null. Refused while a swap runs, for one on another network, and
- * once swaps run on another network. */
+ * when null; a running swap goes on on it. Refused for one on another
+ * network, and once swaps run on another network. */
 export const swapSetEsplora = (network: SwapNetwork, esplora: string | null) => invoke<void>("swap_set_esplora", { network, esplora });
 /** Refused unless the Esplora is reachable and on the swaps' network. */
 export const swapCheckEsplora = () => invoke<void>("swap_check_esplora");
 /** Chooses this app's node (`own`) or the public one for `network`'s swaps
- * to read Nexus on. Refused while a swap runs, for a public node that is
- * unreachable, on another Nexus or takes no transactions, and once swaps
- * run on another network. */
+ * to read Nexus on; a running swap goes on on it. Refused for a public node
+ * that is unreachable, on another Nexus or takes no transactions, and once
+ * swaps run on another network. */
 export const swapSetNexus = (network: SwapNetwork, own: boolean) => invoke<void>("swap_set_nexus", { network, own });
 /** Refused unless the Nexus node is reachable, on the Nexus, and (a public
  * one) takes transactions. */

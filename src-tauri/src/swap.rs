@@ -14,8 +14,10 @@
 //!   one per network, refused unless it is on that network, as Sparrow
 //!   chooses between a public server and your own; and the Nexus node, per
 //!   network: the public one, refused unless it is on the Nexus and takes
-//!   transactions, or this app's. None changes while a swap runs: it keeps
-//!   the Esplora and the Nexus node it started with. The relay is the
+//!   transactions, or this app's. The network does not change while a swap
+//!   runs; its Esplora and Nexus node may, and the swap goes on on them,
+//!   which its resume checks again (a server that failed or misreports
+//!   must not hold a refund). The relay is the
 //!   operator's, edited by hand in `<app_root>/swap/settings.json`. Every
 //!   URL is https, or plain http to this machine or a local network (a
 //!   private or link-local address, `localhost`, `.local`, `.lan`,
@@ -730,9 +732,10 @@ fn waiting(held: &Engine) -> Option<String> {
 }
 
 /// The wallet for `config`, opened if it is not and its swaps resumed. One
-/// open for another config (a node on a new port) is closed first, and its
-/// threads waited for off the lock; refused if that would leave a running
-/// swap's wallet, Esplora or Nexus node, which it keeps to its end.
+/// open for another config (a node on a new port, another server saved) is
+/// closed first, and its threads waited for off the lock, and its swaps
+/// resumed on `config`, which checks its servers again; refused if that
+/// would leave a running swap's wallet, which it keeps to its end.
 fn open_with(engine: &Mutex<Engine>, config: Config, emit: &Emit) -> Result<Arc<Wallet>> {
     open_patiently(engine, config, emit, OPEN_PATIENCE)
 }
@@ -749,12 +752,7 @@ fn open_patiently(
             return Ok(wallet);
         }
         if let (Some(open), Some(id)) = (&held.wallet, held.running()) {
-            let open = open.config();
-            // Its node may move to a new port, not to another Nexus node.
-            if open.dir != config.dir
-                || open.esplora != config.esplora
-                || open.nexus_cookie.is_some() != config.nexus_cookie.is_some()
-            {
+            if open.config().dir != config.dir {
                 return Err(format!(
                     "refused: swap {id} is in progress on the settings it started with"
                 ));
@@ -874,13 +872,13 @@ fn running_in(dir: &Path, network: Network) -> Result<Option<String>> {
 /// Saves `<root>/swap/settings.json` as `change` makes it of the settings
 /// saved, one save at a time (`saving` held through it): refused if the
 /// user's own Esplora it sets is not on its network (and as `change`
-/// refuses, a public Nexus node that will not do), while a swap runs on
-/// the settings it leaves, which keep to its end, and while the wallet is
-/// reopened, which may resume
-/// a swap on them. Written on the
-/// engine's lock, the wallet open taken out there, to be opened again on
-/// the new settings: no swap starts, nor wallet opens, on the settings
-/// left.
+/// refuses, a public Nexus node that will not do), while the wallet is
+/// reopened, which may resume a swap on the settings left, and, for
+/// another network, while a swap runs on the one it leaves. Written on the
+/// engine's lock, where a swap starts only on the settings saved. Another
+/// network's: the wallet open is taken out there. Another server on the
+/// same network: the wallet open stays, its swaps running, until it is
+/// opened on the new settings (`open_with`), which resumes them there.
 fn save_with(
     engine: &Mutex<Engine>,
     saving: &Mutex<()>,
@@ -899,13 +897,16 @@ fn save_with(
     if let Some(url) = next.own().filter(|url| leaving.esplora.get(&next.network) != Some(url)) {
         check_esplora(url, next.network)?;
     }
+    let moves = leaving.network != next.network;
     let detached = {
         let mut held = lock(engine)?;
-        held.refuse_running()?;
         if held.reopening {
             return Err("refused: the swap wallet is being reopened; try again".into());
         }
-        if held.wallet.is_none() {
+        if moves {
+            held.refuse_running()?;
+        }
+        if moves && held.wallet.is_none() {
             let network = leaving.network;
             if let Some(id) = running_in(&root.join("swap").join(network.to_string()), network)? {
                 return Err(format!("refused: swap {id} is running on {network}"));
@@ -917,7 +918,11 @@ fn save_with(
             &serde_json::to_vec_pretty(&next).map_err(err)?,
             0o600,
         )?;
-        held.detach()
+        if moves {
+            held.detach()
+        } else {
+            Detached::default()
+        }
     };
     detached.finish();
     Ok(())
@@ -1063,9 +1068,9 @@ pub async fn swap_set_network(app: AppHandle, network: Network) -> Result<()> {
 }
 
 /// Chooses the Esplora swaps on `network` read Bitcoin through: the user's
-/// own, or mempool.space's when `esplora` is null. Refused while a swap
-/// runs, for an Esplora on another network, and once swaps run on another
-/// network.
+/// own, or mempool.space's when `esplora` is null; a running swap goes on
+/// on it. Refused for an Esplora on another network, and once swaps run on
+/// another network.
 #[tauri::command]
 pub async fn swap_set_esplora(app: AppHandle, network: Network, esplora: Option<String>) -> Result<()> {
     blocking(app, move |app, engine| {
@@ -1086,8 +1091,8 @@ pub async fn swap_check_esplora(app: AppHandle) -> Result<()> {
 }
 
 /// Chooses the Nexus node swaps on `network` read: this app's own when
-/// `own`, else [`PUBLIC_NEXUS`]. Refused while a swap runs, for a public
-/// node that will not do, and once swaps run on another network.
+/// `own`, else [`PUBLIC_NEXUS`]; a running swap goes on on it. Refused for
+/// a public node that will not do, and once swaps run on another network.
 #[tauri::command]
 pub async fn swap_set_nexus(app: AppHandle, network: Network, own: bool) -> Result<()> {
     blocking(app, move |app, engine| {
@@ -1800,7 +1805,8 @@ mod tests {
         set_network_with(&engine, &saving, &root, Network::Bitcoin).unwrap();
         assert_eq!(load_settings(&root).unwrap().esplora().unwrap(), mainnet);
 
-        // A swap running keeps the Esplora it started with.
+        // A swap running, its wallet closed: the public one is chosen
+        // again, still checked, and the swap resumes on it.
         let wallet = swap_dir(&root, Network::Bitcoin).unwrap();
         let mainnet_wallet = Config {
             network: Network::Bitcoin,
@@ -1809,12 +1815,7 @@ mod tests {
         drop(Wallet::open(mainnet_wallet).unwrap());
         let running = "66".repeat(32);
         record(&wallet, &running, true, json!({ "Locking": {} }));
-        let refused = set(Network::Bitcoin, None).unwrap_err();
-        assert!(refused.contains(&running), "{refused}");
-        assert_eq!(load_settings(&root).unwrap().own(), Some(&mainnet));
-
-        // Ended, the public one is chosen again.
-        record(&wallet, &running, true, json!("Done"));
+        assert!(set(Network::Bitcoin, Some(&signet)).is_err(), "still checked");
         set(Network::Bitcoin, None).unwrap();
         assert_eq!(load_settings(&root).unwrap().own(), None);
         assert_eq!(
@@ -1903,7 +1904,8 @@ mod tests {
         assert!(refused.contains("settings changed"), "{refused}");
         assert_eq!(followed(&engine), None);
 
-        // A swap running: a wallet for other settings is not opened over it.
+        // A swap running: a wallet for another network's directory is not
+        // opened over it; another server is, the swap resumed on it.
         let waiting = "dd".repeat(32);
         record(&dir, &waiting, false, json!({ "Start": {} }));
         let wallet = open_with(&engine, offline(&dir), &emit).unwrap();
@@ -1919,17 +1921,18 @@ mod tests {
             esplora: "http://127.0.0.1:10".into(),
             ..offline(&dir)
         };
-        // Nor one reading Nexus on another node: on a new port it may.
         let public = Config {
             nexus: PUBLIC_NEXUS.into(),
             nexus_cookie: None,
             ..offline(&dir)
         };
-        for config in [offline(&other), elsewhere, public] {
-            let refused = open_with(&engine, config, &emit).err().unwrap();
-            assert!(refused.contains(&waiting), "{refused}");
-            assert_eq!(lock(&engine).unwrap().running(), Some(waiting.as_str()));
-            assert_eq!(lock(&engine).unwrap().wallet.as_ref().unwrap().config().dir, dir);
+        let refused = open_with(&engine, offline(&other), &emit).err().unwrap();
+        assert!(refused.contains(&waiting), "{refused}");
+        assert_eq!(lock(&engine).unwrap().wallet.as_ref().unwrap().config().dir, dir);
+        for config in [elsewhere, public] {
+            let moved = open_with(&engine, config.clone(), &emit).unwrap();
+            assert_eq!((moved.config().esplora.clone(), moved.config().nexus.clone()), (config.esplora, config.nexus));
+            assert_eq!(lock(&engine).unwrap().running(), Some(waiting.as_str()), "kept running");
         }
         close(&engine);
         fs::remove_dir_all(dir).unwrap();
@@ -2031,28 +2034,37 @@ mod tests {
         assert!(refused.contains("now run on bitcoin"), "{refused}");
         assert_eq!(own(), BTreeSet::from([Network::Bitcoin]));
 
-        // A swap running on your node keeps it, its wallet closed or open.
+        // A swap running on your node: the public one is chosen, once it
+        // passes, and the swap goes on, then moves to it when the wallet is
+        // opened on the settings saved.
         let wallet = swap_dir(&root, Network::Bitcoin).unwrap();
-        let mainnet_wallet = Config {
+        let on_own = Config {
             network: Network::Bitcoin,
             ..offline(&wallet)
         };
-        drop(Wallet::open(mainnet_wallet.clone()).unwrap());
         let running = "67".repeat(32);
         record(&wallet, &running, true, json!({ "Locking": {} }));
-        let refused = set(Network::Bitcoin, false, &good).unwrap_err();
-        assert!(refused.contains(&running), "{refused}");
         let (emit, _) = collect();
-        open_with(&engine, mainnet_wallet, &emit).unwrap();
-        let refused = set(Network::Bitcoin, false, &good).unwrap_err();
-        assert!(refused.contains(&running), "{refused}");
-        assert_eq!(own(), BTreeSet::from([Network::Bitcoin]));
-        close(&engine);
-
-        // Ended, the public one is chosen again, once it passes.
-        record(&wallet, &running, true, json!("Done"));
+        open_with(&engine, on_own, &emit).unwrap();
+        assert!(set(Network::Bitcoin, false, &nexus_on(genesis, false)).is_err(), "still checked");
         set(Network::Bitcoin, false, &good).unwrap();
         assert_eq!(own(), BTreeSet::new());
+        assert_eq!(lock(&engine).unwrap().running(), Some(running.as_str()), "it goes on");
+        let on_public = Config {
+            network: Network::Bitcoin,
+            nexus: good.clone(),
+            nexus_cookie: None,
+            ..offline(&wallet)
+        };
+        let moved = open_with(&engine, on_public, &emit).unwrap();
+        assert_eq!((moved.config().nexus.as_str(), moved.config().nexus_cookie.as_ref()), (good.as_str(), None));
+        assert_eq!(lock(&engine).unwrap().running(), Some(running.as_str()), "resumed on it");
+        drop(moved);
+        // Not its network, though.
+        let refused = set_network_with(&engine, &saving, &root, Network::Signet).unwrap_err();
+        assert!(refused.contains(&running), "{refused}");
+        close(&engine);
+        record(&wallet, &running, true, json!("Done"));
         let saved: Value = serde_json::from_slice(&fs::read(settings_path(&root)).unwrap()).unwrap();
         assert_eq!(saved.get("ownNexus"), None, "left out, as a build before it wrote");
         fs::remove_dir_all(root).unwrap();

@@ -49,8 +49,8 @@ const plainHttp = (url: string) =>
  * Where each chain is read, as a form with one Save: Bitcoin through
  * mempool.space's Esplora (the default) or your own, and Nexus through a
  * public node (the default) or this app's, each with a line saying whether
- * the one saved answers. A change is for the next swap: the shell refuses
- * it while one runs. `save` saves your own Esplora (null: the public one)
+ * the one saved answers. A running swap continues on the servers
+ * saved. `save` saves your own Esplora (null: the public one)
  * and whether Nexus is read on your node, the refusal if any, and the
  * screen then shows the settings on disk (`show`), unless it refused the
  * save and they are unchanged.
@@ -108,7 +108,7 @@ function serversForm(save: (esplora: string | null, ownNexus: boolean) => Promis
     h("div", { class: "advanced-content stack" },
       h("label", { class: "k" }, "Bitcoin"), bitcoin, url, plain, state, trust,
       h("label", { class: "k" }, "Nexus"), nexus, nexusState, nexusTrust,
-      h("p", { class: "muted" }, "Changes are for the next swap: a running swap keeps its servers."),
+      h("p", { class: "muted" }, "A running swap continues on the servers you save."),
       toast,
       button,
     ));
