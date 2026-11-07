@@ -7,12 +7,15 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type SwapNetwork = "bitcoin" | "signet";
 
-/** Where swaps run. The page sets the network and your own Esplora on each
- * network (one missing: mempool.space's); a relay is the operator's, in
- * settings.json (null: lattice-swap-relay.fly.dev). */
+/** Where swaps run. The page sets the network, your own Esplora on each
+ * network (one missing: mempool.space's), and the networks whose swaps read
+ * Nexus on this app's node (one missing: the public lattice-mainnet-read.
+ * fly.dev); a relay is the operator's, in settings.json (null:
+ * lattice-swap-relay.fly.dev). */
 export interface SwapSettings {
   network: SwapNetwork;
   esplora?: Partial<Record<SwapNetwork, string>> | null;
+  ownNexus?: SwapNetwork[] | null;
   relay?: string | null;
 }
 
@@ -85,15 +88,22 @@ export interface SwapError {
 
 export const swapSettings = () => invoke<SwapSettings>("swap_settings");
 export const swapSetNetwork = (network: SwapNetwork) => invoke<void>("swap_set_network", { network });
-/** Chooses your own Esplora at `esplora` for `network`, or mempool.space's
- * when null. Refused while a swap runs, for one on another network, and
- * once swaps run on another network. */
-export const swapSetEsplora = (network: SwapNetwork, esplora: string | null) => invoke<void>("swap_set_esplora", { network, esplora });
+/** Chooses `network`'s servers in one save: your own Esplora at `esplora`,
+ * or mempool.space's when null, and this app's node (`own`) or the public
+ * one for Nexus; a running swap goes on on them. Refused, neither saved,
+ * for an Esplora on another network, a public node that is unreachable, on
+ * another Nexus or takes no transactions, and once swaps run on another
+ * network. */
+export const swapSetServers = (network: SwapNetwork, esplora: string | null, own: boolean) =>
+  invoke<void>("swap_set_servers", { network, esplora, own });
 /** Refused unless the Esplora is reachable and on the swaps' network. */
 export const swapCheckEsplora = () => invoke<void>("swap_check_esplora");
+/** Refused unless the Nexus node is reachable, on the Nexus, and (a public
+ * one) takes transactions. */
+export const swapCheckNexus = () => invoke<void>("swap_check_nexus");
 export const swapWalletExists = () => invoke<boolean>("swap_wallet_exists");
 /** Opens the swap wallet, made if there is none, and resumes its swaps: its
- * deposit address. Refused until the node runs. */
+ * deposit address. */
 export const swapWalletOpen = () => invoke<string>("swap_wallet_open");
 export const swapBalance = () => invoke<{ confirmed: number; unconfirmed: number }>("swap_balance");
 export const swapNeed = (btcAmount: number) => invoke<{ enough: boolean; need: number }>("swap_need", { btcAmount });
@@ -107,8 +117,7 @@ export const swapStatus = () => invoke<SwapStatus | null>("swap_status");
 /** Saves the recovery file as a new file in ~/Downloads: its path. */
 export const swapBackup = () => invoke<string>("swap_backup");
 /** Restores the wallet in a recovery file the user picks in a native open
- * dialog, read by the shell: its address, or null when none is picked.
- * Refused until the node runs. */
+ * dialog, read by the shell: its address, or null when none is picked. */
 export const swapRestoreFile = () => invoke<string | null>("swap_restore_file");
 /** Sends the whole spendable balance to `address`: the txid. */
 export const swapWithdraw = (address: string) => invoke<string>("swap_withdraw", { address });

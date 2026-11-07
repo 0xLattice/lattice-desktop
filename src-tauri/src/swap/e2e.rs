@@ -124,17 +124,15 @@ impl Nexus {
             cookie: data.join(".cookie"),
         };
         wait_for("the node's RPC", || {
-            nexus.try_client()?.min_relay_fee().ok()
+            nexus.client().min_relay_fee().ok()
         });
         nexus
     }
 
-    fn try_client(&self) -> Option<Client> {
-        Client::from_cookie_file(&self.url, &self.cookie, TIMEOUT).ok()
-    }
-
+    /// The node's RPC, which reads its cookie at each request until it has
+    /// one.
     fn client(&self) -> Client {
-        self.try_client().expect("the node's cookie")
+        Client::from_cookie_file(&self.url, &self.cookie, TIMEOUT)
     }
 
     fn balance(&self, address: &str) -> u64 {
@@ -325,7 +323,7 @@ impl World {
         bitcoind.client.generate_to_address(1, &miner).unwrap();
         // The parties refuse a node whose index is still catching up.
         wait_for("the txindex", || {
-            wallet_client(&bitcoind, "buyer").check_node().ok()
+            wallet_client(&bitcoind, "buyer").check_node().ok().and_then(|ready| ready.ok())
         });
         let esplora = esplora::esplora(wallet_client(&bitcoind, ""));
 
@@ -434,9 +432,10 @@ impl World {
     /// wallet deposits what it needs: the swap's id and the wallet's
     /// address.
     fn take(&self, engine: &Mutex<Engine>, offer: &str, emit: &Emit) -> (String, String) {
-        let wallet = open_with(engine, self.config(), emit).unwrap();
+        let wallet = open_with(engine, || Ok(self.config()), emit).unwrap();
         let id = start_with(
             engine,
+            || Ok(self.config()),
             || Ok(self.config()),
             offer,
             (BTC_AMOUNT.to_sat(), PRICE),
@@ -561,7 +560,7 @@ fn a_swap_the_engine_reopens_mid_way_completes() {
 
     let engine = Mutex::new(Engine::default());
     let (emit, again) = Seen::emitter();
-    drop(open_with(&engine, world.config(), &emit).unwrap());
+    drop(open_with(&engine, || Ok(world.config()), &emit).unwrap());
     let followed = lock(&engine)
         .unwrap()
         .followed

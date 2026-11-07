@@ -132,6 +132,8 @@ async function page(t: { after(fn: () => void): void }, engine: Engine = () => u
         return null;
       case "swap_backup": return "/Users/someone/Downloads/lattice-swap-tb1qwallet.json";
       case "swap_check_esplora": return null;
+      case "swap_set_servers": return null;
+      case "swap_check_nexus": return null;
       default: throw new Error(`unexpected ${cmd}`);
     }
   }, { shouldMockEvents: true });
@@ -356,7 +358,7 @@ test("Bitcoin is read through mempool.space until your own Esplora is saved, ref
   let refusals = 1;
   const { doc, calls, text, button, type, mount, window } = await page(t, (cmd, args) => {
     if (cmd === "swap_settings") return { network: "signet", esplora: saved === null ? {} : { signet: saved }, relay: null };
-    if (cmd === "swap_set_esplora") {
+    if (cmd === "swap_set_servers") {
       if (refusals-- > 0) throw "refused: the Esplora's genesis is 000000000019d6, not signet's";
       saved = args.esplora as string | null;
       return null;
@@ -401,8 +403,68 @@ test("Bitcoin is read through mempool.space until your own Esplora is saved, ref
   await until("public's status again", () => text().includes("Connected to mempool.space"));
   assert.equal(saved, null);
   assert.ok(!trust.hidden);
-  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_esplora").map(([, args]) => [args.network, args.esplora]),
-    [["signet", OWN], ["signet", OWN], ["signet", null]]);
+  // One save each, both servers at once.
+  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_servers").map(([, args]) => [args.network, args.esplora, args.own]),
+    [["signet", OWN, false], ["signet", OWN, false], ["signet", null, false]]);
+});
+
+test("Nexus is read on the public node until your node is chosen, a refused save kept as typed", async (t) => {
+  let own: string[] = [];
+  let refusals = 1;
+  const { window, doc, calls, text, button, mount } = await page(t, (cmd, args) => {
+    if (cmd === "swap_settings") return { network: "signet", esplora: {}, ownNexus: own, relay: null };
+    if (cmd === "swap_set_servers") {
+      const network = args.network as string;
+      if (!args.own && own.includes(network) && refusals-- > 0) throw "refused: https://lattice-mainnet-read.fly.dev takes no transactions";
+      own = args.own ? [...new Set([...own, network])] : own.filter((n) => n !== network);
+      return null;
+    }
+    if (cmd === "swap_check_nexus" && own.length > 0) throw "Your node is not running: a new swap waits for it; a running swap's Bitcoin side goes on.";
+  });
+  const style = doc.createElement("style");
+  style.textContent = readFileSync(new URL("../src/desktop.css", import.meta.url), "utf8");
+  doc.head.append(style);
+  await mount();
+  const server = doc.querySelector('select[aria-label="Nexus server"]') as HTMLSelectElement;
+  const trust = [...doc.querySelectorAll("p")].find((p) => p.textContent?.includes("how deep the seller's NEX lock is"))!;
+  const choose = (value: string) => {
+    server.value = value;
+    server.dispatchEvent(new window.Event("change", { bubbles: true }));
+  };
+  await until("public's status", () => text().includes("Connected to lattice-mainnet-read.fly.dev"));
+  assert.equal(server.value, "public");
+  assert.equal(trust.textContent, "You trust lattice-mainnet-read.fly.dev for how deep the seller's NEX lock is: keep amounts small.");
+  assert.ok(!trust.hidden);
+
+  // Your node: saved, its status its own, no trust note.
+  choose("own");
+  button("Save").click();
+  await until("your node's status", () => text().includes("Your node is not running: a new swap waits for it; a running swap's Bitcoin side goes on."));
+  assert.deepEqual(own, ["signet"]);
+  assert.equal(server.value, "own");
+  assert.ok(trust.hidden);
+
+  // Back to the public one, refused: the shell's words, the choice kept
+  // as typed, the trust note still the saved one's.
+  choose("public");
+  button("Save").click();
+  await until("the refusal", () => text().includes("takes no transactions"));
+  assert.deepEqual(own, ["signet"]);
+  assert.equal(server.value, "public", "the choice is kept");
+  assert.ok(trust.hidden);
+  button("Save").click();
+  await until("public's status again", () => text().includes("Connected to lattice-mainnet-read.fly.dev"));
+  assert.deepEqual(own, []);
+  assert.ok(!trust.hidden);
+  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_servers").map(([, args]) => [args.network, args.esplora, args.own]),
+    [["signet", null, true], ["signet", null, false], ["signet", null, false]]);
+
+  // The page's own Nexus field is not shown: the Servers above choose it.
+  button("Settings").click();
+  await until("the settings", () => !!doc.querySelector("input#esplora"));
+  const field = doc.querySelector("input#esplora")!.closest(".field")!.nextElementSibling!;
+  assert.ok(field.textContent?.includes("Nexus"));
+  assert.equal(window.getComputedStyle(field).display, "none");
 });
 
 test("each network shows its own Esplora, and plain http off this machine is warned of", async (t) => {
@@ -439,14 +501,14 @@ test("one save at a time, and the screen shows what was saved when the wallet th
   let finish: (() => void) | null = null;
   const { doc, text, button, mount, type, window } = await page(t, (cmd, args) => {
     if (cmd === "swap_settings") return disk;
-    if (cmd === "swap_set_esplora") {
+    if (cmd === "swap_set_servers") {
       // Saved, then the wallet fails to open on it.
       disk = { ...disk, esplora: { [args.network as string]: args.esplora as string } };
-      return new Promise((_, reject) => { finish = () => reject("the node is not running: swaps reach NEX through it"); });
+      return new Promise((_, reject) => { finish = () => reject("the swap wallet is open elsewhere"); });
     }
     if (cmd === "swap_set_network") {
       disk = { ...disk, network: args.network as string };
-      throw "refused: the swap wallet was opened meanwhile; try again";
+      throw "No space left on device";
     }
   });
   await mount();
@@ -459,7 +521,7 @@ test("one save at a time, and the screen shows what was saved when the wallet th
   await until("the save under way", () => finish !== null);
   assert.ok(picker.disabled && button("Save").disabled, "no network chosen while it saves");
   finish!();
-  await until("the failure", () => text().includes("the node is not running"));
+  await until("the failure", () => text().includes("is open elsewhere"));
   assert.ok(!picker.disabled && !button("Save").disabled);
   assert.equal(server.value, "own");
   assert.equal((doc.querySelector('input[aria-label="Your Esplora URL"]') as HTMLInputElement).value, OWN);
@@ -468,21 +530,21 @@ test("one save at a time, and the screen shows what was saved when the wallet th
   // saved.
   picker.value = "bitcoin";
   picker.dispatchEvent(new window.Event("change", { bubbles: true }));
-  await until("the network's failure", () => text().includes("opened meanwhile"));
+  await until("the network's failure", () => text().includes("No space left on device"));
   assert.equal(picker.value, "bitcoin");
   assert.equal(server.value, "public", "mainnet has no Esplora of yours");
 });
 
-test("a save refused for a running swap says so plainly", async (t) => {
-  const { doc, text, button, mount, state } = await page(t, (cmd) => {
-    if (cmd === "swap_set_esplora") throw "refused: swap swap-a is in progress; one swap at a time";
+test("a running swap's servers can change, its network is refused plainly", async (t) => {
+  const { doc, calls, text, button, mount, state } = await page(t, (cmd) => {
     if (cmd === "swap_set_network") throw "refused: swap swap-z is running on signet";
   });
   state.followed = status("swap-a", { running: true });
   await mount();
+  assert.ok(text().includes("A running swap continues on the servers you save."));
   button("Save").click();
-  await until("the refusal", () => text().includes("A swap is running: change this once it ends."));
-  assert.ok(!text().includes("swap-a is"));
+  await until("the save", () => calls.some(([cmd]) => cmd === "swap_set_servers"));
+  assert.ok(!text().includes("A swap is running"));
   const picker = doc.querySelector('select[aria-label="Bitcoin network"]') as HTMLSelectElement;
   picker.value = "bitcoin";
   picker.dispatchEvent(new (doc.defaultView!).Event("change", { bubbles: true }));

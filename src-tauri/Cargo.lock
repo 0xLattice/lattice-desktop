@@ -4142,7 +4142,7 @@ checksum = "734676eb262c623cec13c3155096e08d1f8f29adce39ba17948b18dad1e54142"
 [[package]]
 name = "swap"
 version = "0.1.0"
-source = "git+https://github.com/0xLattice/lattice-swap?rev=67c3f365c5dbde0b00c939b7eecb744ba712da6a#67c3f365c5dbde0b00c939b7eecb744ba712da6a"
+source = "git+https://github.com/0xLattice/lattice-swap?rev=c76b28ea90ecfb90ac9db106c0cdec7f1689d944#c76b28ea90ecfb90ac9db106c0cdec7f1689d944"
 dependencies = [
  "base64 0.22.1",
  "bitcoin",
@@ -4170,7 +4170,7 @@ dependencies = [
 [[package]]
 name = "swap-bitcoin"
 version = "0.1.0"
-source = "git+https://github.com/0xLattice/lattice-swap?rev=67c3f365c5dbde0b00c939b7eecb744ba712da6a#67c3f365c5dbde0b00c939b7eecb744ba712da6a"
+source = "git+https://github.com/0xLattice/lattice-swap?rev=c76b28ea90ecfb90ac9db106c0cdec7f1689d944#c76b28ea90ecfb90ac9db106c0cdec7f1689d944"
 dependencies = [
  "bitcoin",
  "rand_core 0.6.4",
@@ -4181,7 +4181,7 @@ dependencies = [
 [[package]]
 name = "swap-core"
 version = "0.1.0"
-source = "git+https://github.com/0xLattice/lattice-swap?rev=67c3f365c5dbde0b00c939b7eecb744ba712da6a#67c3f365c5dbde0b00c939b7eecb744ba712da6a"
+source = "git+https://github.com/0xLattice/lattice-swap?rev=c76b28ea90ecfb90ac9db106c0cdec7f1689d944#c76b28ea90ecfb90ac9db106c0cdec7f1689d944"
 dependencies = [
  "curve25519-dalek",
  "curve25519-dalek-ng",
@@ -4198,7 +4198,7 @@ dependencies = [
 [[package]]
 name = "swap-nexus"
 version = "0.1.0"
-source = "git+https://github.com/0xLattice/lattice-swap?rev=67c3f365c5dbde0b00c939b7eecb744ba712da6a#67c3f365c5dbde0b00c939b7eecb744ba712da6a"
+source = "git+https://github.com/0xLattice/lattice-swap?rev=c76b28ea90ecfb90ac9db106c0cdec7f1689d944#c76b28ea90ecfb90ac9db106c0cdec7f1689d944"
 dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
@@ -4210,7 +4210,7 @@ dependencies = [
 [[package]]
 name = "swap-nexus-tx"
 version = "0.1.0"
-source = "git+https://github.com/0xLattice/lattice-swap?rev=67c3f365c5dbde0b00c939b7eecb744ba712da6a#67c3f365c5dbde0b00c939b7eecb744ba712da6a"
+source = "git+https://github.com/0xLattice/lattice-swap?rev=c76b28ea90ecfb90ac9db106c0cdec7f1689d944#c76b28ea90ecfb90ac9db106c0cdec7f1689d944"
 dependencies = [
  "base64 0.22.1",
  "data-encoding",
