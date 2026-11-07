@@ -318,7 +318,7 @@ const APP_RPC_PORT: u16 = 18080;
 
 /// Why a new swap on the app's own node is refused while it is down.
 const NODE_DOWN: &str =
-    "Your node is not running: a running swap's Bitcoin side goes on; its Nexus side waits for the node.";
+    "Your node is not running: a new swap waits for it; a running swap's Bitcoin side goes on.";
 
 /// The app's node: on the pinned port, the one its cookie is known to go
 /// to; none pinned (the node is down), on the port `<host>/lattice.json`
@@ -767,12 +767,17 @@ fn open_with(
     config: impl Fn() -> Result<Config>,
     emit: &Emit,
 ) -> Result<Arc<Wallet>> {
-    open_patiently(engine, config, emit, OPEN_PATIENCE)
+    open_patiently(engine, &config, &config, emit, OPEN_PATIENCE)
 }
 
+/// [`open_with`] on `config`, a new swap's: if it fails once the wallet
+/// was taken out, the wallet is opened again on `resume` ([`config_at`],
+/// which opens on the app's own node even while it is down), so its swaps
+/// are still driven, and the failure returned.
 fn open_patiently(
     engine: &Mutex<Engine>,
     config: impl Fn() -> Result<Config>,
+    resume: impl Fn() -> Result<Config>,
     emit: &Emit,
     patience: Duration,
 ) -> Result<Arc<Wallet>> {
@@ -786,14 +791,30 @@ fn open_patiently(
             if reopened {
                 held.reopening = false;
             }
-            let config = config()?;
-            if let Some(wallet) = held.serves(&config) {
-                return Ok(wallet);
-            }
-            if held.wallet.is_none() {
-                let wallet = open_wallet(&config, patience)?;
-                return held.hold(wallet, kept, emit);
-            }
+            // The wallet held, or the config it is not open on.
+            let opened = config().and_then(|config| {
+                if let Some(wallet) = held.serves(&config) {
+                    return Ok(Ok(wallet));
+                }
+                if held.wallet.is_none() {
+                    return open_wallet(&config, patience)
+                        .and_then(|wallet| held.hold(wallet, kept.clone(), emit))
+                        .map(Ok);
+                }
+                Ok(Err(config))
+            });
+            let config = match opened {
+                Ok(Ok(wallet)) => return Ok(wallet),
+                Ok(Err(config)) => config,
+                Err(e) => {
+                    if reopened && held.wallet.is_none() {
+                        let _ = resume()
+                            .and_then(|config| open_wallet(&config, patience))
+                            .and_then(|wallet| held.hold(wallet, kept, emit));
+                    }
+                    return Err(e);
+                }
+            };
             if let (Some(open), Some(id)) = (&held.wallet, held.running()) {
                 if open.config().dir != config.dir {
                     return Err(format!(
@@ -820,17 +841,19 @@ fn policy(btc_amount: u64, price: u64) -> Value {
 /// started on an engine thread: its id. `config` is the engine's config as
 /// the settings saved say it, read again on the engine's lock, where the
 /// settings are saved: refused if they moved on meanwhile, and while a swap
-/// runs.
+/// runs. `resume` is the config its wallet reopens on if `config` fails
+/// once the wallet was taken out (see `open_patiently`).
 fn start_with(
     engine: &Mutex<Engine>,
     config: impl Fn() -> Result<Config>,
+    resume: impl Fn() -> Result<Config>,
     offer: &str,
     (btc_amount, price): (u64, u64),
     nex_address: &str,
     emit: &Emit,
 ) -> Result<String> {
     lock(engine)?.refuse_running()?;
-    open_with(engine, &config, emit)?;
+    open_patiently(engine, &config, resume, emit, OPEN_PATIENCE)?;
     let mut held = lock(engine)?;
     // Opening may have resumed one.
     held.refuse_running()?;
@@ -1218,6 +1241,7 @@ pub async fn swap_start(
                 let settings = load_settings(&app_root(app)?)?;
                 start_config_at(&app_root(app)?, &host_root(app)?, pinned(app)?, &settings)
             },
+            || config(app, &load_settings(&app_root(app)?)?),
             &offer,
             (btc_amount, price),
             &nex_address,
@@ -1930,7 +1954,7 @@ mod tests {
             let n = reads.fetch_add(1, Ordering::SeqCst);
             Ok(offline(if n == 0 { &dir } else { &other }))
         };
-        let refused = start_with(&engine, moved, &offer, (50_000, 100_000), nex, &emit).unwrap_err();
+        let refused = start_with(&engine, moved, moved, &offer, (50_000, 100_000), nex, &emit).unwrap_err();
         assert!(refused.contains("settings changed"), "{refused}");
         assert_eq!(followed(&engine), None);
 
@@ -2128,7 +2152,8 @@ mod tests {
         // Your node saved, and down: no new swap starts.
         set(&esplora, true, "http://127.0.0.1:9").unwrap();
         let start = || start_config_at(&root, &host, None, &load_settings(&root)?);
-        let refused = start_with(&engine, start, &offer, (50_000, 100_000), nex, &emit).unwrap_err();
+        let resume = || config_at(&root, &host, None, &load_settings(&root)?);
+        let refused = start_with(&engine, start, resume, &offer, (50_000, 100_000), nex, &emit).unwrap_err();
         assert_eq!(refused, NODE_DOWN);
         assert!(lock(&engine).unwrap().wallet.is_none());
 
@@ -2226,6 +2251,7 @@ mod tests {
         let moved = open_patiently(
             &engine,
             || Ok(offline_at(&dir, 10)),
+            || Ok(offline_at(&dir, 10)),
             &emit,
             Duration::from_secs(10),
         )
@@ -2260,6 +2286,63 @@ mod tests {
         drop(wallet);
         drop(open_with(&engine, || Ok(offline_at(&dir, 10)), &emit).unwrap());
         assert_eq!(followed(&engine), Some(waiting));
+        close(&engine);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reopen_ends_on_the_config_read_last() {
+        let dir = temp("read-last");
+        let waiting = "9a".repeat(32);
+        record(&dir, &waiting, false, json!({ "Start": {} }));
+        let (emit, _) = collect();
+        let engine = Mutex::new(Engine::default());
+        let wallet = open_with(&engine, || Ok(offline_at(&dir, 9)), &emit).unwrap();
+        let run = Run::spawn(wallet.resume(&waiting).unwrap(), Duration::from_millis(100), emit.clone())
+            .unwrap();
+        lock(&engine).unwrap().followed = Some(run);
+        drop(wallet);
+        // Saved anew (another port pinned) while the wallet was taken out.
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let moving = || {
+            let n = reads.fetch_add(1, Ordering::SeqCst);
+            Ok(offline_at(&dir, if n == 0 { 10 } else { 11 }))
+        };
+        let moved = open_with(&engine, moving, &emit).unwrap();
+        assert!(reads.load(Ordering::SeqCst) > 1, "the loop ran again");
+        assert_eq!(moved.config().nexus, "http://127.0.0.1:11");
+        assert_eq!(followed(&engine), Some(waiting), "still followed");
+        drop(moved);
+        close(&engine);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reopen_that_fails_reopens_on_the_resume_config() {
+        let dir = temp("reopen-fails");
+        let waiting = "9b".repeat(32);
+        record(&dir, &waiting, false, json!({ "Start": {} }));
+        let (emit, _) = collect();
+        let engine = Mutex::new(Engine::default());
+        let wallet = open_with(&engine, || Ok(offline_at(&dir, 9)), &emit).unwrap();
+        let run = Run::spawn(wallet.resume(&waiting).unwrap(), Duration::from_millis(100), emit.clone())
+            .unwrap();
+        lock(&engine).unwrap().followed = Some(run);
+        drop(wallet);
+        // The node went down while the wallet was taken out.
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let failing = || match reads.fetch_add(1, Ordering::SeqCst) {
+            0 => Ok(offline_at(&dir, 10)),
+            _ => Err(NODE_DOWN.to_string()),
+        };
+        let refused = open_patiently(&engine, failing, || Ok(offline_at(&dir, 9)), &emit, OPEN_PATIENCE)
+            .err()
+            .unwrap();
+        assert_eq!(refused, NODE_DOWN);
+        let open = lock(&engine).unwrap().wallet().unwrap();
+        assert_eq!(open.config().nexus, "http://127.0.0.1:9", "open on the resume config");
+        drop(open);
+        assert_eq!(followed(&engine), Some(waiting), "still followed");
         close(&engine);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2309,6 +2392,7 @@ mod tests {
         let refused = start_with(
             &engine,
             || Ok(offline(&dir)),
+            || Ok(offline(&dir)),
             &offer,
             (50_000, 100_000),
             nex,
@@ -2336,6 +2420,7 @@ mod tests {
         assert_eq!(followed(&engine), None);
         let refused = start_with(
             &engine,
+            || Ok(offline(&dir)),
             || Ok(offline(&dir)),
             &offer,
             (50_000, 100_000),

@@ -419,7 +419,7 @@ test("Nexus is read on the public node until your node is chosen, a refused save
       own = args.own ? [...new Set([...own, network])] : own.filter((n) => n !== network);
       return null;
     }
-    if (cmd === "swap_check_nexus" && own.length > 0) throw "Your node is not running: a running swap's Bitcoin side goes on; its Nexus side waits for the node.";
+    if (cmd === "swap_check_nexus" && own.length > 0) throw "Your node is not running: a new swap waits for it; a running swap's Bitcoin side goes on.";
   });
   const style = doc.createElement("style");
   style.textContent = readFileSync(new URL("../src/desktop.css", import.meta.url), "utf8");
@@ -439,7 +439,7 @@ test("Nexus is read on the public node until your node is chosen, a refused save
   // Your node: saved, its status its own, no trust note.
   choose("own");
   button("Save").click();
-  await until("your node's status", () => text().includes("Your node is not running: a running swap's Bitcoin side goes on; its Nexus side waits for the node."));
+  await until("your node's status", () => text().includes("Your node is not running: a new swap waits for it; a running swap's Bitcoin side goes on."));
   assert.deepEqual(own, ["signet"]);
   assert.equal(server.value, "own");
   assert.ok(trust.hidden);
