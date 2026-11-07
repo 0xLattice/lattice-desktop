@@ -436,6 +436,7 @@ impl World {
         let id = start_with(
             engine,
             || Ok(self.config()),
+            || Ok(self.config()),
             offer,
             (BTC_AMOUNT.to_sat(), PRICE),
             &self.buyer_nex,
