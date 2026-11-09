@@ -1574,7 +1574,7 @@ mod tests {
             t1: 144,
             t2: 144,
             btc_confirmations: 6,
-            nex_confirmations: 24,
+            nex_confirmations: 12,
             margin: 6,
             nexus_genesis: genesis.into(),
         };

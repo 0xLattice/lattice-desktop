@@ -485,7 +485,7 @@ impl World {
 
     /// Mines until `done`: Bitcoin, `BTC_BURST` blocks whenever its pool
     /// holds something; Nexus, a block every round, so the NEX lock and
-    /// the claim reach their 24 confirmations.
+    /// the claim reach the seller's default 12 confirmations.
     fn drive(&self, mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(900);
         while !done() {
