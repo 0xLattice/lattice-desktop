@@ -92,6 +92,9 @@ struct Nexus {
     bin: PathBuf,
     log: PathBuf,
     url: String,
+    /// The public read port, which also takes submits: a node the app
+    /// reads by URL, with no cookie.
+    public: String,
     cookie: PathBuf,
 }
 
@@ -100,7 +103,7 @@ impl Nexus {
         let bin = PathBuf::from(
             std::env::var("LATTICE_NODE_BIN").expect("LATTICE_NODE_BIN names the node binaries"),
         );
-        let (rpc, p2p) = (free_port(), free_port());
+        let (rpc, p2p, public) = (free_port(), free_port(), free_port());
         let data = dir.join("node");
         let log = dir.join("node.log");
         let out = fs::File::create(&log).unwrap();
@@ -112,6 +115,15 @@ impl Nexus {
             .args(["--listen-port", &p2p.to_string()])
             .args(["--rpc-port", &rpc.to_string()])
             .args(["--websocket-port", "0", "--no-default-peers"])
+            .args(["--public-read-port", &public.to_string(), "--public-submit"])
+            // No rate limits: the engine polls fast here.
+            .args([
+                "--public-read-rate",
+                "0",
+                "--public-read-expensive-rate",
+                "0",
+            ])
+            .args(["--public-read-max-rate", "0", "--public-submit-rate", "0"])
             .stdout(out.try_clone().unwrap())
             .stderr(out)
             .spawn()
@@ -121,6 +133,7 @@ impl Nexus {
             bin,
             log,
             url: format!("http://127.0.0.1:{rpc}"),
+            public: format!("http://127.0.0.1:{public}"),
             cookie: data.join(".cookie"),
         };
         wait_for("the node's RPC", || {
@@ -301,6 +314,9 @@ struct World {
     buyer_nex: String,
     /// Where the blocks mined while a swap runs pay.
     elsewhere: String,
+    /// Whether the engine reads Nexus on the node's public read port, as
+    /// the app reads your node by URL, not on its RPC with its cookie.
+    remote: bool,
 }
 
 impl World {
@@ -359,18 +375,31 @@ impl World {
             seller_nex_before,
             buyer_nex: SecretBytes([8; 32]).nex_address(),
             elsewhere: SecretBytes([9; 32]).nex_address(),
+            remote: false,
+        }
+    }
+
+    /// The engine reads Nexus on the node's public read port.
+    fn on_remote(self) -> Self {
+        Self {
+            remote: true,
+            ..self
         }
     }
 
     /// The engine's wallet config, as `config_at` makes it but for regtest,
     /// this Esplora, and this node's genesis.
     fn config(&self) -> Config {
+        let (nexus, cookie) = match self.remote {
+            true => (self.nexus.public.clone(), None),
+            false => (self.nexus.url.clone(), Some(self.nexus.cookie.clone())),
+        };
         let mut config = Config::new(
             self.dir.join("swap"),
             Network::Regtest,
             self.esplora.clone(),
-            self.nexus.url.clone(),
-            self.nexus.cookie.clone(),
+            nexus,
+            cookie,
             self.nexus_genesis.clone(),
         );
         config.poll = Duration::from_millis(500);
@@ -539,6 +568,25 @@ fn a_swap_through_the_engine_on_real_chains() {
     );
     seen.assert_swapped(&id);
     assert_eq!(seen.notices(), [Notice::Locked, Notice::Received]);
+    world.assert_balances(&wallet);
+}
+
+/// A whole swap with the engine reading Nexus on a node by URL, as the app
+/// reads your own: its public read port, with no cookie, which takes the
+/// buyer's submits. The seller reads the node's RPC.
+#[test]
+#[ignore = "needs LATTICE_NODE_BIN and LATTICE_SWAP_BIN"]
+fn a_swap_through_the_engine_on_a_node_read_by_url() {
+    let world = World::new("remote").on_remote();
+    assert_eq!(world.config().nexus_cookie, None);
+    let (mut seller, offer, seller_out) = world.offer();
+    let engine = Mutex::new(Engine::default());
+    let (emit, seen) = Seen::emitter();
+    let (id, wallet) = world.take(&engine, &offer, &emit);
+    let out = world.finish(&mut seller, seller_out, &id, &seen);
+    close(&engine);
+    assert_eq!(out, "outcome: Swapped\n");
+    seen.assert_swapped(&id);
     world.assert_balances(&wallet);
 }
 

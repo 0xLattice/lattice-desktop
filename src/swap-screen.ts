@@ -3,10 +3,10 @@
 // a restore from a recovery file the shell reads (the page's own file input
 // is hidden: its file's key would pass through the page) above it, and the
 // servers folded away below them: Bitcoin through mempool.space's Esplora or
-// your own, and NEX through a public Nexus node or this app's, as Sparrow
-// chooses a public server or your own. The page's own Esplora and Nexus
-// fields are hidden (desktop.css); the relay is the operator's (the shell's
-// swap/settings.json).
+// your own, and NEX through a public Nexus node, this app's, or yours by URL,
+// as Sparrow chooses a public server or your own. The page's own Esplora and
+// Nexus fields are hidden (desktop.css); the relay is the operator's (the
+// shell's swap/settings.json).
 
 import { h as preact, render as mount } from "preact";
 import { App } from "../vendor/lattice-swap-web/src/app.tsx";
@@ -14,7 +14,7 @@ import type { AppConfig } from "../vendor/lattice-swap-web/src/config.ts";
 import "../vendor/lattice-swap-web/src/style.css";
 import { h } from "../vendor/nexus-wallet/src/popup/app.ts";
 import { connecting, plainly, SAVED_BY_SHELL } from "./swap-driver/index.ts";
-import { swapCheckEsplora, swapCheckNexus, swapRestoreFile, swapSetNetwork, swapSetServers, swapSettings, type SwapNetwork, type SwapSettings } from "./swap-host.ts";
+import { swapCheckEsplora, swapCheckNexus, swapRestoreFile, swapSetNetwork, swapSetServers, swapSettings, type NexusChoice, type SwapNetwork, type SwapSettings } from "./swap-host.ts";
 
 /** The relay the shell lists offers from when its settings name none
  * (swap.rs's `DEFAULT_RELAY`): shown only. */
@@ -40,6 +40,18 @@ const ownEsplora = (settings: SwapSettings) => settings.esplora?.[settings.netwo
 /** Whether swaps on the network they run on read Nexus on this app's node. */
 const ownNexus = (settings: SwapSettings) => settings.ownNexus?.includes(settings.network) ?? false;
 
+/** Your own Nexus node by URL on the network swaps run on, if any. */
+const remoteNexus = (settings: SwapSettings) => settings.nexus?.[settings.network] ?? null;
+
+/** `url`'s host, or `url` if it has none. */
+function host(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 /** Whether `url` is plain http off this machine (a local network or an
  * onion, as the shell allows): what it reads can be seen on the way. */
 const plainHttp = (url: string) =>
@@ -48,14 +60,14 @@ const plainHttp = (url: string) =>
 /**
  * Where each chain is read, as a form with one Save: Bitcoin through
  * mempool.space's Esplora (the default) or your own, and Nexus through a
- * public node (the default) or this app's, each with a line saying whether
- * the one saved answers. A running swap continues on the servers
- * saved. `save` saves your own Esplora (null: the public one)
- * and whether Nexus is read on your node, the refusal if any, and the
- * screen then shows the settings on disk (`show`), unless it refused the
- * save and they are unchanged.
+ * public node (the default), this app's, or yours by its https URL, each
+ * with a line saying whether the one saved answers. A running swap
+ * continues on the servers saved. `save` saves your own Esplora (null: the
+ * public one) and where Nexus is read, the refusal if any, and the screen
+ * then shows the settings on disk (`show`), unless it refused the save and
+ * they are unchanged.
  */
-function serversForm(save: (esplora: string | null, ownNexus: boolean) => Promise<string | null>) {
+function serversForm(save: (esplora: string | null, nexus: NexusChoice) => Promise<string | null>) {
   const bitcoin = h("select", { class: "picker", "aria-label": "Bitcoin server" },
     h("option", { value: "public" }, "Public (mempool.space)"),
     h("option", { value: "own" }, "Your Esplora")) as HTMLSelectElement;
@@ -65,13 +77,17 @@ function serversForm(save: (esplora: string | null, ownNexus: boolean) => Promis
   const trust = h("p", { class: "muted" }, "You trust mempool.space to show Bitcoin in time to refund: keep amounts small.");
   const nexus = h("select", { class: "picker", "aria-label": "Nexus server" },
     h("option", { value: "public" }, `Public (${PUBLIC_NEXUS})`),
-    h("option", { value: "own" }, "Your node")) as HTMLSelectElement;
+    h("option", { value: "own" }, "Your node"),
+    h("option", { value: "remote" }, "Your node at a URL")) as HTMLSelectElement;
+  const nexusUrl = h("input", { type: "text", spellcheck: "false", placeholder: "https://…", "aria-label": "Your Nexus node URL" }) as HTMLInputElement;
+  const nexusHint = h("p", { class: "muted" }, "Its public read port, started with --public-submit: an https URL.");
   const nexusState = h("p", { class: "muted", role: "status" });
   const nexusTrust = h("p", { class: "muted" }, `You trust ${PUBLIC_NEXUS} for how deep the seller's NEX lock is: keep amounts small.`);
   const toast = h("div", { class: "toast", role: "status" });
   const shown = () => {
     url.hidden = bitcoin.value !== "own";
     plain.hidden = url.hidden || !plainHttp(url.value);
+    nexusUrl.hidden = nexusHint.hidden = nexus.value !== "remote";
   };
   const edited = () => {
     toast.textContent = "";
@@ -80,6 +96,7 @@ function serversForm(save: (esplora: string | null, ownNexus: boolean) => Promis
   bitcoin.addEventListener("change", edited);
   url.addEventListener("input", edited);
   nexus.addEventListener("change", edited);
+  nexusUrl.addEventListener("input", edited);
   /** A line saying whether `server` answers as `ask` asks it; only the
    * latest check's answer is shown. */
   const checker = (line: HTMLElement, ask: () => Promise<void>) => {
@@ -102,12 +119,13 @@ function serversForm(save: (esplora: string | null, ownNexus: boolean) => Promis
   const button = h("button", { class: "btn block", "aria-label": "Save servers" }, "Save") as HTMLButtonElement;
   button.addEventListener("click", async () => {
     toast.textContent = "saving…";
-    toast.textContent = (await save(bitcoin.value === "own" ? url.value : null, nexus.value === "own")) ?? "";
+    const choice: NexusChoice = nexus.value === "remote" ? { remote: nexusUrl.value } : nexus.value === "own" ? "own" : "public";
+    toast.textContent = (await save(bitcoin.value === "own" ? url.value : null, choice)) ?? "";
   });
   const element = h("details", { class: "advanced" }, h("summary", {}, "Servers"),
     h("div", { class: "advanced-content stack" },
       h("label", { class: "k" }, "Bitcoin"), bitcoin, url, plain, state, trust,
-      h("label", { class: "k" }, "Nexus"), nexus, nexusState, nexusTrust,
+      h("label", { class: "k" }, "Nexus"), nexus, nexusUrl, nexusHint, nexusState, nexusTrust,
       h("p", { class: "muted" }, "A running swap continues on the servers you save."),
       toast,
       button,
@@ -121,11 +139,13 @@ function serversForm(save: (esplora: string | null, ownNexus: boolean) => Promis
       url.value = own ?? "";
       trust.hidden = own !== null;
       const node = ownNexus(settings);
-      nexus.value = node ? "own" : "public";
-      nexusTrust.hidden = node;
+      const remote = remoteNexus(settings);
+      nexus.value = node ? "own" : remote ? "remote" : "public";
+      nexusUrl.value = remote ?? "";
+      nexusTrust.hidden = nexus.value !== "public";
       shown();
       void check(own ?? "mempool.space");
-      void checkNexus(node ? "your node" : PUBLIC_NEXUS);
+      void checkNexus(node ? "your node" : remote ? host(remote) : PUBLIC_NEXUS);
     },
     /** Whether a save is under way, Save held meanwhile. */
     hold(on: boolean) {
@@ -218,7 +238,7 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
     }
     picker.value = settings.network;
     const changed = settings.network !== before.network || ownEsplora(settings) !== ownEsplora(before) ||
-      ownNexus(settings) !== ownNexus(before);
+      ownNexus(settings) !== ownNexus(before) || remoteNexus(settings) !== remoteNexus(before);
     if (changed) show(settings.network);
     if (changed || refused === null) servers.show(settings);
     picker.disabled = false;
@@ -226,7 +246,7 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
     return refused;
   };
 
-  const servers = serversForm((esplora, own) => saving(() => swapSetServers(settings.network, esplora, own)));
+  const servers = serversForm((esplora, nexus) => saving(() => swapSetServers(settings.network, esplora, nexus)));
   servers.show(settings);
 
   picker.addEventListener("change", async () => {
