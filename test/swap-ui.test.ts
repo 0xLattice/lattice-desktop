@@ -468,6 +468,42 @@ test("Nexus is read on the public node until your node is chosen, a refused save
   assert.equal(window.getComputedStyle(field).display, "none");
 });
 
+test("the page's Settings choose no server: its fields hidden, its checks refused without a fetch", async (t) => {
+  const { window, doc, calls, state, text, button, mount, settle } = await page(t, (cmd) =>
+    cmd === "swap_settings" ? { network: "signet", esplora: { signet: "https://esplora.example/api" }, relay: null } : undefined);
+  // A swap runs in the open wallet: the page's note that it carries on with
+  // the servers saved there would mislead, as the page saves none.
+  state.followed = status("swap-a", { step: "swapping", running: true });
+  const fetched: unknown[] = [];
+  window.fetch = (async (input: unknown) => {
+    fetched.push(input);
+    throw new Error("no fetch from the page");
+  }) as typeof window.fetch;
+  const style = doc.createElement("style");
+  style.textContent = readFileSync(new URL("../src/desktop.css", import.meta.url), "utf8");
+  doc.head.append(style);
+  await mount();
+  const checks = () => calls.filter(([cmd]) => cmd === "swap_check_esplora" || cmd === "swap_check_nexus").length;
+  await settle();
+  const before = checks();
+  button("Settings").click();
+  await until("the page's checks", () => text().includes("refused: choose servers in Servers, above"));
+  // Its Esplora (with its switch to the public one), its Nexus, and its
+  // words on choosing servers are not shown; no Save and reload is offered.
+  const esplora = doc.querySelector("input#esplora")!.closest(".field")!;
+  const nexus = esplora.nextElementSibling!;
+  const words = [...doc.querySelectorAll("span.small.muted")].find((s) => s.textContent?.includes("must be an https URL"))!;
+  await until("the page's running note", () => text().includes("A swap is running: it carries on with the servers you save"));
+  const running = [...doc.querySelectorAll("span")].find((s) => s.textContent?.includes("A swap is running: it carries on"))!;
+  assert.ok(esplora.textContent?.includes("Use the public Esplora"));
+  assert.ok(nexus.textContent?.includes("Nexus"));
+  for (const element of [esplora, nexus, words, running]) assert.equal(window.getComputedStyle(element).display, "none");
+  assert.ok(!text().includes("Save and reload"));
+  // Nothing reached a network from the page, nor asked the shell.
+  assert.deepEqual(fetched, []);
+  assert.equal(checks(), before, "the shell's checks are the Servers' alone");
+});
+
 test("Nexus can be read on your own node by URL: https, checked by the shell, a refused save kept as typed", async (t) => {
   type Choice = "public" | "own" | { remote: string };
   let nexus: Record<string, string> = {};

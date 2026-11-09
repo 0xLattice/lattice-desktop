@@ -59,6 +59,17 @@ export function isCid(text: string): boolean {
   return bytes.length === 36 && bytes[0] === 0x01 && bytes[1] === 0x71 && bytes[2] === 0x12 && bytes[3] === 0x20;
 }
 
+/** Refused: the page's Settings check of a server before it saves it in
+ * the browser. The shell reads the servers the screen's Servers save, and
+ * checks them there (`swapCheckEsplora`, `swapCheckNexus`); the page's
+ * fields for them are hidden (desktop.css), and nothing here reaches a
+ * network. */
+const notHere = async (): Promise<void> => {
+  throw new Error("refused: choose servers in Servers, above");
+};
+export const checkEsplora = (_url: string, _network: string, _fetch?: unknown): Promise<void> => notHere();
+export const checkNexusNode = (_url: string, _genesis: string, _fetch?: unknown): Promise<void> => notHere();
+
 /** The last board read: the shell decodes and checks each offer, so the page's
  * `decodeOffer` is a lookup in it. */
 let board = new Map<string, SwapOffer>();
