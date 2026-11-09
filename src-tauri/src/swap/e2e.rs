@@ -425,6 +425,8 @@ impl World {
                 // Regtest has no fee estimate; nothing is bumped.
                 .args(["--min-btc-fee-rate", "1"])
                 .args(["--fallback-fee-rate", "1", "--max-fee-rate", "1"])
+                // Regtest coins for the node's mainnet-genesis NEX.
+                .arg("--test-btc-for-mainnet-nex")
                 .arg("--dir")
                 .arg(self.dir.join("seller"))
                 .arg("--nex-key-file")
