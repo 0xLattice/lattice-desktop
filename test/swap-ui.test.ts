@@ -528,23 +528,6 @@ test("Nexus can be read on your own node by URL: https, checked by the shell, a 
   ]);
 });
 
-test("a running swap's node on another Nexus is shown as the engine's other warnings are", async (t) => {
-  const swapping = status("swap-a", {
-    step: "swapping", running: true, backupCovers: "lock",
-    confirmations: { funding: 1, lockSpend: null, cancelSpend: null, nexLock: null },
-  });
-  const { harness, state, text, mount } = await page(t);
-  state.followed = swapping;
-  await mount();
-  await until("the swap", () => text().includes("BTC →"));
-  // The shell's words (swap.rs's `other_nexus`), two genesis CIDs long.
-  const words = `nexus: refused: the Nexus node follows the chain of genesis ${cid(3)}, not ${OFFER.template.nexus_genesis}: ` +
-    "Nexus is not read until it passes; Bitcoin goes on";
-  await harness.emit("swap-status", { ...swapping, warning: words });
-  await until("the warning", () => text().includes(words));
-  assert.ok(text().includes("The swap is stalled"));
-});
-
 test("each network shows its own Esplora, and plain http off this machine is warned of", async (t) => {
   const LAN = "http://umbrel.local:3006/api";
   let network = "signet";

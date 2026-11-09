@@ -53,7 +53,6 @@ use serde_json::{json, Value};
 use swap::app::{default_esplora, Buy, Config, Wallet};
 use swap::esplora::Esplora;
 use swap::offer::Offer;
-use swap_nexus_tx::rpc::Client;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
@@ -241,7 +240,13 @@ impl Settings {
             check_url(url)?;
         }
         for (network, url) in &self.nexus {
-            remote_nexus(url)?;
+            // As saved: the engine reads the URL as it is stored.
+            let normal = remote_nexus(url)?;
+            if normal != *url {
+                return Err(format!(
+                    "refused: Nexus node {url:?} is not saved as {normal}"
+                ));
+            }
             if self.own_nexus.contains(network) {
                 return Err(format!(
                     "refused: Nexus on {network} is read on this app's node and on {url}"
@@ -300,22 +305,18 @@ fn check_esplora(url: &str, network: Network) -> Result<()> {
         .map_err(err)
 }
 
-/// The Nexus node at `url`: a public read port with no cookie, or this
-/// app's node with its cookie.
-fn nexus_client(url: &str, cookie: Option<&Path>, timeout: Duration) -> Client {
-    match cookie {
-        None => Client::public(url, timeout),
-        Some(cookie) => Client::from_cookie_file(url, cookie, timeout),
-    }
-}
-
 /// Refuses a Nexus node that cannot be read, that takes no transactions,
 /// or that is on another Nexus than [`swap_nexus_tx::MAINNET_GENESIS`]'s or
 /// cannot say how deep a transaction is (`swap::session::check_nexus`), as
 /// the engine refuses one for a new swap: a public read port at `url`, with
 /// no cookie, or this app's node with its cookie.
 fn check_nexus(url: &str, cookie: Option<&Path>) -> Result<()> {
-    let client = nexus_client(url, cookie, Duration::from_secs(20));
+    use swap_nexus_tx::rpc::Client;
+    let timeout = Duration::from_secs(20);
+    let client = match cookie {
+        None => Client::public(url, timeout),
+        Some(cookie) => Client::from_cookie_file(url, cookie, timeout),
+    };
     let read = |e: swap_nexus_tx::rpc::Error| format!("{url}: {e}");
     if cookie.is_none() && client.chain_info().map_err(read)?["acceptsSubmit"] != true {
         return Err(format!("refused: {url} takes no transactions"));
@@ -530,35 +531,6 @@ fn spawn_threads(
     })
 }
 
-/// `status` with a warning, as the engine words its own, once the Nexus
-/// node it reads is on another Nexus than `genesis` while the swap runs:
-/// the engine's driver finds that at a round's first Nexus read, and only
-/// logs it. One read of the node's chain info, bounded by `nexus`'s
-/// timeout, on the status thread, never the engine's: Bitcoin goes on
-/// whatever it finds. A node that cannot be read adds nothing.
-fn other_nexus(mut status: Value, nexus: &Client, genesis: &str) -> Value {
-    use swap_nexus_tx::rpc::parse::{self, NodeRefusal};
-    if status["running"] != true {
-        return status;
-    }
-    let found = match nexus.chain_info().map(|info| parse::genesis(&info)) {
-        Ok(Ok(found)) if found != genesis => found,
-        _ => return status,
-    };
-    let refusal = NodeRefusal::OtherNexus {
-        genesis: found,
-        expected: genesis.into(),
-    }
-    .to_string();
-    let other = format!("nexus: {refusal}: Nexus is not read until it passes; Bitcoin goes on");
-    status["warning"] = match status["warning"].as_str() {
-        Some(warning) if warning.contains(&refusal) => return status,
-        Some(warning) => json!(format!("{warning}; {other}")),
-        None => json!(other),
-    };
-    status
-}
-
 /// A swap on its engine thread.
 struct Run {
     swap_id: String,
@@ -568,29 +540,17 @@ struct Run {
 
 impl Run {
     /// `buy` run until it ends, its offer is gone, it is cancelled, or the
-    /// engine closes, on its wallet's `config`; a run that fails is run
-    /// again, as the CLI's `resume` would be. Its status says when the node
-    /// is on another Nexus ([`other_nexus`]).
-    fn spawn(buy: Buy, config: &Config, emit: Emit) -> Result<Self> {
+    /// engine closes; a run that fails is run again, as the CLI's `resume`
+    /// would be.
+    fn spawn(buy: Buy, poll: Duration, emit: Emit) -> Result<Self> {
         let swap_id = buy.swap_id();
         let buy = Arc::new(buy);
         let (runs, reads) = (buy.clone(), buy.clone());
-        let nexus = nexus_client(
-            &config.nexus,
-            config.nexus_cookie.as_deref(),
-            config.nexus_budget,
-        );
-        let genesis = config.nexus_genesis.clone();
         let threads = spawn_threads(
             swap_id.clone(),
             move |halted| runs.run(halted).map(|_| ()).map_err(err),
-            move || {
-                reads
-                    .status()
-                    .ok()
-                    .map(|status| other_nexus(status, &nexus, &genesis))
-            },
-            config.poll,
+            move || reads.status().ok(),
+            poll,
             emit,
         )?;
         Ok(Self {
@@ -638,6 +598,7 @@ fn resume_runs(
     waiting: Option<String>,
     emit: &Emit,
 ) -> Result<(Option<Run>, Vec<Run>)> {
+    let poll = wallet.config().poll;
     let (running, punished) = to_resume(wallet)?;
     let waiting = waiting.filter(|id| wallet.swaps().is_ok_and(|ids| ids.contains(id)));
     let followed = match running.or(waiting) {
@@ -651,7 +612,7 @@ fn resume_runs(
     let has_followed = followed.is_some();
     let mut runs = vec![];
     for buy in followed.into_iter().chain(punished) {
-        match Run::spawn(buy, wallet.config(), emit.clone()) {
+        match Run::spawn(buy, poll, emit.clone()) {
             Ok(run) => runs.push(run),
             Err(e) => {
                 for run in runs {
@@ -963,7 +924,7 @@ fn start_with(
     let buy = wallet
         .prepare(offer, policy(btc_amount, price), nex_address)
         .map_err(err)?;
-    let run = Run::spawn(buy, wallet.config(), emit.clone())?;
+    let run = Run::spawn(buy, wallet.config().poll, emit.clone())?;
     let id = run.swap_id.clone();
     // The swap before, which has ended, finishes its last report alone.
     held.followed = Some(run);
@@ -2132,7 +2093,7 @@ mod tests {
         let wallet = open_with(&engine, || Ok(offline(&dir)), &emit).unwrap();
         let run = Run::spawn(
             wallet.resume(&waiting).unwrap(),
-            wallet.config(),
+            Duration::from_millis(100),
             emit.clone(),
         )
         .unwrap();
@@ -2524,28 +2485,55 @@ mod tests {
         let both = json!({ "network": "bitcoin", "ownNexus": ["bitcoin"], "nexus": { "bitcoin": REMOTE } });
         assert!(file(both).is_err());
         assert!(file(json!({ "network": "bitcoin", "nexus": { "mainnet": REMOTE } })).is_err());
+        // One not as it is saved: the engine would read it as it is.
+        for url in [" https://node.example", "https://Node.example/"] {
+            let refused =
+                file(json!({ "network": "bitcoin", "nexus": { "bitcoin": url } })).unwrap_err();
+            assert!(
+                refused.contains("not saved as https://node.example"),
+                "{refused}"
+            );
+        }
+        assert!(file(json!({ "network": "bitcoin", "nexus": { "bitcoin": REMOTE } })).is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn on_your_own_node_by_url_down_a_taken_swap_is_driven_and_no_new_swap_starts() {
-        let dir = temp("remote-down");
-        let (emit, events) = collect();
+        let root = temp("remote-down");
+        let host = root.join("host");
         let engine = Mutex::new(Engine::default());
+        let saving = Mutex::new(());
+        let (emit, events) = collect();
         let nex = swap_nexus_tx::MAINNET_GENESIS;
         let offer = offer(100_000, Network::Signet, nex, 1).to_string();
-        // As `config_at` makes it for your node by URL, with no cookie;
-        // nothing answers there.
-        let down = Config {
-            esplora: esplora_on(Network::Signet),
-            nexus_cookie: None,
-            ..offline(&dir)
-        };
-        let config = || Ok(down.clone());
+        // Your node by URL saved, as the page saves it (its check passed
+        // then), and down now: nothing answers there.
+        let down = "https://127.0.0.1:9";
+        set_network_with(&engine, &saving, &root, Network::Signet).unwrap();
+        let servers = (
+            Some(esplora_on(Network::Signet)),
+            NexusChoice::Remote(down.into()),
+        );
+        set_servers_with(
+            &engine,
+            &saving,
+            &root,
+            Network::Signet,
+            servers,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let config = config_at(&root, &host, None, &load_settings(&root).unwrap()).unwrap();
+        assert_eq!((config.nexus.as_str(), config.nexus_cookie), (down, None));
+
+        // No new swap starts on it.
+        let start = || start_config_at(&root, &host, None, &load_settings(&root)?);
+        let resume = || config_at(&root, &host, None, &load_settings(&root)?);
         let refused = start_with(
             &engine,
-            config,
-            config,
+            start,
+            resume,
             &offer,
             (50_000, 100_000),
             nex,
@@ -2554,6 +2542,7 @@ mod tests {
         .unwrap_err();
         assert!(refused.contains("127.0.0.1:9"), "{refused}");
         assert_eq!(followed(&engine), None);
+        let wallet = swap_dir(&root, Network::Signet).unwrap();
         assert!(
             lock(&engine)
                 .unwrap()
@@ -2566,49 +2555,20 @@ mod tests {
         );
         close(&engine);
 
-        // A taken swap: the wallet opens on it, and the swap is driven.
+        // A taken swap: the wallet opens on it, as at launch, and the swap
+        // is driven.
         let running = "79".repeat(32);
-        record(&dir, &running, true, json!({ "Locking": {} }));
-        drop(open_with(&engine, config, &emit).unwrap());
+        record(&wallet, &running, true, json!({ "Locking": {} }));
+        sync_at(&engine, &root, &host, || Ok(None), &emit).unwrap();
+        assert_eq!(
+            lock(&engine).unwrap().wallet().unwrap().config().nexus,
+            down
+        );
         assert_eq!(followed(&engine), Some(running.clone()));
         wait_for(&events, "swap-error", |e| e["swapId"] == running.as_str());
         close(&engine);
-        record(&dir, &running, true, json!("Done"));
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn a_running_swaps_status_says_when_its_node_is_on_another_nexus() {
-        let genesis = swap_nexus_tx::MAINNET_GENESIS;
-        let client = |url: &str| nexus_client(url, None, Duration::from_secs(5));
-        let other = client(&nexus_on("bafyreianothergenesis", true));
-        let running = json!({ "running": true, "warning": null });
-        let warned = other_nexus(running.clone(), &other, genesis);
-        let words = format!(
-            "nexus: refused: the Nexus node follows the chain of genesis bafyreianothergenesis, \
-             not {genesis}: Nexus is not read until it passes; Bitcoin goes on"
-        );
-        assert_eq!(warned["warning"], words);
-        // Beside a warning the engine gives, and not twice when the engine
-        // gives this one.
-        let busy = json!({ "running": true, "warning": "bitcoin: down: asked again" });
-        assert_eq!(
-            other_nexus(busy, &other, genesis)["warning"],
-            format!("bitcoin: down: asked again; {words}")
-        );
-        assert_eq!(other_nexus(warned.clone(), &other, genesis), warned);
-        // On the Nexus, unread, or not running (no Nexus read): the
-        // engine's status as it is.
-        assert_eq!(
-            other_nexus(running.clone(), &client(&nexus_on(genesis, true)), genesis),
-            running
-        );
-        assert_eq!(
-            other_nexus(running.clone(), &client("http://127.0.0.1:9"), genesis),
-            running
-        );
-        let waiting = json!({ "running": false, "warning": null });
-        assert_eq!(other_nexus(waiting.clone(), &other, genesis), waiting);
+        record(&wallet, &running, true, json!("Done"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2687,7 +2647,7 @@ mod tests {
         let wallet = open_with(&engine, || Ok(offline_at(&dir, 9)), &emit).unwrap();
         let run = Run::spawn(
             wallet.resume(&waiting).unwrap(),
-            wallet.config(),
+            Duration::from_millis(100),
             emit.clone(),
         )
         .unwrap();
@@ -2707,12 +2667,8 @@ mod tests {
         let (emit, _) = collect();
         let engine = Mutex::new(Engine::default());
         let wallet = open_with(&engine, || Ok(offline_at(&dir, 9)), &emit).unwrap();
-        let run = Run::spawn(
-            wallet.resume(&waiting).unwrap(),
-            wallet.config(),
-            emit.clone(),
-        )
-        .unwrap();
+        let run = Run::spawn(wallet.resume(&waiting).unwrap(), Duration::from_millis(100), emit.clone())
+            .unwrap();
         lock(&engine).unwrap().followed = Some(run);
         drop(wallet);
         // Saved anew (another port pinned) while the wallet was taken out.
@@ -2738,12 +2694,8 @@ mod tests {
         let (emit, _) = collect();
         let engine = Mutex::new(Engine::default());
         let wallet = open_with(&engine, || Ok(offline_at(&dir, 9)), &emit).unwrap();
-        let run = Run::spawn(
-            wallet.resume(&waiting).unwrap(),
-            wallet.config(),
-            emit.clone(),
-        )
-        .unwrap();
+        let run = Run::spawn(wallet.resume(&waiting).unwrap(), Duration::from_millis(100), emit.clone())
+            .unwrap();
         lock(&engine).unwrap().followed = Some(run);
         drop(wallet);
         // The node went down while the wallet was taken out.
@@ -2800,7 +2752,7 @@ mod tests {
         );
         let run = Run::spawn(
             wallet.resume(&waiting).unwrap(),
-            wallet.config(),
+            Duration::from_millis(100),
             emit.clone(),
         )
         .unwrap();
