@@ -905,13 +905,13 @@ fn open_patiently(
 }
 
 /// The policy a swap on `network` is started under: the amount and the
-/// price the buyer agreed to, every bound the engine's default but one: on
-/// signet, `test_btc_for_mainnet_nex`, as this app's signet swaps trade
-/// mainnet's Nexus for test coins (`swap::offer::check_networks`). Never on
-/// Bitcoin's.
+/// price the buyer agreed to, every bound the engine's default but one: off
+/// Bitcoin's (signet here, regtest in the tests), `test_btc_for_mainnet_nex`,
+/// as this app's test swaps trade mainnet's Nexus for test coins
+/// (`swap::offer::check_networks`). Never on Bitcoin's.
 fn policy(btc_amount: u64, price: u64, network: Network) -> Value {
     let mut policy = json!({ "btc_amount": btc_amount, "price": price });
-    if network == Network::Signet {
+    if network != Network::Bitcoin {
         policy["test_btc_for_mainnet_nex"] = json!(true);
     }
     policy
