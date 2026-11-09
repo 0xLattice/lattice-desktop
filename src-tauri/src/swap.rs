@@ -305,6 +305,20 @@ fn check_esplora(url: &str, network: Network) -> Result<()> {
         .map_err(err)
 }
 
+/// The lock's Bitcoin fee for `btc_amount` sat, priced for a wallet with
+/// nothing to spend, before any is made: what the engine's `Wallet::need`
+/// asks above the amount with no UTXOs (`swap::wallet::need`), at the rate
+/// it funds at (`Esplora::wallet_rate`), read from the Esplora at `url`
+/// (only its fee estimates: the key is a throwaway).
+fn lock_fee(url: &str, network: Network, btc_amount: u64) -> Result<u64> {
+    let key = swap::wallet::Key::new(&network.to_string())?;
+    let rate = Esplora::new(url, key, Duration::from_secs(20))
+        .wallet_rate()
+        .map_err(err)?;
+    let (_, need) = swap::wallet::need(vec![], btc_amount, rate);
+    Ok(need - btc_amount)
+}
+
 /// Refuses a Nexus node that cannot be read, that takes no transactions,
 /// or that is on another Nexus than [`swap_nexus_tx::MAINNET_GENESIS`]'s or
 /// cannot say how deep a transaction is (`swap::session::check_nexus`), as
@@ -890,10 +904,17 @@ fn open_patiently(
     }
 }
 
-/// The policy a swap is started under: the amount and the price the buyer
-/// agreed to, every bound the engine's default.
-fn policy(btc_amount: u64, price: u64) -> Value {
-    json!({ "btc_amount": btc_amount, "price": price })
+/// The policy a swap on `network` is started under: the amount and the
+/// price the buyer agreed to, every bound the engine's default but one: on
+/// signet, `test_btc_for_mainnet_nex`, as this app's signet swaps trade
+/// mainnet's Nexus for test coins (`swap::offer::check_networks`). Never on
+/// Bitcoin's.
+fn policy(btc_amount: u64, price: u64, network: Network) -> Value {
+    let mut policy = json!({ "btc_amount": btc_amount, "price": price });
+    if network == Network::Signet {
+        policy["test_btc_for_mainnet_nex"] = json!(true);
+    }
+    policy
 }
 
 /// A swap of `offer` at `btc_amount` and `price`, its NEX to `nex_address`,
@@ -922,7 +943,7 @@ fn start_with(
         .serves(&config()?)
         .ok_or("refused: the swap settings changed meanwhile; try again")?;
     let buy = wallet
-        .prepare(offer, policy(btc_amount, price), nex_address)
+        .prepare(offer, policy(btc_amount, price, wallet.config().network), nex_address)
         .map_err(err)?;
     let run = Run::spawn(buy, wallet.config().poll, emit.clone())?;
     let id = run.swap_id.clone();
@@ -1311,6 +1332,18 @@ pub async fn swap_need(app: AppHandle, btc_amount: u64) -> Result<Need> {
         Ok(Need { enough, need })
     })
     .await
+}
+
+/// The lock's Bitcoin fee for `btc_amount` sat with no wallet yet, from the
+/// Esplora the settings name: [`lock_fee`]. No wallet is opened or made.
+#[tauri::command]
+pub async fn swap_lock_fee(app: AppHandle, btc_amount: u64) -> Result<u64> {
+    let settings = load_settings(&app_root(&app)?)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        lock_fee(&settings.esplora()?, settings.network, btc_amount)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Starts a swap of `offer` (an offer's text, as `swap_offers` lists it)
@@ -1918,6 +1951,39 @@ mod tests {
             }
         });
         (url, asked)
+    }
+
+    /// An Esplora on loopback answering every request with `body`: its URL.
+    fn answering(body: &'static str) -> String {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let _ = stream.read(&mut [0u8; 4096]);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn the_lock_fee_is_priced_for_an_empty_wallet_at_the_wallets_rate() {
+        // One input, the lock and change: 153 vB, at the estimate rounded
+        // up, and at 1 sat/vB with none.
+        let estimates = answering(r#"{"1": 9.0, "2": 3.2, "6": 1.5}"#);
+        assert_eq!(lock_fee(&estimates, Network::Signet, 50_000).unwrap(), 153 * 4);
+        let none = answering("{}");
+        assert_eq!(lock_fee(&none, Network::Signet, 50_000).unwrap(), 153);
+        // As the engine's own need prices a wallet with nothing to spend.
+        let (_, need) = swap::wallet::need(vec![], 50_000, 4);
+        assert_eq!(need - 50_000, 153 * 4);
     }
 
     #[test]
@@ -2809,7 +2875,7 @@ mod tests {
         record(&dir, &taken, true, json!({ "Locking": {} }));
         let wallet = Wallet::open(offline(&dir)).unwrap();
         let refused = wallet
-            .prepare(&offer, policy(50_000, 100_000), nex)
+            .prepare(&offer, policy(50_000, 100_000, Network::Bitcoin), nex)
             .err()
             .unwrap()
             .to_string();
@@ -2823,11 +2889,28 @@ mod tests {
 
     #[test]
     fn a_swap_takes_only_its_amount_and_price_from_the_page() {
-        let policy = policy(50_000, 100_000);
+        let policy = policy(50_000, 100_000, Network::Bitcoin);
         assert_eq!(policy.as_object().unwrap().len(), 2);
         let parsed: Policy = serde_json::from_value(policy).unwrap();
         assert_eq!((parsed.btc_amount, parsed.price), (50_000, 100_000));
         assert_eq!(parsed.bounds, Bounds::DEFAULT);
+    }
+
+    #[test]
+    fn a_signet_swap_opts_in_to_mainnet_nex_for_test_coins_and_a_bitcoin_one_never() {
+        let policy = policy(50_000, 100_000, Network::Signet);
+        assert_eq!(policy.as_object().unwrap().len(), 3);
+        let parsed: Policy = serde_json::from_value(policy).unwrap();
+        assert_eq!((parsed.btc_amount, parsed.price), (50_000, 100_000));
+        let opted = Bounds {
+            test_btc_for_mainnet_nex: true,
+            ..Bounds::DEFAULT
+        };
+        assert_eq!(parsed.bounds, opted);
+        // The engine takes mainnet NEX for signet BTC only so opted in.
+        let genesis = swap_nexus_tx::MAINNET_GENESIS;
+        assert!(swap::offer::check_networks(Network::Signet, genesis, true).is_ok());
+        assert!(swap::offer::check_networks(Network::Signet, genesis, false).is_err());
     }
 
     #[test]

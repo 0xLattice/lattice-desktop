@@ -23,8 +23,8 @@ url = "2"
 base64 = "0.22"
 # The buyer's swap engine (lattice-swap's native `swap::app`), pinned by its
 # commit, and the Nexus it names by default. `bitcoin` is the version it uses.
-swap = { git = "https://github.com/0xLattice/lattice-swap", rev = "29fb7a7a203d9b431a9dc14b7dfe2c49b38bdc21" }
-swap-nexus-tx = { git = "https://github.com/0xLattice/lattice-swap", rev = "29fb7a7a203d9b431a9dc14b7dfe2c49b38bdc21" }
+swap = { git = "https://github.com/0xLattice/lattice-swap", rev = "64c1fe78939b56e86f37d692d4c437d98863aeb2" }
+swap-nexus-tx = { git = "https://github.com/0xLattice/lattice-swap", rev = "64c1fe78939b56e86f37d692d4c437d98863aeb2" }
 bitcoin = { version = "0.32", features = ["serde"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"

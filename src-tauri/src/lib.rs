@@ -793,6 +793,7 @@ pub fn run() {
             swap::swap_wallet_open,
             swap::swap_balance,
             swap::swap_need,
+            swap::swap_lock_fee,
             swap::swap_start,
             swap::swap_cancel,
             swap::swap_status,

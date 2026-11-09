@@ -75,7 +75,7 @@ function status(swapId: string, patch: Partial<SwapStatus> = {}): SwapStatus {
     confirmations: { funding: null, lockSpend: null, cancelSpend: null, nexLock: null },
     deadlines: { cancel: null, refund: null, punish: null },
     mustStayOpen: false, backupCovers: "wallet", running: false,
-    btc_amount: 50_000, price: 1_000, nex_amount: 50_000_000,
+    btc_amount: 50_000, price: 1_000, nex_amount: 50_000_000, nex_fee: 1,
     btc_confirmations: 1, nex_confirmations: 1,
     nexAddress: ACCOUNT, tip: 100, warning: null,
     ...patch,
@@ -122,6 +122,7 @@ async function page(t: { after(fn: () => void): void }, engine: Engine = () => u
       case "swap_wallet_open": return "tb1qwallet";
       case "swap_balance": return { confirmed: 0, unconfirmed: 0 };
       case "swap_need": return { enough: false, need: 60_500 };
+      case "swap_lock_fee": return 612;
       case "swap_offers": return [{ text: OFFER_TEXT, offer: OFFER }];
       case "swap_status": return state.followed;
       case "swap_start":
@@ -206,6 +207,19 @@ test("the Swap screen runs a swap on the shell's engine: prepare, fund, status, 
   await until("the wallet", () => text().includes("Download recovery file"));
   button("Download recovery file").click();
   await until("the saved note", () => text().includes("Recovery file saved to /Users/someone/Downloads/lattice-swap-tb1qwallet.json"));
+});
+
+test("with no wallet yet, the lock fee is the shell's price on its own Esplora, and none is made", async (t) => {
+  const { calls, text, type, button, mount } = await page(t, (cmd) => (cmd === "swap_wallet_exists" ? false : undefined));
+  await mount();
+  await until("the offer", () => text().includes("best of 1"));
+  type("input#pay", "0.0005");
+  await until("the amount", () => !button("Swap", "button.primary").disabled);
+  button("Swap", "button.primary").click();
+  await until("the lock fee", () => text().includes("Bitcoin fee to lock it") && text().includes("612 sat"));
+  const priced = calls.find(([cmd]) => cmd === "swap_lock_fee")!;
+  assert.deepEqual(JSON.parse(JSON.stringify(priced[1])), { btcAmount: 50_000 });
+  assert.ok(!calls.some(([cmd]) => cmd === "swap_wallet_open" || cmd === "swap_need"));
 });
 
 test("a started swap is followed even when its first status reads fail", async (t) => {

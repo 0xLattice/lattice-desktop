@@ -48,6 +48,8 @@ export interface SwapStatus {
   btc_amount: number;
   price: number;
   nex_amount: number;
+  /** What the claim pays of `nex_amount`: the buyer receives the rest. */
+  nex_fee: number;
   btc_confirmations: number;
   nex_confirmations: number;
   nexAddress: string | null;
@@ -112,6 +114,9 @@ export const swapWalletExists = () => invoke<boolean>("swap_wallet_exists");
 export const swapWalletOpen = () => invoke<string>("swap_wallet_open");
 export const swapBalance = () => invoke<{ confirmed: number; unconfirmed: number }>("swap_balance");
 export const swapNeed = (btcAmount: number) => invoke<{ enough: boolean; need: number }>("swap_need", { btcAmount });
+/** The lock's Bitcoin fee for `btcAmount` sat with no wallet yet, priced
+ * on the settings' Esplora. */
+export const swapLockFee = (btcAmount: number) => invoke<number>("swap_lock_fee", { btcAmount });
 export const swapOffers = () => invoke<ListedOffer[]>("swap_offers");
 /** Starts a swap of an offer's text for `btcAmount` sat at `price`: its id.
  * Every other bound is the engine's default. */

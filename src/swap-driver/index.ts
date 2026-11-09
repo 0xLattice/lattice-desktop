@@ -6,7 +6,7 @@
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
-  SWAP_ERROR_EVENT, SWAP_STATUS_EVENT, swapBackup, swapBalance, swapCancel, swapNeed, swapOffers,
+  SWAP_ERROR_EVENT, SWAP_STATUS_EVENT, swapBackup, swapBalance, swapCancel, swapLockFee, swapNeed, swapOffers,
   swapStart, swapStatus, swapWalletExists, swapWalletOpen, swapWithdraw,
   type SwapError, type SwapOffer, type SwapStatus,
 } from "../swap-host.ts";
@@ -69,6 +69,12 @@ const notHere = async (): Promise<void> => {
 };
 export const checkEsplora = (_url: string, _network: string, _fetch?: unknown): Promise<void> => notHere();
 export const checkNexusNode = (_url: string, _genesis: string, _fetch?: unknown): Promise<void> => notHere();
+
+/** The lock's Bitcoin fee for `amount` sat before any wallet exists, as the
+ * shell prices it (`swap_lock_fee`) on the Esplora its Servers save: `url`
+ * and `fetch` are the page's, and unused. */
+export const lockFee = (_url: string, amount: number, _fetch?: unknown): Promise<number> =>
+  failed(swapLockFee(amount));
 
 /** The last board read: the shell decodes and checks each offer, so the page's
  * `decodeOffer` is a lookup in it. */
