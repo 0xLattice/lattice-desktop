@@ -404,8 +404,8 @@ test("Bitcoin is read through mempool.space until your own Esplora is saved, ref
   assert.equal(saved, null);
   assert.ok(!trust.hidden);
   // One save each, both servers at once.
-  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_servers").map(([, args]) => [args.network, args.esplora, args.own]),
-    [["signet", OWN, false], ["signet", OWN, false], ["signet", null, false]]);
+  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_servers").map(([, args]) => [args.network, args.esplora, args.nexus]),
+    [["signet", OWN, "public"], ["signet", OWN, "public"], ["signet", null, "public"]]);
 });
 
 test("Nexus is read on the public node until your node is chosen, a refused save kept as typed", async (t) => {
@@ -415,8 +415,9 @@ test("Nexus is read on the public node until your node is chosen, a refused save
     if (cmd === "swap_settings") return { network: "signet", esplora: {}, ownNexus: own, relay: null };
     if (cmd === "swap_set_servers") {
       const network = args.network as string;
-      if (!args.own && own.includes(network) && refusals-- > 0) throw "refused: https://lattice-mainnet-read.fly.dev takes no transactions";
-      own = args.own ? [...new Set([...own, network])] : own.filter((n) => n !== network);
+      const mine = args.nexus === "own";
+      if (!mine && own.includes(network) && refusals-- > 0) throw "refused: https://lattice-mainnet-read.fly.dev takes no transactions";
+      own = mine ? [...new Set([...own, network])] : own.filter((n) => n !== network);
       return null;
     }
     if (cmd === "swap_check_nexus" && own.length > 0) throw "Your node is not running: a new swap waits for it; a running swap's Bitcoin side goes on.";
@@ -456,8 +457,8 @@ test("Nexus is read on the public node until your node is chosen, a refused save
   await until("public's status again", () => text().includes("Connected to lattice-mainnet-read.fly.dev"));
   assert.deepEqual(own, []);
   assert.ok(!trust.hidden);
-  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_servers").map(([, args]) => [args.network, args.esplora, args.own]),
-    [["signet", null, true], ["signet", null, false], ["signet", null, false]]);
+  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_servers").map(([, args]) => [args.network, args.esplora, args.nexus]),
+    [["signet", null, "own"], ["signet", null, "public"], ["signet", null, "public"]]);
 
   // The page's own Nexus field is not shown: the Servers above choose it.
   button("Settings").click();
@@ -465,6 +466,83 @@ test("Nexus is read on the public node until your node is chosen, a refused save
   const field = doc.querySelector("input#esplora")!.closest(".field")!.nextElementSibling!;
   assert.ok(field.textContent?.includes("Nexus"));
   assert.equal(window.getComputedStyle(field).display, "none");
+});
+
+test("Nexus can be read on your own node by URL: https, checked by the shell, a refused save kept as typed", async (t) => {
+  type Choice = "public" | "own" | { remote: string };
+  let nexus: Record<string, string> = {};
+  const { doc, calls, text, button, mount, type, window } = await page(t, (cmd, args) => {
+    if (cmd === "swap_settings") return { network: "signet", esplora: {}, ownNexus: [], nexus, relay: null };
+    if (cmd === "swap_set_servers") {
+      // The shell's refusals: not https, before it is read; then its check.
+      const choice = args.nexus as Choice;
+      if (typeof choice !== "object") {
+        nexus = {};
+        return null;
+      }
+      if (!/^https:\/\//i.test(choice.remote.trim())) throw "refused: must be an https URL";
+      if (choice.remote.includes("elsewhere")) throw "refused: the Nexus node follows the chain of genesis bafyreianother, not bafyreinexus";
+      nexus = { signet: choice.remote.trim().replace(/\/+$/, "") };
+      return null;
+    }
+  });
+  await mount();
+  const server = doc.querySelector('select[aria-label="Nexus server"]') as HTMLSelectElement;
+  const url = doc.querySelector('input[aria-label="Your Nexus node URL"]') as HTMLInputElement;
+  const hint = [...doc.querySelectorAll("p")].find((p) => p.textContent?.includes("--public-submit"))!;
+  const trust = [...doc.querySelectorAll("p")].find((p) => p.textContent?.includes("how deep the seller's NEX lock is"))!;
+  await until("public's status", () => text().includes("Connected to lattice-mainnet-read.fly.dev"));
+  assert.ok(url.hidden && hint.hidden, "no URL for the public node");
+  server.value = "remote";
+  server.dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(!url.hidden && !hint.hidden);
+  assert.equal(hint.textContent, "Its public read port, started with --public-submit: an https URL.");
+
+  // Refused: the shell's words, the choice and URL kept as typed.
+  for (const [typed, refusal] of [["http://node.example", "must be an https URL"], ["https://elsewhere.example", "genesis bafyreianother"]]) {
+    type('input[aria-label="Your Nexus node URL"]', typed);
+    button("Save").click();
+    await until(refusal, () => text().includes(refusal));
+    assert.equal(server.value, "remote");
+    assert.equal(url.value, typed);
+  }
+  assert.deepEqual(nexus, {});
+
+  // Saved: shown as saved, checked by its host, no trust note.
+  type('input[aria-label="Your Nexus node URL"]', "https://node.example/");
+  button("Save").click();
+  await until("your node's status", () => text().includes("Connected to node.example"));
+  assert.deepEqual(nexus, { signet: "https://node.example" });
+  assert.equal(server.value, "remote");
+  assert.equal(url.value, "https://node.example");
+  assert.ok(trust.hidden);
+
+  // Back to the public node.
+  server.value = "public";
+  server.dispatchEvent(new window.Event("change", { bubbles: true }));
+  button("Save").click();
+  await until("public's status again", () => text().includes("Connected to lattice-mainnet-read.fly.dev"));
+  assert.ok(url.hidden && !trust.hidden);
+  assert.deepEqual(calls.filter(([cmd]) => cmd === "swap_set_servers").map(([, args]) => JSON.parse(JSON.stringify(args.nexus))), [
+    { remote: "http://node.example" }, { remote: "https://elsewhere.example" }, { remote: "https://node.example/" }, "public",
+  ]);
+});
+
+test("a running swap's node on another Nexus is shown as the engine's other warnings are", async (t) => {
+  const swapping = status("swap-a", {
+    step: "swapping", running: true, backupCovers: "lock",
+    confirmations: { funding: 1, lockSpend: null, cancelSpend: null, nexLock: null },
+  });
+  const { harness, state, text, mount } = await page(t);
+  state.followed = swapping;
+  await mount();
+  await until("the swap", () => text().includes("BTC →"));
+  // The shell's words (swap.rs's `other_nexus`), two genesis CIDs long.
+  const words = `nexus: refused: the Nexus node follows the chain of genesis ${cid(3)}, not ${OFFER.template.nexus_genesis}: ` +
+    "Nexus is not read until it passes; Bitcoin goes on";
+  await harness.emit("swap-status", { ...swapping, warning: words });
+  await until("the warning", () => text().includes(words));
+  assert.ok(text().includes("The swap is stalled"));
 });
 
 test("each network shows its own Esplora, and plain http off this machine is warned of", async (t) => {

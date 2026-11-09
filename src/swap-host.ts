@@ -9,15 +9,20 @@ export type SwapNetwork = "bitcoin" | "signet";
 
 /** Where swaps run. The page sets the network, your own Esplora on each
  * network (one missing: mempool.space's), and the networks whose swaps read
- * Nexus on this app's node (one missing: the public lattice-mainnet-read.
- * fly.dev); a relay is the operator's, in settings.json (null:
- * lattice-swap-relay.fly.dev). */
+ * Nexus on this app's node or on your own by its https URL (one in neither:
+ * the public lattice-mainnet-read.fly.dev); a relay is the operator's, in
+ * settings.json (null: lattice-swap-relay.fly.dev). */
 export interface SwapSettings {
   network: SwapNetwork;
   esplora?: Partial<Record<SwapNetwork, string>> | null;
   ownNexus?: SwapNetwork[] | null;
+  nexus?: Partial<Record<SwapNetwork, string>> | null;
   relay?: string | null;
 }
+
+/** Where a network's swaps read Nexus: the public node, this app's, or
+ * yours at an https URL. */
+export type NexusChoice = "public" | "own" | { remote: string };
 
 export type SwapStep = "fund-wallet" | "swapping" | "finishing" | "asking" | "received" | "done" | "refunding" | "refunded" | "offer-gone" | "cancelled";
 export type SwapOutcome = "swapped" | "refunded" | "punished" | "drained" | "aborted";
@@ -89,17 +94,17 @@ export interface SwapError {
 export const swapSettings = () => invoke<SwapSettings>("swap_settings");
 export const swapSetNetwork = (network: SwapNetwork) => invoke<void>("swap_set_network", { network });
 /** Chooses `network`'s servers in one save: your own Esplora at `esplora`,
- * or mempool.space's when null, and this app's node (`own`) or the public
- * one for Nexus; a running swap goes on on them. Refused, neither saved,
- * for an Esplora on another network, a public node that is unreachable, on
- * another Nexus or takes no transactions, and once swaps run on another
- * network. */
-export const swapSetServers = (network: SwapNetwork, esplora: string | null, own: boolean) =>
-  invoke<void>("swap_set_servers", { network, esplora, own });
+ * or mempool.space's when null, and `nexus` for Nexus; a running swap goes
+ * on on them. Refused, neither saved, for an Esplora on another network, a
+ * URL of your node that is not https, a node by URL (the public one or
+ * yours) that is unreachable, on another Nexus or takes no transactions,
+ * and once swaps run on another network. */
+export const swapSetServers = (network: SwapNetwork, esplora: string | null, nexus: NexusChoice) =>
+  invoke<void>("swap_set_servers", { network, esplora, nexus });
 /** Refused unless the Esplora is reachable and on the swaps' network. */
 export const swapCheckEsplora = () => invoke<void>("swap_check_esplora");
-/** Refused unless the Nexus node is reachable, on the Nexus, and (a public
- * one) takes transactions. */
+/** Refused unless the Nexus node is reachable, on the Nexus, and (one by
+ * URL) takes transactions. */
 export const swapCheckNexus = () => invoke<void>("swap_check_nexus");
 export const swapWalletExists = () => invoke<boolean>("swap_wallet_exists");
 /** Opens the swap wallet, made if there is none, and resumes its swaps: its
