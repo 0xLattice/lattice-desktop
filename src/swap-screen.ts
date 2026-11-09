@@ -184,6 +184,9 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
       network,
       esplora: ownEsplora(settings) ?? "",
       nexus: "",
+      // Read only by the page's Settings fields for its servers, which
+      // are hidden: Servers above choose them, in the shell.
+      defaults: { esplora: "", nexus: "" },
       relay: settings.relay ?? DEFAULT_RELAY,
       ownNode: true,
       save,
