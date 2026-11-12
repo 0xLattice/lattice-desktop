@@ -19,6 +19,11 @@ export interface SwapSettings {
   ownNexus?: SwapNetwork[] | null;
   nexus?: Partial<Record<SwapNetwork, string>> | null;
   relays?: Partial<Record<SwapNetwork, string[]>> | null;
+  /** Where the settings are kept: settings.json's path. */
+  file?: string;
+  /** Whether a relay directory is read on `network`: one is set, and a
+   * node to read it on (this app's, if it hosts its chain, or one named). */
+  directory?: boolean;
 }
 
 /** Where a network's swaps read Nexus: the public node, this app's, or

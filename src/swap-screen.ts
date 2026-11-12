@@ -189,14 +189,26 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
       // are hidden: Servers above choose them, in the shell.
       defaults: { esplora: "", nexus: "", relays: [] },
       relays: settings.relays?.[network] ?? [DEFAULT_RELAY],
-      // The shell reads the relay directory, if the settings have one for
-      // `network` (swap_relay_directory): only its relays come back.
-      directory: { node: "shell", chain: "" },
+      // The shell reads the relay directory (swap_relay_directory): only
+      // its relays come back.
+      directory: settings.directory ? { node: "shell", chain: "" } : undefined,
       ownNode: true,
       save,
     };
     mount(null, page);
     mount(preact(App, { config }), page);
+  };
+
+  // The page's "No relay configured" says where relays are named here:
+  // not its Settings, whose fields for them are hidden. Its text node is
+  // kept, rewritten, so the page's renders and this observer leave it be.
+  const relayWords = () => {
+    for (const words of page.querySelectorAll(".box.strong-border[role=status] span.small.muted")) {
+      const text = words.firstChild;
+      if (text instanceof Text && text.data.startsWith("No offers are listed: add")) {
+        text.data = `No offers are listed: name swap relays under "relays" in ${settings.file ?? "swap/settings.json"}.`;
+      }
+    }
   };
 
   // The page's "Send NEX to", whenever it is shown empty.
@@ -208,7 +220,10 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
     to.value = nexAddress;
     to.dispatchEvent(new Event("input", { bubbles: true }));
   };
-  new MutationObserver(fill).observe(page, { childList: true, subtree: true });
+  new MutationObserver(() => {
+    fill();
+    relayWords();
+  }).observe(page, { childList: true, subtree: true });
 
   let shown = false;
   const leave = () => {

@@ -1267,8 +1267,22 @@ fn sync_at(
 }
 
 #[tauri::command]
-pub fn swap_settings(app: AppHandle) -> Result<Settings> {
-    load_settings(&app_root(&app)?)
+pub fn swap_settings(app: AppHandle) -> Result<Shown> {
+    let root = app_root(&app)?;
+    let settings = load_settings(&root)?;
+    let directory = directory_nodes(&settings, &host_root(&app)?, pinned(&app)?)?.is_some();
+    Ok(Shown { file: settings_path(&root), settings, directory })
+}
+
+/// The settings as the page reads them: with the file they are kept in,
+/// and whether a relay directory is read on the network swaps run on (one
+/// is set, and a node to read it on: [`directory_nodes`]).
+#[derive(Serialize)]
+pub struct Shown {
+    #[serde(flatten)]
+    settings: Settings,
+    file: PathBuf,
+    directory: bool,
 }
 
 /// Chooses the Bitcoin network swaps run on; the wallet on it opens.
@@ -1614,40 +1628,59 @@ pub async fn swap_offers(app: AppHandle, relay: String) -> Result<Vec<Listed>> {
     .map_err(err)?
 }
 
-/// The URLs of the relays the relay directory of the network swaps run on
-/// lists at its chain's tip (`swap::relay_dir::list_hosted`), within
-/// [`DIRECTORY_TIMEOUT`]: read on this app's node when it hosts the chain,
-/// as the node whose word on the tip is the user's own, else on the node
-/// the settings name; none if there is neither, or no directory. The tip's
-/// node can hide relays or name useless ones, never move funds: an offer
-/// is its seller's, and the page lists it only on the relay it names.
+/// The nodes the relay directory of the network swaps run on is read on,
+/// in order, and its chain: this app's node when it hosts the chain, as
+/// the node whose word on the tip is the user's own, then the node the
+/// settings name; none if there is neither, or no directory.
+fn directory_nodes(settings: &Settings, host: &Path, pinned: Option<u16>) -> Result<Option<(Vec<swap_nexus_tx::rpc::Client>, Vec<String>)>> {
+    use swap_nexus_tx::rpc::Client;
+    let Some(directory) = settings.relay_directory() else {
+        return Ok(None);
+    };
+    let hosted = read_topology_at(&host.join("lattice.json"))?
+        .and_then(|topology| topology.get("hostedChains").cloned())
+        .is_some_and(|chains| chains.as_array().is_some_and(|c| c.contains(&json!(directory.chain))));
+    let mut nodes = vec![];
+    if hosted {
+        nodes.push(Client::from_cookie_file(&own_node(host, pinned), cookie_path(host), DIRECTORY_TIMEOUT));
+    }
+    if !directory.node.is_empty() {
+        nodes.push(Client::public(&directory.node, DIRECTORY_TIMEOUT));
+    }
+    let chain = directory.chain.split('/').map(String::from).collect();
+    Ok((!nodes.is_empty()).then_some((nodes, chain)))
+}
+
+/// The URLs of the relays the relay directory lists at its chain's tip
+/// (`swap::relay_dir::list_hosted`), read on each of [`directory_nodes`]
+/// in turn until one answers, each within [`DIRECTORY_TIMEOUT`]; none if
+/// there is no node to read it on. The tip's node can hide relays or name
+/// useless ones, never move funds: an offer is its seller's, and the page
+/// lists it only on the relay it names.
+fn read_directory(settings: &Settings, host: &Path, pinned: Option<u16>) -> Result<Vec<String>> {
+    let Some((nodes, chain)) = directory_nodes(settings, host, pinned)? else {
+        return Ok(vec![]);
+    };
+    let mut failed = vec![];
+    for node in nodes {
+        node.set_deadline(Some(Instant::now() + DIRECTORY_TIMEOUT));
+        match swap::relay_dir::list_hosted(&node, &chain) {
+            Ok(relays) => return Ok(relays.into_iter().map(|relay| relay.url).collect()),
+            Err(e) => failed.push(e),
+        }
+    }
+    Err(failed.join("; "))
+}
+
+/// [`read_directory`] for the network swaps run on.
 #[tauri::command]
 pub async fn swap_relay_directory(app: AppHandle) -> Result<Vec<String>> {
-    use swap_nexus_tx::rpc::Client;
     let settings = load_settings(&app_root(&app)?)?;
     let host = host_root(&app)?;
     let pinned = pinned(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let Some(directory) = settings.relay_directory() else {
-            return Ok(vec![]);
-        };
-        let chain: Vec<String> = directory.chain.split('/').map(String::from).collect();
-        let hosted = read_topology_at(&host.join("lattice.json"))?
-            .and_then(|topology| topology.get("hostedChains").cloned())
-            .is_some_and(|chains| chains.as_array().is_some_and(|c| c.contains(&json!(directory.chain))));
-        let node = if hosted {
-            Client::from_cookie_file(&own_node(&host, pinned), cookie_path(&host), DIRECTORY_TIMEOUT)
-        } else if !directory.node.is_empty() {
-            Client::public(&directory.node, DIRECTORY_TIMEOUT)
-        } else {
-            return Ok(vec![]);
-        };
-        node.set_deadline(Some(Instant::now() + DIRECTORY_TIMEOUT));
-        let relays = swap::relay_dir::list_hosted(&node, &chain)?;
-        Ok(relays.into_iter().map(|relay| relay.url).collect())
-    })
-    .await
-    .map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || read_directory(&settings, &host, pinned))
+        .await
+        .map_err(err)?
 }
 
 #[cfg(test)]
@@ -2107,6 +2140,50 @@ mod tests {
             }
         });
         url
+    }
+
+    #[test]
+    fn the_relay_directory_is_read_on_this_apps_node_then_the_settings_node() {
+        let host = temp("directory");
+        fs::create_dir_all(&host).unwrap();
+        // This app's node down: nothing listens on its port.
+        let down = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let hosting = |chains: Value| {
+            let topology = json!({ "rpc": down, "hostedChains": chains });
+            fs::write(host.join("lattice.json"), topology.to_string()).unwrap();
+        };
+        let signet = |node: &str| Settings {
+            network: Network::Signet,
+            relay_directory: BTreeMap::from([(
+                Network::Signet,
+                Directory { node: node.into(), chain: SIGNET_RELAY_DIRECTORY.into() },
+            )]),
+            ..Settings::default()
+        };
+        // A node that answers for another chain: its refusal shows it was asked.
+        let theirs = answering(r#"{"chain":["Nexus","other"]}"#);
+
+        // Neither this app's node hosts the chain nor is one set: none read.
+        hosting(json!(["Nexus/testnet"]));
+        assert!(directory_nodes(&signet(""), &host, None).unwrap().is_none());
+        assert_eq!(read_directory(&signet(""), &host, None).unwrap(), Vec::<String>::new());
+        // No directory on mainnet.
+        assert!(directory_nodes(&Settings::default(), &host, None).unwrap().is_none());
+        // The settings' node alone.
+        assert_eq!(directory_nodes(&signet(&theirs), &host, None).unwrap().unwrap().0.len(), 1);
+        let only = read_directory(&signet(&theirs), &host, None).unwrap_err();
+        assert!(only.contains("another chain"), "{only}");
+
+        // This app's node hosts it: read there first, and on its failure on
+        // the settings' node.
+        hosting(json!(["Nexus/testnet", SIGNET_RELAY_DIRECTORY]));
+        assert_eq!(directory_nodes(&signet(""), &host, None).unwrap().unwrap().0.len(), 1);
+        let own = read_directory(&signet(""), &host, None).unwrap_err();
+        assert!(!own.contains("another chain"), "{own}");
+        assert_eq!(directory_nodes(&signet(&theirs), &host, None).unwrap().unwrap().0.len(), 2);
+        let both = read_directory(&signet(&theirs), &host, None).unwrap_err();
+        assert!(both.starts_with(&own) && both.contains("another chain"), "{both}");
+        fs::remove_dir_all(host).unwrap();
     }
 
     #[test]

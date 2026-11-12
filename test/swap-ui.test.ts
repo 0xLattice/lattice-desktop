@@ -322,7 +322,7 @@ test("offers are listed from each relay the settings name and each the shell fin
   const theirs = { ...OFFER, relay: found, template: { ...OFFER.template, swap_id: "offer-2" } };
   const elsewhere = { ...OFFER, relay: "https://elsewhere.example", template: { ...OFFER.template, swap_id: "offer-3" } };
   const { doc, calls, text, button, mount } = await page(t, (cmd, args) => {
-    if (cmd === "swap_settings") return { network: "signet", esplora: {}, relays: { signet: [mine] } };
+    if (cmd === "swap_settings") return { network: "signet", esplora: {}, relays: { signet: [mine] }, directory: true };
     if (cmd === "swap_relay_directory") return [found, mine];
     if (cmd === "swap_offers" && args.relay === mine) return [{ text: "mine", offer: { ...OFFER, relay: mine } }];
     // An offer naming another relay than the one listing it is left out.
@@ -339,6 +339,28 @@ test("offers are listed from each relay the settings name and each the shell fin
   // read as yours; the default relay not read once the settings name relays.
   const read = calls.filter(([cmd]) => cmd === "swap_offers").map(([, args]) => args.relay);
   assert.deepEqual([...new Set(read)].sort(), [found, mine]);
+});
+
+test("with no relays, the page says to name them in settings.json, unless a directory is read", async (t) => {
+  const file = "/Users/someone/Library/Application Support/Lattice/swap/settings.json";
+  const none = await page(t, (cmd) =>
+    cmd === "swap_settings" ? { network: "signet", esplora: {}, relays: { signet: [] }, file, directory: false } : undefined);
+  await none.mount();
+  await until("no relay", () => none.text().includes("No relay configured"));
+  assert.ok(none.text().includes(`No offers are listed: name swap relays under "relays" in ${file}.`));
+  assert.ok(!none.text().includes("in Settings"));
+  assert.ok(!none.calls.some(([cmd]) => cmd === "swap_offers" || cmd === "swap_relay_directory"));
+
+  const found = "https://found.example";
+  const directory = await page(t, (cmd, args) => {
+    if (cmd === "swap_settings") return { network: "signet", esplora: {}, relays: { signet: [] }, file, directory: true };
+    if (cmd === "swap_relay_directory") return [found];
+    if (cmd === "swap_offers" && args.relay === found) return [{ text: "theirs", offer: { ...OFFER, relay: found } }];
+    return undefined;
+  });
+  await directory.mount();
+  await until("the directory's offer", () => directory.text().includes("best of 1"));
+  assert.ok(!directory.text().includes("No relay configured"));
 });
 
 test("the reminder (.ics) is not offered: the app notifies from the tray", async (t) => {
