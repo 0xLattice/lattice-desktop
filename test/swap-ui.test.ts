@@ -36,6 +36,14 @@ async function build(): Promise<string> {
     jsx: "automatic",
     jsxImportSource: "preact",
     alias: { "lattice-swap-driver": "./src/swap-driver/index.ts" },
+    // As build.mjs: the page's relay directory module is the shell's.
+    plugins: [{
+      name: "shell-directory",
+      setup(build) {
+        build.onResolve({ filter: /^\.\.?\/directory$/ }, ({ importer }) =>
+          /lattice-swap-web[\\/]src[\\/]/.test(importer) ? { path: `${root}src/swap-driver/directory.ts` } : undefined);
+      },
+    }],
     loader: { ".css": "empty" },
     logLevel: "silent",
   });
@@ -62,7 +70,7 @@ const OFFER: SwapOffer = {
     nexus_genesis: "bafyreiggtg4ezifboyekbf4gxst2jr3mpjqcxsbmopy7w6fp46g4ngpgxa",
   },
   btc_network: "signet",
-  relay: null,
+  relay: "https://lattice-swap-relay.fly.dev",
   seller: "seller",
 };
 const OFFER_TEXT = JSON.stringify({ signed: "offer-1" });
@@ -117,13 +125,14 @@ async function page(t: { after(fn: () => void): void }, engine: Engine = () => u
     const answer = engine(cmd, args);
     if (answer !== undefined) return answer;
     switch (cmd) {
-      case "swap_settings": return { network: "signet", esplora: {}, relay: null };
+      case "swap_settings": return { network: "signet", esplora: {} };
       case "swap_wallet_exists": return true;
       case "swap_wallet_open": return "tb1qwallet";
       case "swap_balance": return { confirmed: 0, unconfirmed: 0 };
       case "swap_need": return { enough: false, need: 60_500 };
       case "swap_lock_fee": return 612;
-      case "swap_offers": return [{ text: OFFER_TEXT, offer: OFFER }];
+      case "swap_offers": return args.relay === OFFER.relay ? [{ text: OFFER_TEXT, offer: OFFER }] : [];
+      case "swap_relay_directory": return [];
       case "swap_status": return state.followed;
       case "swap_start":
         state.followed = status("swap-a");
@@ -307,6 +316,53 @@ test("the account's address never overwrites one typed", async (t) => {
   assert.equal((doc.querySelector("input#to") as HTMLInputElement).value, typed);
 });
 
+test("offers are listed from each relay the settings name and each the shell finds on the directory", async (t) => {
+  const mine = "https://mine.example";
+  const found = "https://found.example";
+  const theirs = { ...OFFER, relay: found, template: { ...OFFER.template, swap_id: "offer-2" } };
+  const elsewhere = { ...OFFER, relay: "https://elsewhere.example", template: { ...OFFER.template, swap_id: "offer-3" } };
+  const { doc, calls, text, button, mount } = await page(t, (cmd, args) => {
+    if (cmd === "swap_settings") return { network: "signet", esplora: {}, relays: { signet: [mine] }, directory: true };
+    if (cmd === "swap_relay_directory") return [found, mine];
+    if (cmd === "swap_offers" && args.relay === mine) return [{ text: "mine", offer: { ...OFFER, relay: mine } }];
+    // An offer naming another relay than the one listing it is left out.
+    if (cmd === "swap_offers" && args.relay === found) return [{ text: "theirs", offer: theirs }, { text: "elsewhere", offer: elsewhere }];
+    return undefined;
+  });
+  await mount();
+  button("Offers").click();
+  await until("both relays' offers", () => doc.querySelectorAll("tbody tr").length === 2);
+  assert.match(text(), /mine\.example/);
+  assert.match(text(), /found\.example · via directory/);
+  assert.doesNotMatch(text(), /elsewhere\.example/);
+  // Each relay read once a refresh, the one of yours the directory lists too
+  // read as yours; the default relay not read once the settings name relays.
+  const read = calls.filter(([cmd]) => cmd === "swap_offers").map(([, args]) => args.relay);
+  assert.deepEqual([...new Set(read)].sort(), [found, mine]);
+});
+
+test("with no relays, the page says to name them in settings.json, unless a directory is read", async (t) => {
+  const file = "/Users/someone/Library/Application Support/Lattice/swap/settings.json";
+  const none = await page(t, (cmd) =>
+    cmd === "swap_settings" ? { network: "signet", esplora: {}, relays: { signet: [] }, file, directory: false } : undefined);
+  await none.mount();
+  await until("no relay", () => none.text().includes("No relay configured"));
+  assert.ok(none.text().includes(`No offers are listed: name swap relays under "relays" in ${file}.`));
+  assert.ok(!none.text().includes("in Settings"));
+  assert.ok(!none.calls.some(([cmd]) => cmd === "swap_offers" || cmd === "swap_relay_directory"));
+
+  const found = "https://found.example";
+  const directory = await page(t, (cmd, args) => {
+    if (cmd === "swap_settings") return { network: "signet", esplora: {}, relays: { signet: [] }, file, directory: true };
+    if (cmd === "swap_relay_directory") return [found];
+    if (cmd === "swap_offers" && args.relay === found) return [{ text: "theirs", offer: { ...OFFER, relay: found } }];
+    return undefined;
+  });
+  await directory.mount();
+  await until("the directory's offer", () => directory.text().includes("best of 1"));
+  assert.ok(!directory.text().includes("No relay configured"));
+});
+
 test("the reminder (.ics) is not offered: the app notifies from the tray", async (t) => {
   const { window, doc, state, text, mount } = await page(t);
   state.followed = status("swap-a", {
@@ -371,7 +427,7 @@ test("Bitcoin is read through mempool.space until your own Esplora is saved, ref
   let saved: string | null = null;
   let refusals = 1;
   const { doc, calls, text, button, type, mount, window } = await page(t, (cmd, args) => {
-    if (cmd === "swap_settings") return { network: "signet", esplora: saved === null ? {} : { signet: saved }, relay: null };
+    if (cmd === "swap_settings") return { network: "signet", esplora: saved === null ? {} : { signet: saved } };
     if (cmd === "swap_set_servers") {
       if (refusals-- > 0) throw "refused: the Esplora's genesis is 000000000019d6, not signet's";
       saved = args.esplora as string | null;
@@ -426,7 +482,7 @@ test("Nexus is read on the public node until your node is chosen, a refused save
   let own: string[] = [];
   let refusals = 1;
   const { window, doc, calls, text, button, mount } = await page(t, (cmd, args) => {
-    if (cmd === "swap_settings") return { network: "signet", esplora: {}, ownNexus: own, relay: null };
+    if (cmd === "swap_settings") return { network: "signet", esplora: {}, ownNexus: own };
     if (cmd === "swap_set_servers") {
       const network = args.network as string;
       const mine = args.nexus === "own";
@@ -484,7 +540,7 @@ test("Nexus is read on the public node until your node is chosen, a refused save
 
 test("the page's Settings choose no server: its fields hidden, its checks refused without a fetch", async (t) => {
   const { window, doc, calls, state, text, button, mount, settle } = await page(t, (cmd) =>
-    cmd === "swap_settings" ? { network: "signet", esplora: { signet: "https://esplora.example/api" }, relay: null } : undefined);
+    cmd === "swap_settings" ? { network: "signet", esplora: { signet: "https://esplora.example/api" } } : undefined);
   // A swap runs in the open wallet: the page's note that it carries on with
   // the servers saved there would mislead, as the page saves none.
   state.followed = status("swap-a", { step: "swapping", running: true });
@@ -511,7 +567,10 @@ test("the page's Settings choose no server: its fields hidden, its checks refuse
   const running = [...doc.querySelectorAll("span")].find((s) => s.textContent?.includes("A swap is running: it carries on"))!;
   assert.ok(esplora.textContent?.includes("Use the public Esplora"));
   assert.ok(nexus.textContent?.includes("Nexus"));
-  for (const element of [esplora, nexus, words, running]) assert.equal(window.getComputedStyle(element).display, "none");
+  // Nor its relays and relay directory: the operator's, in the shell.
+  const relays = doc.querySelector("input#relay")!.closest(".field")!;
+  const directory = doc.querySelector("input#directory")!.closest(".field")!;
+  for (const element of [esplora, nexus, words, running, relays, directory]) assert.equal(window.getComputedStyle(element).display, "none");
   assert.ok(!text().includes("Save and reload"));
   // Nothing reached a network from the page, nor asked the shell.
   assert.deepEqual(fetched, []);
@@ -522,7 +581,7 @@ test("Nexus can be read on your own node by URL: https, checked by the shell, a 
   type Choice = "public" | "own" | { remote: string };
   let nexus: Record<string, string> = {};
   const { doc, calls, text, button, mount, type, window } = await page(t, (cmd, args) => {
-    if (cmd === "swap_settings") return { network: "signet", esplora: {}, ownNexus: [], nexus, relay: null };
+    if (cmd === "swap_settings") return { network: "signet", esplora: {}, ownNexus: [], nexus };
     if (cmd === "swap_set_servers") {
       // The shell's refusals: not https, before it is read; then its check.
       const choice = args.nexus as Choice;
@@ -582,7 +641,7 @@ test("each network shows its own Esplora, and plain http off this machine is war
   const LAN = "http://umbrel.local:3006/api";
   let network = "signet";
   const { doc, text, mount, type, window } = await page(t, (cmd, args) => {
-    if (cmd === "swap_settings") return { network, esplora: { bitcoin: LAN }, relay: null };
+    if (cmd === "swap_settings") return { network, esplora: { bitcoin: LAN } };
     if (cmd === "swap_set_network") {
       network = args.network as string;
       return null;
@@ -608,7 +667,7 @@ test("each network shows its own Esplora, and plain http off this machine is war
 
 test("one save at a time, and the screen shows what was saved when the wallet then fails", async (t) => {
   const OWN = "http://127.0.0.1:3002/api";
-  let disk = { network: "signet", esplora: {} as Record<string, string>, relay: null };
+  let disk = { network: "signet", esplora: {} as Record<string, string> };
   let finish: (() => void) | null = null;
   const { doc, text, button, mount, type, window } = await page(t, (cmd, args) => {
     if (cmd === "swap_settings") return disk;

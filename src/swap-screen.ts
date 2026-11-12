@@ -5,8 +5,9 @@
 // servers folded away below them: Bitcoin through mempool.space's Esplora or
 // your own, and NEX through a public Nexus node, this app's, or yours by URL,
 // as Sparrow chooses a public server or your own. The page's own Esplora and
-// Nexus fields are hidden (desktop.css); the relay is the operator's (the
-// shell's swap/settings.json).
+// Nexus fields are hidden (desktop.css), and its relays and relay directory
+// are the operator's (the shell's swap/settings.json), its fields for them
+// hidden too.
 
 import { h as preact, render as mount } from "preact";
 import { App } from "../vendor/lattice-swap-web/src/app.tsx";
@@ -16,8 +17,8 @@ import { h } from "../vendor/nexus-wallet/src/popup/app.ts";
 import { connecting, plainly, SAVED_BY_SHELL } from "./swap-driver/index.ts";
 import { swapCheckEsplora, swapCheckNexus, swapRestoreFile, swapSetNetwork, swapSetServers, swapSettings, type NexusChoice, type SwapNetwork, type SwapSettings } from "./swap-host.ts";
 
-/** The relay the shell lists offers from when its settings name none
- * (swap.rs's `DEFAULT_RELAY`): shown only. */
+/** The relays the shell lists offers from on a network its settings name
+ * none for (swap.rs's `DEFAULT_RELAY`). */
 const DEFAULT_RELAY = "https://lattice-swap-relay.fly.dev";
 /** The public Nexus node the shell reads unless you choose this app's
  * (swap.rs's `PUBLIC_NEXUS`): one for every network. */
@@ -186,13 +187,28 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
       nexus: "",
       // Read only by the page's Settings fields for its servers, which
       // are hidden: Servers above choose them, in the shell.
-      defaults: { esplora: "", nexus: "" },
-      relay: settings.relay ?? DEFAULT_RELAY,
+      defaults: { esplora: "", nexus: "", relays: [] },
+      relays: settings.relays?.[network] ?? [DEFAULT_RELAY],
+      // The shell reads the relay directory (swap_relay_directory): only
+      // its relays come back.
+      directory: settings.directory ? { node: "shell", chain: "" } : undefined,
       ownNode: true,
       save,
     };
     mount(null, page);
     mount(preact(App, { config }), page);
+  };
+
+  // The page's "No relay configured" says where relays are named here:
+  // not its Settings, whose fields for them are hidden. Its text node is
+  // kept, rewritten, so the page's renders and this observer leave it be.
+  const relayWords = () => {
+    for (const words of page.querySelectorAll(".box.strong-border[role=status] span.small.muted")) {
+      const text = words.firstChild;
+      if (text instanceof Text && text.data.startsWith("No offers are listed: add")) {
+        text.data = `No offers are listed: name swap relays under "relays" in ${settings.file ?? "swap/settings.json"}.`;
+      }
+    }
   };
 
   // The page's "Send NEX to", whenever it is shown empty.
@@ -204,7 +220,10 @@ export async function swapScreen(nexAddress: string | null, back: () => void): P
     to.value = nexAddress;
     to.dispatchEvent(new Event("input", { bubbles: true }));
   };
-  new MutationObserver(fill).observe(page, { childList: true, subtree: true });
+  new MutationObserver(() => {
+    fill();
+    relayWords();
+  }).observe(page, { childList: true, subtree: true });
 
   let shown = false;
   const leave = () => {

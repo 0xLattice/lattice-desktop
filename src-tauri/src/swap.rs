@@ -20,8 +20,9 @@
 //!   Settings refuse one, or this app's. The network does not change while
 //!   a swap runs; its Esplora and Nexus node may, and the swap goes on on them,
 //!   which its resume checks again (a server that failed or misreports
-//!   must not hold a refund). The relay is the
-//!   operator's, edited by hand in `<app_root>/swap/settings.json`. Every
+//!   must not hold a refund). The relays whose offers are listed, and the
+//!   relay directory more are found on, are the operator's, edited by hand
+//!   in `<app_root>/swap/settings.json`. Every
 //!   URL is https, or plain http to this machine or a local network (a
 //!   private or link-local address, `localhost`, `.local`, `.lan`,
 //!   `.home.arpa`) or an onion, as the engine's client parses it.
@@ -61,8 +62,12 @@ use crate::{
     write_new, PinnedPort, Result,
 };
 
-/// The relay whose offers are listed unless the settings name another.
+/// The relays whose offers are listed on a network the settings name no
+/// relays for: this one.
 pub const DEFAULT_RELAY: &str = "https://lattice-swap-relay.fly.dev";
+/// The relay directory's chain on signet when the settings name none, as
+/// lattice-swap-web's signet build reads it; mainnet has none yet.
+pub const SIGNET_RELAY_DIRECTORY: &str = "Nexus/testnet/swap-relays";
 /// The Nexus node read unless the settings choose this app's own: a public
 /// read port that takes submits, as lattice-swap's CLI reads by default.
 /// One for every Bitcoin network: there is one Nexus,
@@ -70,12 +75,23 @@ pub const DEFAULT_RELAY: &str = "https://lattice-swap-relay.fly.dev";
 pub const PUBLIC_NEXUS: &str = "https://lattice-mainnet-read.fly.dev";
 /// The Bitcoin networks a swap may run on: mainnet, and signet to test.
 const NETWORKS: [Network; 2] = [Network::Bitcoin, Network::Signet];
-/// The most a relay's offer board or a recovery file may hold.
+/// The most a recovery file may hold.
 const MAX_BODY: u64 = 8 * 1024 * 1024;
+/// The most entries of one relay's board that are read, and the most bytes
+/// of the board of a relay of the settings' and of one found on the relay
+/// directory, as lattice-swap-web reads them (`MAX_OFFERS`,
+/// `MAX_OWN_RELAY_BYTES`, `MAX_FOUND_RELAY_BYTES`).
+const MAX_OFFERS: usize = 100;
+const MAX_OWN_BOARD: u64 = 48 << 20;
+const MAX_FOUND_BOARD: u64 = 4 << 20;
+/// How long a read of the relay directory may take, in all, as
+/// lattice-swap-web's `DIRECTORY_TIMEOUT`.
+const DIRECTORY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Where swaps run: the Bitcoin network, the user's own Esplora on each
 /// network that has one, the networks whose swaps read Nexus on this app's
-/// own node, and the relay when not the default. Kept in
+/// own node, and the relays and relay directory on each network that names
+/// its own. Kept in
 /// `<app_root>/swap/settings.json`; the page sets the network, the Esplora
 /// and the Nexus node.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -95,7 +111,22 @@ pub struct Settings {
     /// a build from before it ignores it.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub nexus: BTreeMap<Network, String>,
-    pub relay: Option<String>,
+    /// [`DEFAULT_RELAY`] on a network missing here.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub relays: BTreeMap<Network, Vec<String>>,
+    /// [`SIGNET_RELAY_DIRECTORY`] on signet, none on mainnet, if missing
+    /// here; none if its chain is empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub relay_directory: BTreeMap<Network, Directory>,
+}
+
+/// A relay directory: its chain, and a node hosting it to read it from
+/// when this app's does not (empty for none).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Directory {
+    #[serde(default)]
+    pub node: String,
+    pub chain: String,
 }
 
 impl Default for Settings {
@@ -105,13 +136,15 @@ impl Default for Settings {
             esplora: BTreeMap::new(),
             own_nexus: BTreeSet::new(),
             nexus: BTreeMap::new(),
-            relay: None,
+            relays: BTreeMap::new(),
+            relay_directory: BTreeMap::new(),
         }
     }
 }
 
 /// The settings as a file holds them: its Esplora one URL, as it was before
-/// there was one per network, or one per network.
+/// there was one per network, or one per network; its relay one URL, as it
+/// was before there were several, for every network.
 #[derive(Deserialize)]
 struct Stored {
     network: Network,
@@ -123,6 +156,10 @@ struct Stored {
     nexus: BTreeMap<String, String>,
     #[serde(default)]
     relay: Option<String>,
+    #[serde(default)]
+    relays: BTreeMap<String, Vec<String>>,
+    #[serde(default, rename = "relayDirectory")]
+    relay_directory: BTreeMap<String, Directory>,
 }
 
 #[derive(Deserialize)]
@@ -143,18 +180,25 @@ impl TryFrom<Stored> for Settings {
             Some(Esploras::One(url)) => BTreeMap::from([(stored.network, url)]),
             Some(Esploras::Each(each)) => per_network(each, "an Esplora")?,
         };
+        let mut relays = per_network(stored.relays, "relays")?;
+        for network in NETWORKS {
+            if let Some(url) = &stored.relay {
+                relays.entry(network).or_insert_with(|| vec![url.clone()]);
+            }
+        }
         Ok(Self {
             network: stored.network,
             esplora,
             own_nexus: stored.own_nexus,
             nexus: per_network(stored.nexus, "a Nexus node")?,
-            relay: stored.relay,
+            relays,
+            relay_directory: per_network(stored.relay_directory, "a relay directory")?,
         })
     }
 }
 
-/// URLs by the name of their network: refused for a name that is none.
-fn per_network(each: BTreeMap<String, String>, what: &str) -> Result<BTreeMap<Network, String>> {
+/// Values by the name of their network: refused for a name that is none.
+fn per_network<T>(each: BTreeMap<String, T>, what: &str) -> Result<BTreeMap<Network, T>> {
     each.into_iter()
         .map(|(network, url)| match network.parse() {
             Ok(network) => Ok((network, url)),
@@ -236,7 +280,9 @@ impl Settings {
                 self.network
             ));
         }
-        for url in self.esplora.values().chain(&self.relay) {
+        let relays = self.relays.values().flatten();
+        let directories = self.relay_directory.values().map(|d| &d.node).filter(|node| !node.is_empty());
+        for url in self.esplora.values().chain(relays).chain(directories) {
             check_url(url)?;
         }
         for (network, url) in &self.nexus {
@@ -268,8 +314,25 @@ impl Settings {
             .ok_or_else(|| format!("no Esplora for {}", self.network))
     }
 
-    fn relay(&self) -> &str {
-        self.relay.as_deref().unwrap_or(DEFAULT_RELAY)
+    /// The relays whose offers are listed on the network swaps run on.
+    fn relays(&self) -> Vec<String> {
+        self.relays
+            .get(&self.network)
+            .cloned()
+            .unwrap_or_else(|| vec![DEFAULT_RELAY.into()])
+    }
+
+    /// The relay directory on the network swaps run on, if any.
+    fn relay_directory(&self) -> Option<Directory> {
+        let default = (self.network == Network::Signet).then(|| Directory {
+            node: String::new(),
+            chain: SIGNET_RELAY_DIRECTORY.into(),
+        });
+        self.relay_directory
+            .get(&self.network)
+            .cloned()
+            .or(default)
+            .filter(|directory| !directory.chain.is_empty())
     }
 
     /// Whether swaps on the network they run on read Nexus on this app's
@@ -1135,10 +1198,11 @@ fn set_servers_with(
     })
 }
 
-/// The engine, as the app manages it, and the lock held through each save
-/// of the settings (see `save_with`).
+/// The engine, as the app manages it, the lock held through each save of
+/// the settings (see `save_with`), and the relays the last read of the
+/// relay directory found (see `board_cap`).
 #[derive(Default)]
-pub struct Swaps(Mutex<Engine>, Mutex<()>);
+pub struct Swaps(Mutex<Engine>, Mutex<()>, Mutex<Vec<String>>);
 
 fn emitter(app: &AppHandle) -> Emit {
     let app = app.clone();
@@ -1204,8 +1268,24 @@ fn sync_at(
 }
 
 #[tauri::command]
-pub fn swap_settings(app: AppHandle) -> Result<Settings> {
-    load_settings(&app_root(&app)?)
+pub fn swap_settings(app: AppHandle) -> Result<Shown> {
+    let root = app_root(&app)?;
+    let settings = load_settings(&root)?;
+    // A lattice.json that cannot be read only means no directory.
+    let nodes = host_root(&app).and_then(|host| directory_nodes(&settings, &host, pinned(&app)?));
+    let directory = nodes.ok().flatten().is_some();
+    Ok(Shown { file: settings_path(&root), settings, directory })
+}
+
+/// The settings as the page reads them: with the file they are kept in,
+/// and whether a relay directory is read on the network swaps run on (one
+/// is set, and a node to read it on: [`directory_nodes`]).
+#[derive(Serialize)]
+pub struct Shown {
+    #[serde(flatten)]
+    settings: Settings,
+    file: PathBuf,
+    directory: bool,
 }
 
 /// Chooses the Bitcoin network swaps run on; the wallet on it opens.
@@ -1490,13 +1570,15 @@ fn safe(value: &Value) -> bool {
 
 /// The offers in a relay's board, `body`, for `network` and the Nexus of
 /// `genesis`, cheapest NEX first, as the website lists them. Left out: an
-/// offer that does not decode or is not signed by its seller, one at a
-/// price of 0, and one with a number the page cannot hold exactly.
+/// offer that does not decode or is not signed by its seller, any past the
+/// first [`MAX_OFFERS`], one at a price of 0, and one with a number the
+/// page cannot hold exactly. The page leaves out one that names another
+/// relay than the one it is listed on.
 fn listed(body: &str, network: Network, genesis: &str) -> Result<Vec<Listed>> {
     let board: Vec<Value> =
         serde_json::from_str(body).map_err(|e| format!("not an offer board: {e}"))?;
     let mut list = vec![];
-    for item in board {
+    for item in board.into_iter().take(MAX_OFFERS) {
         let text = item.to_string();
         let Ok(offer) = Offer::decode(&text) else {
             continue;
@@ -1516,12 +1598,29 @@ fn listed(body: &str, network: Network, genesis: &str) -> Result<Vec<Listed>> {
     Ok(list.into_iter().map(|(_, listed)| listed).collect())
 }
 
-/// The relay's offers, `GET <relay>/offers`, as [`listed`] keeps them.
+/// The most bytes of `relay`'s board read: [`MAX_OWN_BOARD`] for one of
+/// the settings' relays on the network swaps run on, [`MAX_FOUND_BOARD`]
+/// for one the last read of the relay directory found. Refused for any
+/// other: the page reads no relay but these.
+fn board_cap(settings: &Settings, found: &[String], relay: &str) -> Result<u64> {
+    if settings.relays().iter().any(|own| own == relay) {
+        Ok(MAX_OWN_BOARD)
+    } else if found.iter().any(|url| url == relay) {
+        Ok(MAX_FOUND_BOARD)
+    } else {
+        Err(format!("refused: {relay} is neither a relay of the settings nor one the relay directory lists"))
+    }
+}
+
+/// The offers of `relay`, `GET <relay>/offers`, as [`listed`] keeps them,
+/// its board read up to [`board_cap`].
 #[tauri::command]
-pub async fn swap_offers(app: AppHandle) -> Result<Vec<Listed>> {
+pub async fn swap_offers(app: AppHandle, relay: String) -> Result<Vec<Listed>> {
     let settings = load_settings(&app_root(&app)?)?;
+    let max = board_cap(&settings, &app.state::<Swaps>().2.lock().map_err(err)?, &relay)?;
+    check_url(&relay)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let url = format!("{}/offers", settings.relay().trim_end_matches('/'));
+        let url = format!("{}/offers", relay.trim_end_matches('/'));
         let response = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(20))
             .redirects(0)
@@ -1532,16 +1631,75 @@ pub async fn swap_offers(app: AppHandle) -> Result<Vec<Listed>> {
         let mut body = String::new();
         response
             .into_reader()
-            .take(MAX_BODY + 1)
+            .take(max + 1)
             .read_to_string(&mut body)
             .map_err(err)?;
-        if body.len() as u64 > MAX_BODY {
+        if body.len() as u64 > max {
             return Err(format!("{url}: too large"));
         }
         listed(&body, settings.network, swap_nexus_tx::MAINNET_GENESIS)
     })
     .await
     .map_err(err)?
+}
+
+/// The nodes the relay directory of the network swaps run on is read on,
+/// in order, and its chain: this app's node when it hosts the chain and
+/// runs (its port pinned, the one its cookie is known to go to), as the
+/// node whose word on the tip is the user's own, then the node the
+/// settings name; none if there is neither, or no directory.
+fn directory_nodes(settings: &Settings, host: &Path, pinned: Option<u16>) -> Result<Option<(Vec<swap_nexus_tx::rpc::Client>, Vec<String>)>> {
+    use swap_nexus_tx::rpc::Client;
+    let Some(directory) = settings.relay_directory() else {
+        return Ok(None);
+    };
+    let hosted = read_topology_at(&host.join("lattice.json"))?
+        .and_then(|topology| topology.get("hostedChains").cloned())
+        .is_some_and(|chains| chains.as_array().is_some_and(|c| c.contains(&json!(directory.chain))));
+    let mut nodes = vec![];
+    if hosted && pinned.is_some() {
+        nodes.push(Client::from_cookie_file(&own_node(host, pinned), cookie_path(host), DIRECTORY_TIMEOUT));
+    }
+    if !directory.node.is_empty() {
+        nodes.push(Client::public(&directory.node, DIRECTORY_TIMEOUT));
+    }
+    let chain = directory.chain.split('/').map(String::from).collect();
+    Ok((!nodes.is_empty()).then_some((nodes, chain)))
+}
+
+/// The URLs of the relays the relay directory lists at its chain's tip
+/// (`swap::relay_dir::list_hosted`), read on each of [`directory_nodes`]
+/// in turn until one answers, each within [`DIRECTORY_TIMEOUT`]; none if
+/// there is no node to read it on. The tip's node can hide relays or name
+/// useless ones, never move funds: an offer is its seller's, and the page
+/// lists it only on the relay it names.
+fn read_directory(settings: &Settings, host: &Path, pinned: Option<u16>) -> Result<Vec<String>> {
+    let Some((nodes, chain)) = directory_nodes(settings, host, pinned)? else {
+        return Ok(vec![]);
+    };
+    let mut failed = vec![];
+    for node in nodes {
+        node.set_deadline(Some(Instant::now() + DIRECTORY_TIMEOUT));
+        match swap::relay_dir::list_hosted(&node, &chain) {
+            Ok(relays) => return Ok(relays.into_iter().map(|relay| relay.url).collect()),
+            Err(e) => failed.push(e),
+        }
+    }
+    Err(failed.join("; "))
+}
+
+/// [`read_directory`] for the network swaps run on; the relays found are
+/// kept, as the only ones besides the settings' that `swap_offers` reads.
+#[tauri::command]
+pub async fn swap_relay_directory(app: AppHandle) -> Result<Vec<String>> {
+    let settings = load_settings(&app_root(&app)?)?;
+    let host = host_root(&app)?;
+    let pinned = pinned(&app)?;
+    let found = tauri::async_runtime::spawn_blocking(move || read_directory(&settings, &host, pinned))
+        .await
+        .map_err(err)??;
+    app.state::<Swaps>().2.lock().map_err(err)?.clone_from(&found);
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -1803,8 +1961,11 @@ mod tests {
             Settings::default().esplora().unwrap(),
             "https://mempool.space/api"
         );
-        assert_eq!(Settings::default().relay(), DEFAULT_RELAY);
+        assert_eq!(Settings::default().relays(), [DEFAULT_RELAY]);
+        assert_eq!(Settings::default().relay_directory(), None);
         let signet: Settings = serde_json::from_value(json!({ "network": "signet" })).unwrap();
+        assert_eq!(signet.relays(), [DEFAULT_RELAY]);
+        assert_eq!(signet.relay_directory().unwrap().chain, SIGNET_RELAY_DIRECTORY);
         assert_eq!(
             signet.esplora().unwrap(),
             "https://mempool.space/signet/api"
@@ -1815,6 +1976,8 @@ mod tests {
             json!({ "network": "testnet" }),
             json!({ "network": "bitcoin", "esplora": "http://lying.example/api" }),
             json!({ "network": "bitcoin", "relay": "file:///etc" }),
+            json!({ "network": "bitcoin", "relays": { "signet": ["file:///etc"] } }),
+            json!({ "network": "bitcoin", "relayDirectory": { "signet": { "node": "http://a.example", "chain": "C" } } }),
         ] {
             fs::write(settings_path(&root), bad.to_string()).unwrap();
             assert!(load_settings(&root).is_err(), "{bad}");
@@ -1828,7 +1991,7 @@ mod tests {
         // as a map.
         let public = Settings::default();
         let saved = serde_json::to_value(&public).unwrap();
-        assert_eq!(saved, json!({ "network": "bitcoin", "relay": null }));
+        assert_eq!(saved, json!({ "network": "bitcoin" }));
         assert_eq!(serde_json::from_value::<Settings>(saved).unwrap(), public);
         // Yours, one per network, read back as saved.
         let own = Settings {
@@ -1839,13 +2002,27 @@ mod tests {
             ]),
             own_nexus: BTreeSet::from([Network::Signet]),
             nexus: BTreeMap::from([(Network::Bitcoin, "https://node.example".into())]),
-            relay: Some("https://relay.example".into()),
+            relays: BTreeMap::from([(Network::Signet, vec![])]),
+            relay_directory: BTreeMap::from([(
+                Network::Bitcoin,
+                Directory { node: "https://node.example".into(), chain: "Nexus/swap-relays".into() },
+            )]),
         };
         let saved = serde_json::to_value(&own).unwrap();
         assert_eq!(saved["esplora"]["signet"], "https://signet.example/api");
         assert_eq!(saved["ownNexus"], json!(["signet"]));
         assert_eq!(saved["nexus"], json!({ "bitcoin": "https://node.example" }));
+        assert_eq!(saved["relays"], json!({ "signet": [] }));
+        assert_eq!(saved["relayDirectory"]["bitcoin"]["chain"], "Nexus/swap-relays");
         assert_eq!(serde_json::from_value::<Settings>(saved).unwrap(), own);
+        // None listed: no relays, not the default.
+        assert!(Settings { network: Network::Signet, ..own.clone() }.relays().is_empty());
+        // An empty chain: no directory, not the default.
+        let none: Settings = serde_json::from_value(
+            json!({ "network": "signet", "relayDirectory": { "signet": { "chain": "" } } }),
+        )
+        .unwrap();
+        assert_eq!(none.relay_directory(), None);
         // One URL, as such a build saves it: the network's it was saved for.
         let old: Settings = serde_json::from_value(
             json!({ "network": "signet", "esplora": "https://signet.example/api", "relay": null }),
@@ -1853,6 +2030,17 @@ mod tests {
         .unwrap();
         assert_eq!(old.own().unwrap(), "https://signet.example/api");
         assert!(!old.esplora.contains_key(&Network::Bitcoin));
+        assert_eq!(old.relays(), [DEFAULT_RELAY]);
+        // One relay, as such a build saves it: every network's, unless one
+        // names its own.
+        let old: Settings = serde_json::from_value(json!({
+            "network": "bitcoin",
+            "relay": "https://relay.example",
+            "relays": { "signet": ["https://signet-relay.example"] },
+        }))
+        .unwrap();
+        assert_eq!(old.relays(), ["https://relay.example"]);
+        assert_eq!(old.relays[&Network::Signet], ["https://signet-relay.example"]);
         // A network no one knows, named.
         let unknown = serde_json::from_value::<Settings>(
             json!({ "network": "bitcoin", "esplora": { "mainnet": "https://a.example/api" } }),
@@ -1971,6 +2159,82 @@ mod tests {
             }
         });
         url
+    }
+
+    #[test]
+    fn the_relay_directory_is_read_on_this_apps_node_then_the_settings_node() {
+        let host = temp("directory");
+        fs::create_dir_all(&host).unwrap();
+        // This app's node down: nothing listens on its port, pinned as if it
+        // had just stopped answering. lattice.json's port answers, as
+        // another chain's node, so a read sent there would be seen.
+        let down = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let pinned = Some(down);
+        let unpinned: u16 = answering(r#"{"chain":["Nexus","unpinned"]}"#)
+            .trim_start_matches("http://127.0.0.1:")
+            .trim_end_matches("/api")
+            .parse()
+            .unwrap();
+        let hosting = |chains: Value| {
+            let topology = json!({ "rpc": unpinned, "hostedChains": chains });
+            fs::write(host.join("lattice.json"), topology.to_string()).unwrap();
+        };
+        let signet = |node: &str| Settings {
+            network: Network::Signet,
+            relay_directory: BTreeMap::from([(
+                Network::Signet,
+                Directory { node: node.into(), chain: SIGNET_RELAY_DIRECTORY.into() },
+            )]),
+            ..Settings::default()
+        };
+        // A node that answers for another chain: its refusal shows it was asked.
+        let theirs = answering(r#"{"chain":["Nexus","other"]}"#);
+
+        // Neither this app's node hosts the chain nor is one set: none read.
+        hosting(json!(["Nexus/testnet"]));
+        assert!(directory_nodes(&signet(""), &host, pinned).unwrap().is_none());
+        assert_eq!(read_directory(&signet(""), &host, pinned).unwrap(), Vec::<String>::new());
+        // No directory on mainnet.
+        assert!(directory_nodes(&Settings::default(), &host, pinned).unwrap().is_none());
+        // The settings' node alone.
+        assert_eq!(directory_nodes(&signet(&theirs), &host, pinned).unwrap().unwrap().0.len(), 1);
+        let only = read_directory(&signet(&theirs), &host, pinned).unwrap_err();
+        assert!(only.contains("another chain"), "{only}");
+
+        // This app's node hosts it: read there first, and on its failure on
+        // the settings' node.
+        hosting(json!(["Nexus/testnet", SIGNET_RELAY_DIRECTORY]));
+        // Unless it runs: no port pinned, lattice.json's port is never read
+        // with its cookie.
+        assert!(directory_nodes(&signet(""), &host, None).unwrap().is_none());
+        assert_eq!(directory_nodes(&signet(&theirs), &host, None).unwrap().unwrap().0.len(), 1);
+        let unpinned = read_directory(&signet(&theirs), &host, None).unwrap_err();
+        assert!(unpinned.contains("another chain") && !unpinned.contains("unpinned"), "{unpinned}");
+        assert_eq!(directory_nodes(&signet(""), &host, pinned).unwrap().unwrap().0.len(), 1);
+        let own = read_directory(&signet(""), &host, pinned).unwrap_err();
+        assert!(!own.contains("another chain"), "{own}");
+        assert_eq!(directory_nodes(&signet(&theirs), &host, pinned).unwrap().unwrap().0.len(), 2);
+        let both = read_directory(&signet(&theirs), &host, pinned).unwrap_err();
+        assert!(both.starts_with(&own) && both.contains("another chain"), "{both}");
+        fs::remove_dir_all(host).unwrap();
+    }
+
+    #[test]
+    fn offers_are_read_only_from_the_settings_relays_and_those_the_directory_found() {
+        let mine = Settings {
+            relays: BTreeMap::from([(Network::Bitcoin, vec!["https://mine.example".into()])]),
+            ..Settings::default()
+        };
+        let found = ["https://found.example".to_string()];
+        assert_eq!(board_cap(&mine, &found, "https://mine.example").unwrap(), MAX_OWN_BOARD);
+        assert_eq!(board_cap(&mine, &found, "https://found.example").unwrap(), MAX_FOUND_BOARD);
+        assert!(board_cap(&mine, &found, "https://other.example").unwrap_err().starts_with("refused:"));
+        // The default relay is the settings' only where they name none.
+        assert!(board_cap(&mine, &[], DEFAULT_RELAY).is_err());
+        assert_eq!(board_cap(&Settings::default(), &[], DEFAULT_RELAY).unwrap(), MAX_OWN_BOARD);
+        // Another network's relays are not this one's.
+        let signet = Settings { network: Network::Signet, ..mine };
+        assert!(board_cap(&signet, &[], "https://mine.example").is_err());
     }
 
     #[test]
@@ -3193,6 +3457,12 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(listed("<html>", Network::Bitcoin, genesis).is_err());
+        // Only the first MAX_OFFERS are read.
+        let mut long = vec![json!({ "not": "an offer" }); MAX_OFFERS];
+        long.push(offer(100_000, Network::Bitcoin, genesis, 8));
+        assert!(listed(&json!(long).to_string(), Network::Bitcoin, genesis)
+            .unwrap()
+            .is_empty());
     }
 }
 

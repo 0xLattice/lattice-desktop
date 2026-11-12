@@ -800,7 +800,8 @@ pub fn run() {
             swap::swap_backup,
             swap::swap_restore_file,
             swap::swap_withdraw,
-            swap::swap_offers
+            swap::swap_offers,
+            swap::swap_relay_directory
         ])
         .build(tauri::generate_context!())
         .expect("error while building the app")
