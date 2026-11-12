@@ -10,14 +10,15 @@ export type SwapNetwork = "bitcoin" | "signet";
 /** Where swaps run. The page sets the network, your own Esplora on each
  * network (one missing: mempool.space's), and the networks whose swaps read
  * Nexus on this app's node or on your own by its https URL (one in neither:
- * the public lattice-mainnet-read.fly.dev); a relay is the operator's, in
- * settings.json (null: lattice-swap-relay.fly.dev). */
+ * the public lattice-mainnet-read.fly.dev); the relays on each network and
+ * the relay directory are the operator's, in settings.json (a network
+ * missing: lattice-swap-relay.fly.dev, and the shell's directory). */
 export interface SwapSettings {
   network: SwapNetwork;
   esplora?: Partial<Record<SwapNetwork, string>> | null;
   ownNexus?: SwapNetwork[] | null;
   nexus?: Partial<Record<SwapNetwork, string>> | null;
-  relay?: string | null;
+  relays?: Partial<Record<SwapNetwork, string[]>> | null;
 }
 
 /** Where a network's swaps read Nexus: the public node, this app's, or
@@ -117,7 +118,11 @@ export const swapNeed = (btcAmount: number) => invoke<{ enough: boolean; need: n
 /** The lock's Bitcoin fee for `btcAmount` sat with no wallet yet, priced
  * on the settings' Esplora. */
 export const swapLockFee = (btcAmount: number) => invoke<number>("swap_lock_fee", { btcAmount });
-export const swapOffers = () => invoke<ListedOffer[]>("swap_offers");
+/** The offers `relay` lists, decoded and checked. */
+export const swapOffers = (relay: string) => invoke<ListedOffer[]>("swap_offers", { relay });
+/** The URLs of the relays the relay directory lists, read by the shell:
+ * none if no directory is set, or no node to read it on. */
+export const swapRelayDirectory = () => invoke<string[]>("swap_relay_directory");
 /** Starts a swap of an offer's text for `btcAmount` sat at `price`: its id.
  * Every other bound is the engine's default. */
 export const swapStart = (offer: string, btcAmount: number, price: number, nexAddress: string) =>

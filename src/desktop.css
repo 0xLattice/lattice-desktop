@@ -59,3 +59,6 @@ h2.nav-label { margin: 0; font-size: var(--fs-12); text-transform: uppercase; le
 /* Nor its restore, whose file would pass through the page: the screen's
    "Restore from file" has the shell read it. */
 .lattice-swap .field:has(#restore) { display: none; }
+/* Nor its relays and relay directory: the operator's, in the shell's
+   swap/settings.json, the directory read by the shell. */
+.lattice-swap .field:has(#relay), .lattice-swap .field:has(#directory) { display: none; }

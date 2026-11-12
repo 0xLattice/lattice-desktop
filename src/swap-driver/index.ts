@@ -76,24 +76,40 @@ export const checkNexusNode = (_url: string, _genesis: string, _fetch?: unknown)
 export const lockFee = (_url: string, amount: number, _fetch?: unknown): Promise<number> =>
   failed(swapLockFee(amount));
 
-/** The last board read: the shell decodes and checks each offer, so the page's
- * `decodeOffer` is a lookup in it. */
-let board = new Map<string, SwapOffer>();
+/** The last board read of each relay: the shell decodes and checks each
+ * offer, so the page's `decodeOffer` is a lookup in them. */
+const boards = new Map<string, Map<string, SwapOffer>>();
 
-/** The offers the shell's relay lists (an operator setting: `relay` is only
- * shown), each as its text. */
-export async function offers(_relay?: string): Promise<string[]> {
-  const listed = await failed(swapOffers());
-  board = new Map(listed.map(({ text, offer }) => [text, offer]));
+/** The offers `relay` lists, each as its text, read by the shell (which
+ * caps the read: `fetch` is the page's, and unused). */
+export async function offers(relay: string, _fetch?: unknown): Promise<string[]> {
+  const listed = await failed(swapOffers(relay));
+  boards.set(relay, new Map(listed.map(({ text, offer }) => [text, offer])));
   return listed.map(({ text }) => text);
 }
 
 /** The offer `text` says, as the shell decoded it; throws on one it did not list. */
 export function decodeOffer(text: string): SwapOffer {
-  const offer = board.get(text);
-  if (offer === undefined) throw new Error("not an offer on the relay's board");
-  return offer;
+  for (const board of boards.values()) {
+    const offer = board.get(text);
+    if (offer !== undefined) return offer;
+  }
+  throw new Error("not an offer on the relay's board");
 }
+
+/** A relay directory listing, as the page's reader of its nodes takes it.
+ * The shell reads the directory (src/swap-driver/directory.ts), so that
+ * reader never runs here. */
+export interface RelayListing {
+  state: unknown;
+  wants: string[];
+  relays: { account: string; url: string }[];
+}
+const inShell = (): never => {
+  throw new Error("refused: the shell reads the relay directory");
+};
+export const listRelays = (_block: string): RelayListing => inShell();
+export const giveRelayNode = (_listing: RelayListing, _cid: string, _bytes: Uint8Array): RelayListing => inShell();
 
 /** The shell's recovery file is written by the shell, never read here:
  * `Wallet#backup` gives this as its text, and `name` is where it was saved. */
