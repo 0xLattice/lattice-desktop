@@ -65,9 +65,10 @@ use crate::{
 /// The relays whose offers are listed on a network the settings name no
 /// relays for: this one.
 pub const DEFAULT_RELAY: &str = "https://lattice-swap-relay.fly.dev";
-/// The relay directory's chain on signet when the settings name none, as
-/// lattice-swap-web's signet build reads it; mainnet has none yet.
-pub const SIGNET_RELAY_DIRECTORY: &str = "Nexus/testnet/swap-relays";
+/// The relay directory's chain on a network the settings name none for, as
+/// lattice-swap-web reads it: one for every Bitcoin network, as there is
+/// one Nexus and signet swaps trade on it too.
+pub const RELAY_DIRECTORY: &str = "Nexus/swap-relays";
 /// The Nexus node read unless the settings choose this app's own: a public
 /// read port that takes submits, as lattice-swap's CLI reads by default.
 /// One for every Bitcoin network: there is one Nexus,
@@ -114,8 +115,8 @@ pub struct Settings {
     /// [`DEFAULT_RELAY`] on a network missing here.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub relays: BTreeMap<Network, Vec<String>>,
-    /// [`SIGNET_RELAY_DIRECTORY`] on signet, none on mainnet, if missing
-    /// here; none if its chain is empty.
+    /// [`RELAY_DIRECTORY`] on a network missing here; none if its chain is
+    /// empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub relay_directory: BTreeMap<Network, Directory>,
 }
@@ -324,14 +325,10 @@ impl Settings {
 
     /// The relay directory on the network swaps run on, if any.
     fn relay_directory(&self) -> Option<Directory> {
-        let default = (self.network == Network::Signet).then(|| Directory {
-            node: String::new(),
-            chain: SIGNET_RELAY_DIRECTORY.into(),
-        });
         self.relay_directory
             .get(&self.network)
             .cloned()
-            .or(default)
+            .or_else(|| Some(Directory { node: String::new(), chain: RELAY_DIRECTORY.into() }))
             .filter(|directory| !directory.chain.is_empty())
     }
 
@@ -1962,10 +1959,10 @@ mod tests {
             "https://mempool.space/api"
         );
         assert_eq!(Settings::default().relays(), [DEFAULT_RELAY]);
-        assert_eq!(Settings::default().relay_directory(), None);
+        assert_eq!(Settings::default().relay_directory().unwrap().chain, RELAY_DIRECTORY);
         let signet: Settings = serde_json::from_value(json!({ "network": "signet" })).unwrap();
         assert_eq!(signet.relays(), [DEFAULT_RELAY]);
-        assert_eq!(signet.relay_directory().unwrap().chain, SIGNET_RELAY_DIRECTORY);
+        assert_eq!(signet.relay_directory().unwrap().chain, RELAY_DIRECTORY);
         assert_eq!(
             signet.esplora().unwrap(),
             "https://mempool.space/signet/api"
@@ -2183,7 +2180,7 @@ mod tests {
             network: Network::Signet,
             relay_directory: BTreeMap::from([(
                 Network::Signet,
-                Directory { node: node.into(), chain: SIGNET_RELAY_DIRECTORY.into() },
+                Directory { node: node.into(), chain: RELAY_DIRECTORY.into() },
             )]),
             ..Settings::default()
         };
@@ -2194,7 +2191,7 @@ mod tests {
         hosting(json!(["Nexus/testnet"]));
         assert!(directory_nodes(&signet(""), &host, pinned).unwrap().is_none());
         assert_eq!(read_directory(&signet(""), &host, pinned).unwrap(), Vec::<String>::new());
-        // No directory on mainnet.
+        // Nor on mainnet, the same directory.
         assert!(directory_nodes(&Settings::default(), &host, pinned).unwrap().is_none());
         // The settings' node alone.
         assert_eq!(directory_nodes(&signet(&theirs), &host, pinned).unwrap().unwrap().0.len(), 1);
@@ -2203,7 +2200,7 @@ mod tests {
 
         // This app's node hosts it: read there first, and on its failure on
         // the settings' node.
-        hosting(json!(["Nexus/testnet", SIGNET_RELAY_DIRECTORY]));
+        hosting(json!(["Nexus/testnet", RELAY_DIRECTORY]));
         // Unless it runs: no port pinned, lattice.json's port is never read
         // with its cookie.
         assert!(directory_nodes(&signet(""), &host, None).unwrap().is_none());
