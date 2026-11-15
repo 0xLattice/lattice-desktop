@@ -562,11 +562,27 @@ fn merged_config(root: &Path) -> Result<Option<Value>> {
     if !root.join("lattice.json").is_file() {
         return Ok(None);
     }
-    let result = run_cli(root, &["config", "get"])?;
+    let result = config_get(root)?;
     if result.code != 0 {
         return Err(format!("lattice config get failed: {}", result.stderr.trim()));
     }
     serde_json::from_str(&result.stdout).map(Some).map_err(err)
+}
+
+/// `lattice config get`.
+#[cfg(not(test))]
+fn config_get(root: &Path) -> Result<CommandResult> {
+    run_cli(root, &["config", "get"])
+}
+
+/// For tests, what `lattice config get` prints, without a process: the
+/// root's `merged.json` (a configuration lattice.json alone would not make),
+/// else its lattice.json. A process spawned here would hold, until it
+/// starts, the lock of a swap wallet another test has just closed.
+#[cfg(test)]
+fn config_get(root: &Path) -> Result<CommandResult> {
+    let stdout = fs::read_to_string(root.join("merged.json")).or_else(|_| fs::read_to_string(root.join("lattice.json"))).map_err(err)?;
+    Ok(CommandResult { code: 0, stdout, stderr: String::new() })
 }
 
 /// The RPC port the merged configuration names: the one the node starts on.
@@ -893,19 +909,6 @@ pub fn run() {
         });
 }
 
-/// For tests: a stand-in for the bundled CLI whose `config get` prints the
-/// root's `merged.json`, or its lattice.json when there is none.
-#[cfg(test)]
-pub(crate) fn fake_cli() {
-    RESOURCES.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("lattice-desktop-fake-cli-{}", std::process::id()));
-        fs::create_dir_all(dir.join("bin")).unwrap();
-        let script = "#!/bin/sh\nfor a; do root=$a; done\n[ \"$1 $2\" = \"config get\" ] || exit 64\ncat \"$root/merged.json\" 2>/dev/null || cat \"$root/lattice.json\"\n";
-        write_atomically(&dir.join("bin").join("lattice"), script.as_bytes(), 0o755).unwrap();
-        dir
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1124,7 +1127,6 @@ mod tests {
 
     #[test]
     fn the_rpc_port_is_the_merged_configurations() {
-        fake_cli();
         let root = std::env::temp_dir().join(format!("lattice-desktop-rpc-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();

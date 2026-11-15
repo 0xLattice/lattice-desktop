@@ -87,6 +87,8 @@ function nodeProcess(root: string): Pick<HostOps, "startNode" | "stopNode" | "no
     exited = new Promise((done) => running.once("exit", (code) => {
       child = undefined;
       if (wanted && code === 75) up();
+      // A crash is started again after a pause, as the app does (its first backoff step).
+      else if (wanted && code !== 0 && code !== 78) setTimeout(() => { if (wanted && !child) up(); }, 1000);
       else {
         if (wanted && code === 78) error = `The node's configuration does not check (exit 78); see ${join(root, "log", "lattice-node.log")}`;
         wanted = false;

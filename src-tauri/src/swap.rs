@@ -2160,7 +2160,6 @@ mod tests {
 
     #[test]
     fn the_relay_directory_is_read_on_this_apps_node_then_the_settings_node() {
-        crate::fake_cli();
         let host = temp("directory");
         fs::create_dir_all(&host).unwrap();
         // This app's node down: nothing listens on its port, pinned as if it
@@ -2451,7 +2450,6 @@ mod tests {
 
     #[test]
     fn nex_is_read_publicly_by_default_and_a_new_swap_on_ones_own_node_only_on_the_pinned_port() {
-        crate::fake_cli();
         let root = temp("config");
         let host = root.join("host");
         // Public: no node needed, and no cookie sent.
@@ -2597,7 +2595,6 @@ mod tests {
 
     #[test]
     fn a_taken_swap_is_driven_on_ones_own_node_while_it_is_down_and_moves_to_the_servers_saved() {
-        crate::fake_cli();
         let root = temp("own-down");
         let host = root.join("host");
         let engine = Mutex::new(Engine::default());
