@@ -58,6 +58,7 @@ export interface NodeProcess {
 
 /** What `GET /config` answers, as far as the app reads it. */
 interface NodeConfig {
+  spec: Topology;
   status: { pendingRestart?: string[] };
 }
 
@@ -347,7 +348,7 @@ export class NodeManager {
    * which `lattice init` puts on 8080/4001.
    */
   async ensureHost(): Promise<Topology> {
-    const existing = await this.#host.readConfig();
+    const existing = await this.#merged();
     if (existing) return existing;
     await this.#run("init");
     await this.#change(this.#host.setConfig({ ...APP_PORTS }, []));
@@ -358,6 +359,16 @@ export class NodeManager {
 
   async prefs(): Promise<NodePrefs> {
     return prefsOf(await this.ensureHost());
+  }
+
+  /**
+   * The merged configuration: the running node's (`GET /config`), else the
+   * files' (`lattice config get`). Not the CLI while the node runs: a saved
+   * `rpc` change points the CLI at the port the node will take, not the one
+   * it answers on, and it waits there for an answer that never comes.
+   */
+  async #merged(): Promise<Topology | null> {
+    return (await this.#config())?.spec ?? this.#host.readConfig();
   }
 
   /** The configuration the running node uses; undefined while none answers. */
@@ -396,7 +407,7 @@ export class NodeManager {
       const said = await this.#host.hostChain(chain, false);
       if (said.code !== 0) refused.set(chain, (said.stderr || said.stdout).trim().replace(/^Error: /, ""));
     }
-    const after = prefsOf((await this.#host.readConfig()) ?? {} as Topology);
+    const after = prefsOf((await this.#merged()) ?? {} as Topology);
     const paid = mine?.recipients ?? {};
     const hosted = new Set(["Nexus", ...after.hostedChains]);
     // The loop reads its settings again each round.
