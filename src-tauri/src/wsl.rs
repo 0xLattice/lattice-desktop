@@ -199,6 +199,16 @@ mod running {
 #[cfg(windows)]
 pub use running::{command, install, mounted_path, release, session};
 
+/// `wsl.exe`'s arguments to run `program` with `arguments` in `distro`,
+/// killed inside WSL after `seconds`. Killing wsl.exe need not end the
+/// Linux process it started; `timeout` does, so once wsl.exe has exited
+/// the program has too.
+pub fn killed_after(distro: &str, seconds: u64, program: &str, arguments: &[&str]) -> Vec<String> {
+    let mut all: Vec<String> = ["-d", distro, "-e", "timeout", "-s", "KILL", &seconds.to_string(), program].map(String::from).to_vec();
+    all.extend(arguments.iter().map(|a| a.to_string()));
+    all
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +238,17 @@ mod tests {
         for other in [r"C:\Users\ada\host", r"\\wsl$\Debian\home\ada", r"\\wsl$\Ubuntu-22.04\home\ada", "/home/ada"] {
             assert_eq!(linux_path("Ubuntu", Path::new(other)), None, "{other}");
         }
+    }
+
+    #[test]
+    fn a_program_is_killed_inside_wsl_after_its_time() {
+        assert_eq!(
+            killed_after("Ubuntu", 180, "/home/ada/.local/share/Lattice/bin/lattice", &["down", "--root", "/home/ada/.local/share/Lattice/host"]),
+            [
+                "-d", "Ubuntu", "-e", "timeout", "-s", "KILL", "180", "/home/ada/.local/share/Lattice/bin/lattice",
+                "down", "--root", "/home/ada/.local/share/Lattice/host",
+            ]
+        );
     }
 
     #[test]
