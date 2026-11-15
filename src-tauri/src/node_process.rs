@@ -108,8 +108,8 @@ impl NodeProcess {
 
 /// Starts the node, or does nothing while it runs (while it stops, it is
 /// started again once it has exited). A node this app did not
-/// start (left by one that crashed) is stopped first, so the one running is
-/// always this app's own child.
+/// start (left by one that crashed) is stopped first, and its storage let go
+/// of, so the one running is always this app's own child.
 pub fn start(app: &AppHandle) -> Result<()> {
     let process = app.state::<NodeProcess>();
     {
@@ -124,19 +124,21 @@ pub fn start(app: &AppHandle) -> Result<()> {
     }
     let root = host_root(app)?;
     let spawned = (|| {
-        if configured_rpc(&root).is_some_and(|port| node_accepts_cookie(port, &root)) {
-            run_lattice(&root, "down")?;
-        }
-        spawn(app, &root)
+        let port = clear_storage(
+            &root,
+            |port| node_accepts_cookie(port, &root),
+            || run_lattice(&root, "down").map(drop),
+            STOP_PATIENCE,
+        )?;
+        spawn(app, &root, port)
     })();
     let mut state = process.state.lock().map_err(err)?;
     match spawned {
         Ok((child, readers)) => {
-            let late_stop = adopt(&mut state, child);
-            drop(state);
-            if let Some(pid) = late_stop {
+            if let Some(pid) = adopt(&mut state, child) {
                 ask_to_stop(app, pid, &root);
             }
+            drop(state);
             let app = app.clone();
             std::thread::spawn(move || supervise(app, root, readers));
             Ok(())
@@ -151,7 +153,8 @@ pub fn start(app: &AppHandle) -> Result<()> {
 }
 
 /// Holds `child` as the node. A stop that came while it was being started
-/// is to be passed on to it: its pid then, to signal once the lock is let go.
+/// is to be passed on to it: its pid then, to signal while the lock is held
+/// (so it cannot have been reaped, and its pid taken by another process).
 fn adopt(state: &mut State, child: Child) -> Option<u32> {
     let pid = child.id();
     state.child = Some(child);
@@ -196,16 +199,17 @@ fn after_exit(state: &mut State, code: Option<i32>, stopped: bool) -> Option<Nex
 /// comes meanwhile.
 pub fn stop(app: &AppHandle) -> Result<()> {
     let process = app.state::<NodeProcess>();
-    let pid = {
+    let root = host_root(app)?;
+    {
         let mut state = process.state.lock().map_err(err)?;
         state.wanted = false;
         process.changed.notify_all();
         let pid = state.child.as_ref().map(Child::id);
         state.stopping |= pid.is_some();
-        pid
-    };
-    if let Some(pid) = pid {
-        ask_to_stop(app, pid, &host_root(app)?);
+        // In the lock: the child is not reaped meanwhile, so the pid is its.
+        if let Some(pid) = pid {
+            ask_to_stop(app, pid, &root);
+        }
     }
     let deadline = Instant::now() + STOP_PATIENCE;
     let mut state = process.state.lock().map_err(err)?;
@@ -222,7 +226,8 @@ pub fn stop(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
-/// SIGTERM, which the node takes as `POST /stop`.
+/// SIGTERM, which the node takes as `POST /stop`; sent while the state's
+/// lock is held, so `pid` is still the unreaped child's.
 #[cfg(unix)]
 fn ask_to_stop(_app: &AppHandle, pid: u32, _root: &Path) {
     // `lattice up` became the node, so this is the node's own process.
@@ -234,7 +239,7 @@ fn ask_to_stop(_app: &AppHandle, pid: u32, _root: &Path) {
 /// `lattice down` (`POST /stop`): the child is wsl.exe, which passes no
 /// signal on to the node. A node still starting has no RPC to ask yet, and
 /// `down` then finds none running: asked again each second, on a thread of
-/// its own, until the node has exited.
+/// its own (it is called in the state's lock), until the node has exited.
 #[cfg(windows)]
 fn ask_to_stop(app: &AppHandle, _pid: u32, root: &Path) {
     let app = app.clone();
@@ -253,12 +258,78 @@ fn ask_to_stop(app: &AppHandle, _pid: u32, root: &Path) {
     });
 }
 
-/// `lattice up --root <root>` as this app's child, its output going to the
-/// log (and its last lines to the tail), with the RPC port it is started on
-/// pinned for `node_http`.
-fn spawn(app: &AppHandle, root: &Path) -> Result<(Child, Vec<JoinHandle<()>>)> {
-    fs::create_dir_all(root).map_err(err)?;
+/// Gets the storage at `root` ready for a node of this app's, and returns
+/// the RPC port that node will start on, read once, before anything stops.
+/// A node already running on it is asked to stop (`down`) when it answers
+/// with the cookie on that port (`answers`); either way the storage's lock
+/// must be let go of within `patience`, else the new node would only fail
+/// on it, again and again.
+// Once the CLI reaches a running node on the port it listens on, `down`
+// stops whatever node holds the storage, and `answers` can go: a node whose
+// new port is saved but not yet in use is stopped too, not waited out.
+fn clear_storage(
+    root: &Path,
+    answers: impl Fn(u16) -> bool,
+    down: impl FnOnce() -> Result<()>,
+    patience: Duration,
+) -> Result<Option<u16>> {
     let port = configured_rpc(root);
+    if !storage_held(root) {
+        return Ok(port);
+    }
+    if port.is_some_and(answers) {
+        down()?;
+    }
+    let deadline = Instant::now() + patience;
+    while storage_held(root) {
+        if Instant::now() >= deadline {
+            return Err("Another node holds this storage and has not let go of it; stop it (`lattice down`), then start again.".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(port)
+}
+
+/// The lock a running node holds on its storage (`StorageDirectoryLock`).
+fn storage_lock(root: &Path) -> PathBuf {
+    root.join("chains").join("Nexus").join(".lattice-node.lock")
+}
+
+/// Whether a node holds the storage at `root`: its lock taken by another.
+#[cfg(unix)]
+fn storage_held(root: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let Ok(file) = fs::File::open(storage_lock(root)) else { return false };
+    let fd = file.as_raw_fd();
+    // SAFETY: flock on a descriptor this function owns, closed with `file`.
+    unsafe {
+        if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) == 0 {
+            libc::flock(fd, libc::LOCK_UN);
+            return false;
+        }
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
+}
+
+/// Whether a node holds the storage at `root`, asked inside WSL, where the
+/// node takes its lock (`flock -n` fails with 1 while another holds it).
+#[cfg(windows)]
+fn storage_held(root: &Path) -> bool {
+    if !storage_lock(root).is_file() {
+        return false;
+    }
+    let Ok(session) = crate::wsl::session() else { return false };
+    let Some(linux_root) = crate::wsl::linux_path(&session.distro, root) else { return false };
+    let lock = format!("{linux_root}/chains/Nexus/.lattice-node.lock");
+    let status = crate::wsl::command().args(["-d", &session.distro, "-e", "flock", "-n", &lock, "true"]).status();
+    status.is_ok_and(|s| s.code() == Some(1))
+}
+
+/// `lattice up --root <root>` as this app's child, its output going to the
+/// log (and its last lines to the tail), with `port` (the RPC port it is
+/// started on) pinned for `node_http`.
+fn spawn(app: &AppHandle, root: &Path, port: Option<u16>) -> Result<(Child, Vec<JoinHandle<()>>)> {
+    fs::create_dir_all(root).map_err(err)?;
     let (mut command, linux_root) = lattice_command(root)?;
     command.args(["up", "--root"]).arg(linux_root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|e| format!("could not run the bundled lattice: {e}"))?;
@@ -357,13 +428,16 @@ fn supervise(app: AppHandle, root: PathBuf, mut readers: Vec<JoinHandle<()>>) {
             delay = None;
         }
         drop(state);
-        match spawn(&app, &root) {
+        // Its process has exited, so nothing holds the storage: the port
+        // read now is the one the node starts on.
+        match spawn(&app, &root, configured_rpc(&root)) {
             Ok((child, more)) => {
                 readers = more;
                 began = Instant::now();
-                let late_stop = process.state.lock().ok().and_then(|mut state| adopt(&mut state, child));
-                if let Some(pid) = late_stop {
-                    ask_to_stop(&app, pid, &root);
+                if let Ok(mut state) = process.state.lock() {
+                    if let Some(pid) = adopt(&mut state, child) {
+                        ask_to_stop(&app, pid, &root);
+                    }
                 }
             }
             Err(e) => {
@@ -495,5 +569,89 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"def\n");
         assert_eq!(fs::read(path.with_extension("log.1")).unwrap(), b"abc\n");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A root whose lattice.json names `rpc`, with its node's storage lock
+    /// held by the file returned, as a running node's would be.
+    #[cfg(unix)]
+    fn held_root(name: &str, rpc: u16) -> (PathBuf, fs::File) {
+        use std::os::fd::AsRawFd;
+        let root = std::env::temp_dir().join(format!("lattice-desktop-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(storage_lock(&root).parent().unwrap()).unwrap();
+        fs::write(root.join("lattice.json"), format!(r#"{{"rpc": {rpc}}}"#)).unwrap();
+        let holder = fs::File::create(storage_lock(&root)).unwrap();
+        assert_eq!(unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        assert!(storage_held(&root));
+        (root, holder)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_port_is_read_once_before_the_running_node_is_stopped() {
+        let (root, holder) = held_root("port-once", 8080);
+        let holder = Mutex::new(Some(holder));
+        let asked = Mutex::new(Vec::new());
+        let port = clear_storage(
+            &root,
+            |port| {
+                asked.lock().unwrap().push(port);
+                true
+            },
+            || {
+                // A new port saved while it ran: the stopped node's next
+                // start is on it, not the one this start pins.
+                fs::write(root.join("merged.json"), r#"{"rpc": 9090}"#).unwrap();
+                holder.lock().unwrap().take();
+                Ok(())
+            },
+            Duration::from_secs(5),
+        );
+        assert_eq!(port, Ok(Some(8080)));
+        assert_eq!(*asked.lock().unwrap(), vec![8080]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_start_waits_until_the_storage_is_let_go_of() {
+        let (root, holder) = held_root("let-go", 8081);
+        let downs = Mutex::new(0);
+        let began = Instant::now();
+        let port = clear_storage(
+            &root,
+            |_| true,
+            || {
+                // `down` returns once the RPC is gone; the lock goes later.
+                *downs.lock().unwrap() += 1;
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(400));
+                    drop(holder);
+                });
+                Ok(())
+            },
+            Duration::from_secs(5),
+        );
+        assert_eq!(port, Ok(Some(8081)));
+        assert_eq!(*downs.lock().unwrap(), 1);
+        assert!(began.elapsed() >= Duration::from_millis(400));
+        assert!(!storage_held(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_node_that_keeps_the_storage_is_not_started_against() {
+        // Not answering on the port (its new one saved, not yet in use): not
+        // asked to stop, and the start fails once its patience is out.
+        let (root, holder) = held_root("kept", 8082);
+        let began = Instant::now();
+        let port = clear_storage(&root, |_| false, || panic!("asked to stop"), Duration::from_millis(300));
+        assert!(port.unwrap_err().contains("holds this storage"));
+        assert!(began.elapsed() >= Duration::from_millis(300));
+        drop(holder);
+        // Let go of: the start goes ahead, and stops nothing.
+        assert_eq!(clear_storage(&root, |_| true, || panic!("asked to stop"), Duration::ZERO), Ok(Some(8082)));
+        fs::remove_dir_all(root).unwrap();
     }
 }

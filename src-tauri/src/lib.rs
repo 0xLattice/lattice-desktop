@@ -40,6 +40,7 @@ mod wsl;
 
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -569,10 +570,59 @@ fn merged_config(root: &Path) -> Result<Option<Value>> {
     serde_json::from_str(&result.stdout).map(Some).map_err(err)
 }
 
-/// `lattice config get`.
+/// How long `lattice config get` may take. It asks a running node, and a
+/// node that holds the storage but does not answer (one exiting, one between
+/// a restart's exit and its start, or one whose new RPC port is saved but
+/// not yet in use) would keep it waiting for minutes.
+const CONFIG_PATIENCE: Duration = Duration::from_secs(5);
+
+/// `lattice config get`, given up after `CONFIG_PATIENCE`.
+// Once the CLI reaches a running node on the port it listens on (not the
+// one saved for its next start), a node that answers no longer keeps it
+// waiting, and only a node exiting still needs this bound.
 #[cfg(not(test))]
 fn config_get(root: &Path) -> Result<CommandResult> {
-    run_cli(root, &["config", "get"])
+    fs::create_dir_all(root).map_err(err)?;
+    let (mut command, root) = lattice_command(root)?;
+    command.args(["config", "get", "--root"]).arg(root);
+    output_within(command, CONFIG_PATIENCE)
+}
+
+/// What `command` printed and how it exited; killed, and an error, if it
+/// has not exited after `patience`.
+fn output_within(mut command: Command, patience: Duration) -> Result<CommandResult> {
+    use std::process::Stdio;
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| format!("could not run the bundled lattice: {e}"))?;
+    // Read as it comes, so a long answer cannot fill the pipe and stall it.
+    let read = |out: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut out) = out {
+                let _ = out.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = read(child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>));
+    let stderr = read(child.stderr.take().map(|o| Box::new(o) as Box<dyn Read + Send>));
+    let deadline = std::time::Instant::now() + patience;
+    let status = loop {
+        match child.try_wait().map_err(err)? {
+            Some(status) => break status,
+            None if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("lattice gave no answer in {}s", patience.as_secs()));
+            }
+        }
+    };
+    Ok(CommandResult {
+        code: status.code().unwrap_or(-1),
+        stdout: wsl::decode(&stdout.join().unwrap_or_default()),
+        stderr: wsl::decode(&stderr.join().unwrap_or_default()),
+    })
 }
 
 /// For tests, what `lattice config get` prints, without a process: the
@@ -581,14 +631,33 @@ fn config_get(root: &Path) -> Result<CommandResult> {
 /// starts, the lock of a swap wallet another test has just closed.
 #[cfg(test)]
 fn config_get(root: &Path) -> Result<CommandResult> {
+    if root.join("unanswered").exists() {
+        return Err(format!("lattice gave no answer in {}s", CONFIG_PATIENCE.as_secs()));
+    }
     let stdout = fs::read_to_string(root.join("merged.json")).or_else(|_| fs::read_to_string(root.join("lattice.json"))).map_err(err)?;
     Ok(CommandResult { code: 0, stdout, stderr: String::new() })
 }
 
 /// The RPC port the merged configuration names: the one the node starts on.
+/// When the configuration cannot be read in time, the last port it named
+/// for `root`.
 fn configured_rpc(root: &Path) -> Option<u16> {
-    let rpc = merged_config(root).ok()??.get("rpc")?.as_u64()?;
-    u16::try_from(rpc).ok().filter(|p| *p != 0)
+    static LAST: Mutex<Option<HashMap<PathBuf, u16>>> = Mutex::new(None);
+    let config = merged_config(root);
+    let mut last = LAST.lock().ok()?;
+    let last = last.get_or_insert_with(HashMap::new);
+    match config {
+        Ok(config) => {
+            let rpc = config.as_ref().and_then(|c| c.get("rpc")?.as_u64());
+            let port = rpc.and_then(|rpc| u16::try_from(rpc).ok()).filter(|p| *p != 0);
+            match port {
+                Some(port) => last.insert(root.to_path_buf(), port),
+                None => last.remove(root),
+            };
+            port
+        }
+        Err(_) => last.get(root).copied(),
+    }
 }
 
 #[tauri::command]
@@ -829,20 +898,32 @@ pub fn run() {
             if let Ok(resources) = handle.path().resource_dir() {
                 let _ = RESOURCES.set(resources);
             }
-            // Only a running node (it keeps a cookie; it removes it at exit)
-            // is pinned at launch; otherwise the first `up` pins.
-            // A crash leaves a stale cookie, so the port is pinned only when
-            // the node there accepts that cookie on an operator route.
-            let root = host_root(handle).ok();
-            let port = root.as_deref().and_then(|r| configured_rpc(r).filter(|p| node_accepts_cookie(*p, r)));
-            app.manage(PinnedPort(Mutex::new(port)));
+            app.manage(PinnedPort(Mutex::new(None)));
             app.manage(node_process::NodeProcess::default());
             app.manage(swap::Swaps::default());
             // Before any swap reports.
             background::start(handle)?;
             // Swaps that must carry on, resumed on their engine threads once
-            // the node's port is pinned (here, or at the first `up`).
+            // the node's port is pinned (below, or at the first `up`).
             sync_swaps(handle);
+            // Only a running node (it keeps a cookie; it removes it at exit)
+            // is pinned at launch; otherwise the first `up` pins.
+            // A crash leaves a stale cookie, so the port is pinned only when
+            // the node there accepts that cookie on an operator route.
+            // Off the main thread: reading the configuration runs the CLI.
+            let launched = handle.clone();
+            std::thread::spawn(move || {
+                let Ok(root) = host_root(&launched) else { return };
+                let Some(port) = configured_rpc(&root).filter(|p| node_accepts_cookie(*p, &root)) else { return };
+                let state = launched.state::<PinnedPort>();
+                let Ok(mut pinned) = state.0.lock() else { return };
+                // An `up` since launch pinned its own port: that one stands.
+                if pinned.is_none() {
+                    *pinned = Some(port);
+                    drop(pinned);
+                    sync_swaps(&launched);
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1143,6 +1224,41 @@ mod tests {
         fs::write(root.join("merged.json"), r#"{"rpc": 0}"#).unwrap();
         assert_eq!(configured_rpc(&root), None);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unanswered_read_of_the_port_falls_back_to_the_last_one() {
+        let root = std::env::temp_dir().join(format!("lattice-desktop-last-rpc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("unanswered"), "").unwrap();
+        // Nothing read yet: nothing to fall back to.
+        fs::write(root.join("lattice.json"), r#"{"rpc": 8080}"#).unwrap();
+        assert_eq!(configured_rpc(&root), None);
+        fs::remove_file(root.join("unanswered")).unwrap();
+        assert_eq!(configured_rpc(&root), Some(8080));
+        fs::write(root.join("lattice.json"), r#"{"rpc": 9090}"#).unwrap();
+        fs::write(root.join("unanswered"), "").unwrap();
+        assert_eq!(configured_rpc(&root), Some(8080));
+        fs::remove_file(root.join("unanswered")).unwrap();
+        assert_eq!(configured_rpc(&root), Some(9090));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_does_not_answer_is_given_up_on() {
+        let began = std::time::Instant::now();
+        let mut slow = Command::new("sh");
+        slow.args(["-c", "sleep 10"]);
+        let said = output_within(slow, Duration::from_millis(300));
+        assert!(said.unwrap_err().contains("no answer"));
+        assert!(began.elapsed() < Duration::from_secs(5));
+        // An answer longer than a pipe holds is read whole.
+        let mut long = Command::new("sh");
+        long.args(["-c", "head -c 200000 /dev/zero | tr '\\0' a; echo oops >&2; exit 3"]);
+        let said = output_within(long, Duration::from_secs(10)).unwrap();
+        assert_eq!((said.code, said.stdout.len(), said.stderr.trim()), (3, 200000, "oops"));
     }
 
     #[cfg(unix)]
