@@ -15,7 +15,11 @@
 //! it again once it has exited. Its standard output and error go
 //! to `<root>/log/lattice-node.log`, moved to `lattice-node.log.1` at 8 MiB.
 
-use super::{configured_rpc, err, host_root, lattice_command, node_accepts_cookie, run_lattice, sync_swaps, PinnedPort, Result};
+use super::{
+    configured_rpc, err, host_root, lattice_command, node_accepts_cookie, read_topology_at, run_cli_within, run_lattice, sync_swaps,
+    write_atomically, CommandResult, PinnedPort, Result,
+};
+use serde_json::{json, Map, Value};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fs;
@@ -130,6 +134,13 @@ pub fn start(app: &AppHandle) -> Result<()> {
             || run_lattice(&root, "down").map(drop),
             STOP_PATIENCE,
         )?;
+        // The node is stopped here, and nothing else starts it: the move
+        // cannot race it (each CLI write, and the rewrite, under its lock).
+        let cli = |arguments: &[&str]| run_cli_within(&root, arguments, MOVE_PATIENCE);
+        if let Err(e) = move_app_keys(&root, cli) {
+            // Tried again at the next start; the node runs on as configured.
+            eprintln!("lattice-desktop: could not move lattice.json's chains and peers to the operator fragment: {e}");
+        }
         spawn(app, &root, port)
     })();
     let mut state = process.state.lock().map_err(err)?;
@@ -288,6 +299,122 @@ fn clear_storage(
         std::thread::sleep(Duration::from_millis(100));
     }
     Ok(port)
+}
+
+/// The keys an app before the operator fragment wrote to lattice.json: the
+/// people's settings, which now live in the operator fragment, where the
+/// CLI writes them. lattice.json's other keys (rpc, listen, an older `mine`)
+/// stay.
+const APP_KEYS: [&str; 3] = ["hostedChains", "peers", "rpcAllowedOrigins"];
+const MOVE_PATIENCE: Duration = Duration::from_secs(30);
+
+/// Moves `APP_KEYS` from lattice.json into the operator fragment, once:
+/// each hosted chain with `lattice child host`, the peers and origins with
+/// `lattice config set` (joined with what the fragment lists; the layers
+/// join them anyway, so the merged configuration does not change). Only
+/// then are they taken out of lattice.json (kept first, as it was, in
+/// lattice.json.before-operator), each only if it still says what was
+/// moved. Interrupted, it moves again what is left, which changes nothing
+/// already moved; with nothing left it does nothing.
+fn move_app_keys(root: &Path, mut cli: impl FnMut(&[&str]) -> Result<CommandResult>) -> Result<()> {
+    let topology_file = root.join("lattice.json");
+    let Some(Value::Object(topology)) = read_topology_at(&topology_file)? else { return Ok(()) };
+    let moved: Map<String, Value> = APP_KEYS.iter().filter_map(|k| Some((k.to_string(), topology.get(*k)?.clone()))).collect();
+    if moved.is_empty() {
+        return Ok(());
+    }
+    let mut run = |arguments: &[&str]| -> Result<()> {
+        let said = cli(arguments)?;
+        if said.code == 0 {
+            Ok(())
+        } else {
+            Err(format!("lattice {}: {}", arguments.join(" "), said.stderr.trim()))
+        }
+    };
+    let strings = |value: Option<&Value>| -> Vec<String> {
+        value.and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect()
+    };
+    for path in strings(moved.get("hostedChains")) {
+        run(&["child", "host", &path])?;
+    }
+    let operator = read_topology_at(&root.join("config.d").join("operator.json"))?.unwrap_or(json!({}));
+    let mut patch = Map::new();
+    if let Some(peers) = moved.get("peers") {
+        let mut joined = by_chain(operator.get("peers"));
+        for (chain, list) in by_chain(Some(peers)) {
+            let have = joined.entry(chain).or_default();
+            have.extend(list.into_iter().filter(|p| !have.contains(p)).collect::<Vec<_>>());
+        }
+        patch.insert("peers".into(), json!(joined));
+    }
+    if let Some(origins) = moved.get("rpcAllowedOrigins") {
+        let mut joined = strings(operator.get("rpcAllowedOrigins"));
+        joined.extend(strings(Some(origins)).into_iter().filter(|o| !joined.contains(o)).collect::<Vec<_>>());
+        patch.insert("rpcAllowedOrigins".into(), json!(joined));
+    }
+    if !patch.is_empty() {
+        run(&["config", "set", "--patch", &Value::Object(patch).to_string()])?;
+    }
+    // Under the node's lock, so no node starts reading it half-changed.
+    let _lock = hold_storage(root)?;
+    let Some(Value::Object(mut topology)) = read_topology_at(&topology_file)? else { return Ok(()) };
+    let backup = root.join("lattice.json.before-operator");
+    if !backup.exists() {
+        write_atomically(&backup, &fs::read(&topology_file).map_err(err)?, file_mode(&topology_file))?;
+    }
+    for (key, value) in &moved {
+        if topology.get(key) == Some(value) {
+            topology.remove(key);
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&Value::Object(topology)).map_err(err)?;
+    write_atomically(&topology_file, &bytes, file_mode(&topology_file))
+}
+
+/// Each chain's peers from a `peers` value: a list (Nexus's) or a map.
+fn by_chain(peers: Option<&Value>) -> std::collections::BTreeMap<String, Vec<String>> {
+    let list = |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().filter_map(|p| p.as_str().map(String::from)).collect() };
+    match peers {
+        Some(nexus @ Value::Array(_)) => [("Nexus".to_string(), list(nexus))].into(),
+        Some(Value::Object(map)) => map.iter().map(|(chain, v)| (chain.clone(), list(v))).collect(),
+        _ => Default::default(),
+    }
+}
+
+fn file_mode(path: &Path) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).map_or(0o644, |m| m.permissions().mode() & 0o777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        0o644
+    }
+}
+
+/// The node's storage lock, taken for the caller while it lasts; None when
+/// no node has made the storage yet. An error while a node holds it.
+#[cfg(unix)]
+fn hold_storage(root: &Path) -> Result<Option<fs::File>> {
+    use std::os::fd::AsRawFd;
+    let Ok(file) = fs::File::open(storage_lock(root)) else { return Ok(None) };
+    // SAFETY: flock on a descriptor `file` owns; let go of when it closes.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("a node holds the storage".into());
+    }
+    Ok(Some(file))
+}
+
+/// Inside WSL the lock cannot be held from here: the app's own start, which
+/// calls this before it starts the node, is all that keeps a node out.
+#[cfg(windows)]
+fn hold_storage(root: &Path) -> Result<Option<()>> {
+    if storage_held(root) {
+        return Err("a node holds the storage".into());
+    }
+    Ok(None)
 }
 
 /// The lock a running node holds on its storage (`StorageDirectoryLock`).
@@ -652,6 +779,118 @@ mod tests {
         drop(holder);
         // Let go of: the start goes ahead, and stops nothing.
         assert_eq!(clear_storage(&root, |_| true, || panic!("asked to stop"), Duration::ZERO), Ok(Some(8082)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The CLI's writes to the operator fragment of a stopped node, as
+    /// `lattice child host` and `lattice config set --patch` make them; a
+    /// `config set` refused while `refuse_set` says so.
+    fn fake_cli<'a>(root: &Path, calls: &'a Mutex<Vec<String>>, refuse_set: &'a Mutex<bool>) -> impl FnMut(&[&str]) -> Result<CommandResult> + 'a {
+        fn patched(target: Value, patch: Value) -> Value {
+            let Value::Object(patch) = patch else { return patch };
+            let mut target = match target { Value::Object(t) => t, _ => Map::new() };
+            for (k, v) in patch {
+                if v.is_null() {
+                    target.remove(&k);
+                } else {
+                    let before = target.remove(&k).unwrap_or(Value::Null);
+                    target.insert(k, patched(before, v));
+                }
+            }
+            Value::Object(target)
+        }
+        let root = root.to_path_buf();
+        move |arguments: &[&str]| {
+            calls.lock().unwrap().push(arguments.join(" "));
+            let file = root.join("config.d").join("operator.json");
+            let mut operator = read_topology_at(&file).unwrap().unwrap_or(json!({}));
+            match arguments {
+                ["child", "host", path] => {
+                    let chains = operator["hostedChains"].as_array().cloned().unwrap_or_default();
+                    if !chains.contains(&json!(path)) {
+                        operator["hostedChains"] = json!([chains, vec![json!(path)]].concat());
+                    }
+                }
+                ["config", "set", "--patch", patch] => {
+                    if *refuse_set.lock().unwrap() {
+                        return Ok(CommandResult { code: 1, stdout: String::new(), stderr: "Error: refused".into() });
+                    }
+                    operator = patched(operator, serde_json::from_str(patch).unwrap());
+                }
+                other => panic!("unexpected lattice {other:?}"),
+            }
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, operator.to_string()).unwrap();
+            Ok(CommandResult { code: 0, stdout: String::new(), stderr: String::new() })
+        }
+    }
+
+    #[test]
+    fn an_old_apps_lattice_json_keys_move_to_the_operator_fragment_once() {
+        let root = std::env::temp_dir().join(format!("lattice-desktop-move-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("config.d")).unwrap();
+        // What an app before the operator fragment wrote.
+        let old = json!({
+            "listen": 4101, "rpc": 8180,
+            "peers": {"Nexus": ["a@1.2.3.4:4001"], "Nexus/Alpha": ["b@5.6.7.8:4001"]},
+            "hostedChains": ["Nexus/Alpha", "Nexus/Beta"],
+            "rpcAllowedOrigins": ["chrome-extension://abc"],
+            "mine": {"threads": 2},
+        });
+        fs::write(root.join("lattice.json"), old.to_string()).unwrap();
+        // Something the operator fragment already said stays, joined.
+        fs::write(root.join("config.d").join("operator.json"), r#"{"peers": ["c@9.9.9.9:4001"], "hostedChains": ["Nexus/Beta"]}"#).unwrap();
+        let calls = Mutex::new(Vec::new());
+        let refuse = Mutex::new(true);
+
+        // Interrupted after the chains moved: lattice.json is as it was.
+        assert!(move_app_keys(&root, fake_cli(&root, &calls, &refuse)).unwrap_err().contains("refused"));
+        assert_eq!(read_topology_at(&root.join("lattice.json")).unwrap().unwrap(), old);
+        assert!(!root.join("lattice.json.before-operator").exists());
+
+        // Run again: what is left moves, then lattice.json loses those keys.
+        *refuse.lock().unwrap() = false;
+        move_app_keys(&root, fake_cli(&root, &calls, &refuse)).unwrap();
+        let operator = read_topology_at(&root.join("config.d").join("operator.json")).unwrap().unwrap();
+        assert_eq!(operator["hostedChains"], json!(["Nexus/Beta", "Nexus/Alpha"]));
+        assert_eq!(operator["peers"], json!({"Nexus": ["c@9.9.9.9:4001", "a@1.2.3.4:4001"], "Nexus/Alpha": ["b@5.6.7.8:4001"]}));
+        assert_eq!(operator["rpcAllowedOrigins"], json!(["chrome-extension://abc"]));
+        assert_eq!(
+            read_topology_at(&root.join("lattice.json")).unwrap().unwrap(),
+            json!({"listen": 4101, "rpc": 8180, "mine": {"threads": 2}})
+        );
+        assert_eq!(read_topology_at(&root.join("lattice.json.before-operator")).unwrap().unwrap(), old);
+
+        // Nothing left: no CLI, and no file changes.
+        let before: Vec<Vec<u8>> = ["lattice.json", "lattice.json.before-operator", "config.d/operator.json"]
+            .iter()
+            .map(|f| fs::read(root.join(f)).unwrap())
+            .collect();
+        let made = calls.lock().unwrap().len();
+        move_app_keys(&root, fake_cli(&root, &calls, &refuse)).unwrap();
+        assert_eq!(calls.lock().unwrap().len(), made);
+        let after: Vec<Vec<u8>> = ["lattice.json", "lattice.json.before-operator", "config.d/operator.json"]
+            .iter()
+            .map(|f| fs::read(root.join(f)).unwrap())
+            .collect();
+        assert_eq!(before, after);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lattice_json_is_not_rewritten_while_a_node_holds_the_storage() {
+        let (root, holder) = held_root("move-held", 8083);
+        let mut topology: Value = serde_json::from_slice(&fs::read(root.join("lattice.json")).unwrap()).unwrap();
+        topology["rpcAllowedOrigins"] = json!(["chrome-extension://abc"]);
+        fs::write(root.join("lattice.json"), topology.to_string()).unwrap();
+        let (calls, refuse) = (Mutex::new(Vec::new()), Mutex::new(false));
+        assert!(move_app_keys(&root, fake_cli(&root, &calls, &refuse)).is_err());
+        assert_eq!(read_topology_at(&root.join("lattice.json")).unwrap().unwrap(), topology);
+        drop(holder);
+        move_app_keys(&root, fake_cli(&root, &calls, &refuse)).unwrap();
+        assert_eq!(read_topology_at(&root.join("lattice.json")).unwrap().unwrap(), json!({"rpc": 8083}));
         fs::remove_dir_all(root).unwrap();
     }
 }

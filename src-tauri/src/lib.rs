@@ -582,10 +582,15 @@ const CONFIG_PATIENCE: Duration = Duration::from_secs(5);
 // waiting, and only a node exiting still needs this bound.
 #[cfg(not(test))]
 fn config_get(root: &Path) -> Result<CommandResult> {
+    run_cli_within(root, &["config", "get"], CONFIG_PATIENCE)
+}
+
+/// `run_cli`, given up after `patience`.
+fn run_cli_within(root: &Path, arguments: &[&str], patience: Duration) -> Result<CommandResult> {
     fs::create_dir_all(root).map_err(err)?;
     let (mut command, root) = lattice_command(root)?;
-    command.args(["config", "get", "--root"]).arg(root);
-    output_within(command, CONFIG_PATIENCE)
+    command.args(arguments).arg("--root").arg(root);
+    output_within(command, patience)
 }
 
 /// What `command` printed and how it exited; killed, and an error, if it
