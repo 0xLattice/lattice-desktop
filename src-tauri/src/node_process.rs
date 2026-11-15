@@ -131,8 +131,8 @@ pub fn start(app: &AppHandle) -> Result<()> {
     let root = host_root(app)?;
     let spawned = (|| {
         let down = || -> Result<Child> {
-            let (mut command, linux_root) = lattice_command(&root)?;
-            command.args(["down", "--root"]).arg(linux_root).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            let mut command = down_command(&root)?;
+            command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             command.spawn().map_err(|e| format!("could not run the bundled lattice: {e}"))
         };
         let port = clear_storage(&root, down, STOP_PATIENCE)?;
@@ -292,6 +292,10 @@ fn clear_storage(root: &Path, down: impl FnOnce() -> Result<Child>, patience: Du
         }
         std::thread::sleep(Duration::from_millis(100));
     };
+    // On Windows the child is wsl.exe, and killing it may leave the Linux
+    // `lattice down` running: it is waited for instead, which `timeout`
+    // bounds (see `down_command`).
+    #[cfg(not(windows))]
     let _ = asking.kill();
     let _ = asking.wait();
     if held {
@@ -435,6 +439,27 @@ fn hold_storage(root: &Path) -> Result<Option<()>> {
         return Err("a node holds the storage".into());
     }
     Ok(None)
+}
+
+/// `lattice down --root <root>`.
+#[cfg(not(windows))]
+fn down_command(root: &Path) -> Result<std::process::Command> {
+    let (mut command, linux_root) = lattice_command(root)?;
+    command.args(["down", "--root"]).arg(linux_root);
+    Ok(command)
+}
+
+/// `lattice down --root <root>` inside WSL, killed there after
+/// `STOP_PATIENCE`, so it has ended once wsl.exe has exited.
+#[cfg(windows)]
+fn down_command(root: &Path) -> Result<std::process::Command> {
+    let session = crate::wsl::session()?;
+    let linux_root = crate::wsl::linux_path(&session.distro, root).ok_or("the host root is not inside WSL")?;
+    let binaries = crate::wsl::install(&session, crate::RESOURCES.get().ok_or("no resource directory")?)?;
+    let mut command = crate::wsl::command();
+    let lattice = format!("{binaries}/lattice");
+    command.args(crate::wsl::killed_after(&session.distro, STOP_PATIENCE.as_secs(), &lattice, &["down", "--root", &linux_root]));
+    Ok(command)
 }
 
 /// The lock a running node holds on its storage (`StorageDirectoryLock`).
@@ -954,6 +979,12 @@ mod tests {
         assert!(move_app_keys(&root, fake_cli(&root, &calls, &refuse)).is_err());
         assert_eq!(read_topology_at(&root.join("lattice.json")).unwrap().unwrap(), topology);
         drop(holder);
+        // A process another test starts meanwhile may hold a copy of the
+        // lock's descriptor until it runs its program: let go of soon after.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while storage_held(&root) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         move_app_keys(&root, fake_cli(&root, &calls, &refuse)).unwrap();
         assert_eq!(read_topology_at(&root.join("lattice.json")).unwrap().unwrap(), json!({"rpc": 8083}));
         fs::remove_dir_all(root).unwrap();
