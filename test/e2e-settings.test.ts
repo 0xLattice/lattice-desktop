@@ -9,7 +9,6 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,7 +28,18 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
   // On the processor here, whatever this machine has; e2e-mining covers the graphics chip.
   host.ops.gpuWorker = async () => null;
   // The configuration the node starts on: lattice.json and config.d, merged.
-  const topology = () => JSON.parse(execFileSync(join(bin!, "lattice"), ["config", "get", "--root", root], { encoding: "utf8" })) as Topology;
+  // Asked again while the node restarts: the CLI reads a running node's
+  // through it, and one that is stopping or starting does not answer.
+  const topology = async (): Promise<Topology> => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return JSON.parse((await run(join(bin!, "lattice"), ["config", "get", "--root", root])).stdout) as Topology;
+      } catch (e) {
+        if (attempt >= 60) throw e;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+  };
   // The app changes only the operator fragment (through the CLI), never
   // lattice.json; mining's settings are miner.json.
   const operator = () => JSON.parse(readFileSync(join(root, "config.d", "operator.json"), "utf8")) as Topology;
@@ -113,14 +123,14 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     peerMode().value = "custom";
     peerList().value = peer;
     button("Save peers").click();
-    await until(() => (topology().peers?.length === 1 ? true : undefined), "the peer saved");
+    await until(async () => ((await topology()).peers?.length === 1 ? true : undefined), "the peer saved");
     await until(() => (peerList()?.value === peer ? true : undefined), "the saved peer shown");
     await toNodePage();
     await shows(/Your nodeRunning/);
     rpc().value = newRPC;
     button("Save").click();
     await until(() => (reloads === 1 ? true : undefined), "the app to reload for the new RPC port");
-    assert.deepEqual([topology().rpc, topology().peers], [Number(newRPC), [peer]]);
+    assert.deepEqual([(await topology()).rpc, (await topology()).peers], [Number(newRPC), [peer]]);
     // In the operator fragment: lattice.json's own port is another, and the node runs on the merged one.
     assert.deepEqual([operator().rpc, (JSON.parse(readFileSync(join(root, "lattice.json"), "utf8")) as Topology).rpc === Number(newRPC)], [Number(newRPC), false]);
     document.body.replaceChildren();
@@ -145,8 +155,8 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     // Back to a private node: no peers.
     peerMode().value = "none";
     button("Save peers").click();
-    await until(() => (topology().peers?.length === 0 ? true : undefined), "the peers saved");
-    assert.deepEqual(topology().peers, []);
+    await until(async () => ((await topology()).peers?.length === 0 ? true : undefined), "the peers saved");
+    assert.deepEqual((await topology()).peers, []);
     assert.equal(reloads, 1, "only a port change reloads");
     await until(() => (peerMode()?.value === "none" ? true : undefined), "the saved choice shown");
     await toNodePage();
@@ -160,7 +170,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await shows(/Balance/);
     openNode();
     await stopHosting(CHILD);
-    await until(() => (topology().hostedChains === undefined ? true : undefined), "the child no longer hosted");
+    await until(async () => ((await topology()).hostedChains === undefined ? true : undefined), "the child no longer hosted");
     await shows(/Your nodeRunning/);
     button("Back to wallet").click();
     await shows(/Balance/);
@@ -225,8 +235,8 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     peerMode().value = "custom";
     peerList().value = peer;
     button("Save peers").click();
-    await until(() => (topology().peers?.length === 1 ? true : undefined), "the peer saved");
-    assert.deepEqual(topology().peers, [peer]);
+    await until(async () => ((await topology()).peers?.length === 1 ? true : undefined), "the peer saved");
+    assert.deepEqual((await topology()).peers, [peer]);
     await until(() => (peerList()?.value === peer ? true : undefined), "the saved peer shown");
     // The child chain has its own page and its own peers: found through Nexus
     // unless it is given more to try. It is one press from its parent's page.
@@ -242,8 +252,8 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await shows(/Not a peer \(publicKey@host:port\): not-a-peer/);
     childList().value = peer;
     (document.querySelector(`button[aria-label="Save peers of ${CHILD}"]`) as HTMLButtonElement).click();
-    await until(() => (Array.isArray(topology().peers) ? undefined : true), "the child chain's peer saved");
-    assert.deepEqual(topology().peers, { Nexus: [peer], [CHILD]: [peer] });
+    await until(async () => (Array.isArray((await topology()).peers) ? undefined : true), "the child chain's peer saved");
+    assert.deepEqual((await topology()).peers, { Nexus: [peer], [CHILD]: [peer] });
     // The node starts on it, and the row shows what was saved.
     await until(() => (childMode()?.value === "custom" && childList().value === peer ? true : undefined), "the child chain's peers shown");
     await toNodePage();
@@ -262,8 +272,8 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await until(() => (mined().join() === "Nexus" ? true : undefined), "Nexus alone on the Mining page");
     await shows(/MiningMining on the (graphics chip|processor)/);
     assert.deepEqual(miner().recipients, { Nexus: second });
-    assert.equal(topology().hostedChains, undefined);
-    assert.deepEqual(topology().peers, [peer], "a chain no longer hosted takes its peers with it");
+    assert.equal((await topology()).hostedChains, undefined);
+    assert.deepEqual((await topology()).peers, [peer], "a chain no longer hosted takes its peers with it");
     assert.deepEqual((await app.manager.status()).map((chain) => chain.path), ["Nexus"]);
     const unhostedAt = await until(async () => nexusHeight(), "the node back up");
     await until(async () => ((await nexusHeight()) > unhostedAt + 1n ? true : undefined), "Nexus still mined after the child was dropped");
