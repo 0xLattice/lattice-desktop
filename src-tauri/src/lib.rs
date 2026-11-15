@@ -7,9 +7,10 @@
 //!   app runs as its own child (`lattice up`, which becomes the bundled
 //!   `lattice-node`) and starts again as a process manager would (see
 //!   `node_process`); the app never runs the node any other way.
-//! - `read_topology` / `write_topology`: the host's `lattice.json`.
-//! - `operator_chains` / `host_chains`: the chains the app hosts, in the
-//!   `operator` configuration fragment (`config.d/operator.json`).
+//! - `read_config` / `set_config` / `host_chain`: the node's configuration,
+//!   through the CLI (`lattice config get|set|unset`, `lattice child
+//!   host|unhost`): read merged, written to the `operator` fragment, and of
+//!   it only the node's ports, peers, allowed origins and hosted chains.
 //! - `read_miner` / `write_miner`: the mining loop's settings (`miner.json`).
 //! - `store_get` / `store_set` / `store_remove`: the wallet's vault and
 //!   settings, as 0600 files.
@@ -47,10 +48,10 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow, WindowEvent};
 
-/// The RPC port the node was started on: read from lattice.json at launch
-/// (a node left running by an earlier session) and each time the app starts
-/// the node. The page can rewrite lattice.json, but `node_http` and the
-/// cookie go only to this port.
+/// The RPC port the node was started on: the merged configuration's
+/// (`lattice config get`), read at launch (a node left running by an earlier
+/// session) and each time the app starts the node. The page can change the
+/// configuration, but `node_http` and the cookie go only to this port.
 struct PinnedPort(Mutex<Option<u16>>);
 
 /// The CLI invocations the shell runs, by name: the host's setup and status,
@@ -144,6 +145,12 @@ fn lattice_command(root: &Path) -> Result<(Command, std::ffi::OsString)> {
 
 fn run_lattice(root: &Path, verb: &str) -> Result<CommandResult> {
     let arguments = verb_arguments(verb).ok_or_else(|| format!("refused: lattice {verb}"))?;
+    run_cli(root, arguments)
+}
+
+/// The bundled CLI with `arguments`, against `root`. Only the shell's own
+/// callers name the arguments: the page reaches it through checked commands.
+fn run_cli(root: &Path, arguments: &[impl AsRef<std::ffi::OsStr>]) -> Result<CommandResult> {
     fs::create_dir_all(root).map_err(err)?;
     let (mut command, root) = lattice_command(root)?;
     let output = command
@@ -348,17 +355,11 @@ fn miner_settings(root: &Path) -> Result<Option<Value>> {
     Ok(mine)
 }
 
-/// Writes miner.json, and drops the `mine` object an older lattice.json
-/// still holds: the miner reads miner.json from now on, and the node ignores it.
+/// Writes miner.json, which the miner reads from then on. A `mine` object
+/// an older lattice.json holds is left: neither the miner nor the node reads
+/// it once miner.json exists.
 fn write_miner_settings(root: &Path, settings: &Value) -> Result<()> {
-    write_atomically(&root.join("miner.json"), &serde_json::to_vec_pretty(settings).map_err(err)?, 0o644)?;
-    let topology = root.join("lattice.json");
-    if let Some(mut current) = read_topology_at(&topology)? {
-        if current.as_object_mut().and_then(|fields| fields.remove("mine")).is_some() {
-            write_atomically(&topology, &serde_json::to_vec_pretty(&current).map_err(err)?, 0o644)?;
-        }
-    }
-    Ok(())
+    write_atomically(&root.join("miner.json"), &serde_json::to_vec_pretty(settings).map_err(err)?, 0o644)
 }
 
 #[tauri::command]
@@ -409,21 +410,12 @@ fn node_cookie(app: AppHandle) -> Result<Option<String>> {
     Ok(read_cookie(&host_root(&app)?))
 }
 
-fn topology_path(app: &AppHandle) -> Result<PathBuf> {
-    Ok(host_root(app)?.join("lattice.json"))
-}
-
 fn read_topology_at(path: &Path) -> Result<Option<Value>> {
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(err),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(err(e)),
     }
-}
-
-#[tauri::command]
-fn read_topology(app: AppHandle) -> Result<Option<Value>> {
-    read_topology_at(&topology_path(&app)?)
 }
 
 /// Writes `bytes` to `path` via a same-directory temp file and rename, with `mode`.
@@ -463,15 +455,6 @@ fn synced(file: &fs::File, path: &Path) -> Result<()> {
     flushed.map_err(err)
 }
 
-/// The lattice.json fields the page may set. Everything else (public
-/// listeners, external address, ...) is the operator's, edited by hand: the
-/// page cannot expose the node or point `node_http` elsewhere beyond choosing
-/// the node's own loopback RPC port. Hosted chains are in the `operator`
-/// fragment (`host_chains`), and mining's settings in miner.json, of which
-/// the page may set only who is paid, how many workers search, and which
-/// bundled worker does (see `merged_mine`).
-const MANAGED: [&str; 4] = ["rpc", "listen", "peers", "rpcAllowedOrigins"];
-
 /// The most CPU workers the page may ask for.
 const MAX_WORKERS: u64 = 64;
 
@@ -491,26 +474,26 @@ fn is_address(value: &str) -> bool {
 
 /// `current` mining settings with the page's choices applied: the worker
 /// count, each chain's recipient, and optionally which bundled worker
-/// searches. `mine.worker` is a program the CLI runs, so the page may name
+/// searches. `worker` is a program the miner runs, so the page may name
 /// only `cpu` (the CLI's own bundled worker) or `gpu_worker`, the GPU worker
 /// bundled in this app; left out, the worker stays as the operator set it.
 /// Every tuning field is kept as it is.
 fn merged_mine(current: Option<&Value>, update: &Value, gpu_worker: Option<&str>) -> Result<Value> {
-    let update = update.as_object().ok_or("mine must be an object")?;
+    let update = update.as_object().ok_or("the miner's settings must be an object")?;
     if let Some(key) = update.keys().find(|k| !["workers", "recipients", "worker"].contains(&k.as_str())) {
-        return Err(format!("refused: lattice.json field mine.{key}"));
+        return Err(format!("refused: miner.json field {key}"));
     }
     let worker = match update.get("worker") {
         None => None,
         Some(value) => match value.as_str() {
             Some("cpu") => Some("cpu"),
             Some(path) if gpu_worker == Some(path) => Some(path),
-            _ => return Err("refused: mine.worker may be only a worker bundled with this app".into()),
+            _ => return Err("refused: the worker may be only one bundled with this app".into()),
         },
     };
     let workers = update.get("workers").and_then(Value::as_u64).filter(|n| (1..=MAX_WORKERS).contains(n))
-        .ok_or(format!("mine.workers must be a whole number from 1 to {MAX_WORKERS}"))?;
-    let recipients = update.get("recipients").and_then(Value::as_object).ok_or("mine.recipients must map chain paths to addresses")?;
+        .ok_or(format!("workers must be a whole number from 1 to {MAX_WORKERS}"))?;
+    let recipients = update.get("recipients").and_then(Value::as_object).ok_or("recipients must map chain paths to addresses")?;
     for (chain, address) in recipients {
         if !is_chain_path(chain) {
             return Err(format!("not a chain path: {chain}"));
@@ -542,160 +525,106 @@ fn is_origin(value: &str) -> bool {
     }
 }
 
-/// `current` with the page's managed fields applied (an absent `peers` or
-/// `rpcAllowedOrigins` removes it); anything else from the page is refused.
-fn merged_topology(current: Value, update: &Value) -> Result<Value> {
-    let update = update.as_object().ok_or("lattice.json must be an object")?;
-    if let Some(key) = update.keys().find(|k| !MANAGED.contains(&k.as_str())) {
-        return Err(format!("refused: lattice.json field {key}"));
-    }
-    for port in ["rpc", "listen"] {
-        rpc_port(&Some(serde_json::json!({ "rpc": update.get(port).cloned().unwrap_or(Value::Null) })))
-            .map_err(|_| format!("{port} must be a port"))?;
-    }
+/// The `lattice config set` assignments (`key=<JSON>`) the page may ask
+/// for, checked: the node's loopback RPC port and peer port, a chain's peer
+/// list, and the browser origins allowed on the operator port. Anything else
+/// (public listeners, external address, ...) is the operator's: the page
+/// cannot expose the node or point `node_http` elsewhere beyond choosing the
+/// node's own loopback RPC port.
+fn config_assignments(set: &serde_json::Map<String, Value>) -> Result<Vec<String>> {
     let strings = |v: &Value| v.as_array().is_some_and(|a| a.iter().all(Value::is_string));
-    if update.get("rpcAllowedOrigins").is_some_and(|v| !strings(v)) {
-        return Err("rpcAllowedOrigins must be a list of strings".into());
-    }
-    // Nexus's list, or a list per chain path.
-    if let Some(v) = update.get("peers") {
-        let per_chain = v.as_object().is_some_and(|m| m.iter().all(|(chain, list)| is_chain_path(chain) && strings(list)));
-        if !strings(v) && !per_chain {
-            return Err("peers must be a list of strings, or one per chain path".to_string());
+    let mut out = Vec::new();
+    for (key, value) in set {
+        let ok = match key.as_str() {
+            "rpc" | "listen" => value.as_u64().is_some_and(|p| (1..=65535).contains(&p)),
+            "rpcAllowedOrigins" => value.as_array().is_some_and(|a| a.iter().all(|o| o.as_str().is_some_and(is_origin))),
+            _ => key.strip_prefix("peers.").is_some_and(is_chain_path) && strings(value),
+        };
+        if !ok {
+            return Err(format!("refused: {key}={value}"));
         }
+        out.push(format!("{key}={value}"));
     }
-    if let Some(origins) = update.get("rpcAllowedOrigins").and_then(Value::as_array) {
-        if let Some(bad) = origins.iter().filter_map(Value::as_str).find(|o| !is_origin(o)) {
-            return Err(format!("not an origin: {bad}"));
-        }
+    Ok(out)
+}
+
+/// The `lattice config unset` keys the page may ask for: a chain's peer list.
+fn config_removals(unset: &[String]) -> Result<Vec<String>> {
+    match unset.iter().find(|key| !key.strip_prefix("peers.").is_some_and(is_chain_path)) {
+        Some(bad) => Err(format!("refused: unset {bad}")),
+        None => Ok(unset.to_vec()),
     }
-    let mut out = current.as_object().cloned().ok_or("lattice.json is not an object")?;
-    for key in MANAGED {
-        match update.get(key) {
-            Some(v) => {
-                out.insert(key.to_string(), v.clone());
+}
+
+/// The merged configuration (`lattice config get`, the running node's when
+/// it runs); None before `lattice init`.
+fn merged_config(root: &Path) -> Result<Option<Value>> {
+    if !root.join("lattice.json").is_file() {
+        return Ok(None);
+    }
+    let result = run_cli(root, &["config", "get"])?;
+    if result.code != 0 {
+        return Err(format!("lattice config get failed: {}", result.stderr.trim()));
+    }
+    serde_json::from_str(&result.stdout).map(Some).map_err(err)
+}
+
+/// The RPC port the merged configuration names: the one the node starts on.
+fn configured_rpc(root: &Path) -> Option<u16> {
+    let rpc = merged_config(root).ok()??.get("rpc")?.as_u64()?;
+    u16::try_from(rpc).ok().filter(|p| *p != 0)
+}
+
+#[tauri::command]
+async fn read_config(app: AppHandle) -> Result<Option<Value>> {
+    let root = host_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || merged_config(&root)).await.map_err(err)?
+}
+
+/// Sets and removes keys of the operator fragment (`lattice config set`,
+/// then `lattice config unset`), as checked by `config_assignments` and
+/// `config_removals`. The CLI writes through a running node, or the file
+/// while it is stopped; the first failure is answered.
+#[tauri::command]
+async fn set_config(app: AppHandle, set: serde_json::Map<String, Value>, unset: Vec<String>) -> Result<CommandResult> {
+    let root = host_root(&app)?;
+    let mut steps: Vec<Vec<String>> = Vec::new();
+    let assignments = config_assignments(&set)?;
+    if !assignments.is_empty() {
+        steps.push([vec!["config".into(), "set".into()], assignments].concat());
+    }
+    let removals = config_removals(&unset)?;
+    if !removals.is_empty() {
+        steps.push([vec!["config".into(), "unset".into()], removals].concat());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut said = CommandResult { code: 0, stdout: String::new(), stderr: String::new() };
+        for step in steps {
+            let result = run_cli(&root, &step)?;
+            said.stdout += &result.stdout;
+            said.stderr += &result.stderr;
+            said.code = result.code;
+            if result.code != 0 {
+                break;
             }
-            None => {
-                out.remove(key);
-            }
         }
-    }
-    Ok(Value::Object(out))
+        Ok(said)
+    })
+    .await
+    .map_err(err)?
 }
 
+/// Hosts one child chain, or stops hosting it (`lattice child host|unhost`):
+/// one path, so the ancestors it needs stay implied, and a chain another
+/// layer lists is refused by the CLI, which names it.
 #[tauri::command]
-fn write_topology(app: AppHandle, topology: Value) -> Result<()> {
-    let path = topology_path(&app)?;
-    let current = read_topology_at(&path)?.ok_or("no lattice.json; run lattice init first")?;
-    let merged = merged_topology(current, &topology)?;
-    let bytes = serde_json::to_vec_pretty(&merged).map_err(err)?;
-    write_atomically(&path, &bytes, 0o644)
-}
-
-/// The `operator` fragment, the configuration layer that holds the chains
-/// the app hosts (and that `lattice child host` writes too).
-fn operator_fragment(root: &Path) -> PathBuf {
-    root.join("config.d").join("operator.json")
-}
-
-/// `fragment` with `hostedChains` set to `chains` (none: left out), its other keys kept.
-fn with_hosted(fragment: Option<Value>, chains: &[String]) -> Result<Value> {
-    let mut fields = match fragment {
-        None => serde_json::Map::new(),
-        Some(Value::Object(fields)) => fields,
-        Some(_) => return Err("config.d/operator.json is not a JSON object".into()),
-    };
-    fields.remove("hostedChains");
-    if !chains.is_empty() {
-        fields.insert("hostedChains".into(), Value::from(chains.to_vec()));
-    }
-    Ok(Value::Object(fields))
-}
-
-/// The chains the operator fragment lists, from its file.
-#[tauri::command]
-fn operator_chains(app: AppHandle) -> Result<Vec<String>> {
-    let fragment = read_topology_at(&operator_fragment(&host_root(&app)?))?;
-    let listed = fragment.as_ref().and_then(|f| f.get("hostedChains")).and_then(Value::as_array);
-    Ok(listed.map(|chains| chains.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default())
-}
-
-/// Sets the chains the operator fragment lists. A running node is told
-/// through its API, and hosts them (and their ancestors) at once; a stopped
-/// one's file is written, for its next start. A list lattice.json still holds
-/// from before is moved into the fragment, so the app's chains are in one place.
-#[tauri::command]
-async fn host_chains(app: AppHandle, pinned: State<'_, PinnedPort>, process: State<'_, node_process::NodeProcess>, chains: Vec<String>) -> Result<()> {
-    if let Some(bad) = chains.iter().find(|c| !is_chain_path(c) || c.as_str() == "Nexus") {
-        return Err(format!("not a child chain path: {bad}"));
+async fn host_chain(app: AppHandle, path: String, hosted: bool) -> Result<CommandResult> {
+    if !is_chain_path(&path) || path == "Nexus" {
+        return Err(format!("not a child chain path: {path}"));
     }
     let root = host_root(&app)?;
-    let port = *pinned.0.lock().map_err(err)?;
-    let node = port.filter(|_| process.report().is_ok_and(|p| p.running)).map(|port| (port, cookie_authorization(&root)));
-    tauri::async_runtime::spawn_blocking(move || set_hosted(&root, node, &chains)).await.map_err(err)?
-}
-
-fn set_hosted(root: &Path, node: Option<(u16, Option<String>)>, chains: &[String]) -> Result<()> {
-    let topology = root.join("lattice.json");
-    let before = read_topology_at(&topology)?;
-    // Out of lattice.json first, so a running node, re-reading its layers
-    // once the fragment changes, drops a chain only lattice.json listed.
-    let mut without = before.clone();
-    let moved = without.as_mut().and_then(Value::as_object_mut).and_then(|fields| fields.remove("hostedChains")).is_some();
-    if moved {
-        write_atomically(&topology, &serde_json::to_vec_pretty(&without).map_err(err)?, 0o644)?;
-    }
-    let written = match node {
-        Some((port, authorization)) => put_hosted(port, authorization.as_deref(), chains),
-        None => {
-            let path = operator_fragment(root);
-            let fragment = with_hosted(read_topology_at(&path)?, chains)?;
-            fs::create_dir_all(path.parent().ok_or("no config.d")?).map_err(err)?;
-            write_atomically(&path, &serde_json::to_vec_pretty(&fragment).map_err(err)?, 0o644)
-        }
-    };
-    if written.is_err() && moved {
-        if let Some(before) = before {
-            write_atomically(&topology, &serde_json::to_vec_pretty(&before).map_err(err)?, 0o644)?;
-        }
-    }
-    written
-}
-
-/// The operator fragment's `hostedChains`, through the node: read, changed,
-/// and written only while it is still the version read, read again otherwise.
-fn put_hosted(port: u16, authorization: Option<&str>, chains: &[String]) -> Result<()> {
-    let url = format!("http://127.0.0.1:{port}/config/fragments/operator");
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).redirects(0).build();
-    let with_auth = |request: ureq::Request| match authorization {
-        Some(value) => request.set("Authorization", value),
-        None => request,
-    };
-    let answer = |result: std::result::Result<ureq::Response, ureq::Error>| match result {
-        Ok(r) | Err(ureq::Error::Status(_, r)) => Ok(r),
-        Err(e) => Err(format!("the node is not answering (it may still be starting): {e}")),
-    };
-    for _ in 0..5 {
-        let current = answer(with_auth(agent.get(&url)).call())?;
-        let (fragment, precondition) = match current.status() {
-            200 => {
-                let etag = current.header("ETag").ok_or("the node gave the operator fragment no version")?.to_string();
-                (Some(serde_json::from_str::<Value>(&current.into_string().map_err(err)?).map_err(err)?), ("If-Match", etag))
-            }
-            404 => (None, ("If-None-Match", "*".to_string())),
-            status => return Err(format!("the node did not give the operator fragment ({status}): {}", current.into_string().unwrap_or_default())),
-        };
-        let body = serde_json::to_string(&with_hosted(fragment, chains)?).map_err(err)?;
-        let put = with_auth(agent.put(&url)).set("Content-Type", "application/json").set(precondition.0, &precondition.1);
-        let written = answer(put.send_string(&body))?;
-        match written.status() {
-            200 => return Ok(()),
-            // Changed by someone else since it was read.
-            412 => continue,
-            status => return Err(format!("the node refused the hosted chains ({status}): {}", written.into_string().unwrap_or_default())),
-        }
-    }
-    Err("the operator fragment kept changing; try again".into())
+    let verb = if hosted { "host" } else { "unhost" };
+    tauri::async_runtime::spawn_blocking(move || run_cli(&root, &["child", verb, &path])).await.map_err(err)?
 }
 
 fn store_path(app: &AppHandle, key: &str) -> Result<PathBuf> {
@@ -796,16 +725,6 @@ fn checked_path(path: &str) -> Result<&str> {
     }
 }
 
-fn rpc_port(topology: &Option<Value>) -> Result<u16> {
-    topology
-        .as_ref()
-        .and_then(|t| t.get("rpc"))
-        .and_then(Value::as_u64)
-        .and_then(|p| u16::try_from(p).ok())
-        .filter(|p| *p != 0)
-        .ok_or_else(|| "no rpc port in lattice.json".to_string())
-}
-
 fn node_request(
     port: u16,
     method: &str,
@@ -899,11 +818,7 @@ pub fn run() {
             // A crash leaves a stale cookie, so the port is pinned only when
             // the node there accepts that cookie on an operator route.
             let root = host_root(handle).ok();
-            let port = topology_path(handle)
-                .and_then(|p| read_topology_at(&p))
-                .ok()
-                .and_then(|t| rpc_port(&t).ok())
-                .filter(|p| root.as_deref().is_some_and(|r| node_accepts_cookie(*p, r)));
+            let port = root.as_deref().and_then(|r| configured_rpc(r).filter(|p| node_accepts_cookie(*p, r)));
             app.manage(PinnedPort(Mutex::new(port)));
             app.manage(node_process::NodeProcess::default());
             app.manage(swap::Swaps::default());
@@ -919,10 +834,9 @@ pub fn run() {
             node_start,
             node_stop,
             node_process,
-            read_topology,
-            write_topology,
-            operator_chains,
-            host_chains,
+            read_config,
+            set_config,
+            host_chain,
             read_miner,
             write_miner,
             store_get,
@@ -977,6 +891,19 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+/// For tests: a stand-in for the bundled CLI whose `config get` prints the
+/// root's `merged.json`, or its lattice.json when there is none.
+#[cfg(test)]
+pub(crate) fn fake_cli() {
+    RESOURCES.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("lattice-desktop-fake-cli-{}", std::process::id()));
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        let script = "#!/bin/sh\nfor a; do root=$a; done\n[ \"$1 $2\" = \"config get\" ] || exit 64\ncat \"$root/merged.json\" 2>/dev/null || cat \"$root/lattice.json\"\n";
+        write_atomically(&dir.join("bin").join("lattice"), script.as_bytes(), 0o755).unwrap();
+        dir
+    });
 }
 
 #[cfg(test)]
@@ -1115,29 +1042,7 @@ mod tests {
         assert_eq!(miner_settings(&dir).unwrap(), Some(serde_json::json!({ "workers": 2 })));
         write_miner_settings(&dir, &serde_json::json!({ "workers": 3 })).unwrap();
         assert_eq!(miner_settings(&dir).unwrap(), Some(serde_json::json!({ "workers": 3 })));
-        assert_eq!(read_topology_at(&topology).unwrap(), Some(serde_json::json!({ "rpc": 1 })), "lattice.json no longer holds mining");
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_stopped_nodes_hosted_chains_move_into_the_operator_fragment() {
-        let dir = std::env::temp_dir().join(format!("lattice-hosted-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let topology = dir.join("lattice.json");
-        fs::write(&topology, serde_json::to_vec(&serde_json::json!({ "rpc": 1, "hostedChains": ["Nexus/a"] })).unwrap()).unwrap();
-        set_hosted(&dir, None, &["Nexus/a".to_string(), "Nexus/a/b".to_string()]).unwrap();
-        assert_eq!(read_topology_at(&topology).unwrap(), Some(serde_json::json!({ "rpc": 1 })));
-        assert_eq!(read_topology_at(&operator_fragment(&dir)).unwrap(), Some(serde_json::json!({ "hostedChains": ["Nexus/a", "Nexus/a/b"] })));
-        // The fragment's other keys are its writer's; no chains leaves the key out.
-        fs::write(operator_fragment(&dir), serde_json::to_vec(&serde_json::json!({ "relayFee": 2, "hostedChains": ["Nexus/a"] })).unwrap()).unwrap();
-        set_hosted(&dir, None, &[]).unwrap();
-        assert_eq!(read_topology_at(&operator_fragment(&dir)).unwrap(), Some(serde_json::json!({ "relayFee": 2 })));
-        assert!(with_hosted(Some(serde_json::json!([])), &[]).is_err());
-        // Through a node that does not answer: nothing is moved.
-        fs::write(&topology, serde_json::to_vec(&serde_json::json!({ "rpc": 1, "hostedChains": ["Nexus/a"] })).unwrap()).unwrap();
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        assert!(set_hosted(&dir, Some((free, None)), &[]).is_err());
-        assert_eq!(read_topology_at(&topology).unwrap(), Some(serde_json::json!({ "rpc": 1, "hostedChains": ["Nexus/a"] })));
+        assert_eq!(read_topology_at(&topology).unwrap().unwrap()["rpc"], 1, "lattice.json is not written");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1184,29 +1089,58 @@ mod tests {
     }
 
     #[test]
-    fn the_page_sets_only_managed_topology_fields() {
-        let current = serde_json::json!({"listen": 4001, "rpc": 8080, "peers": ["a"], "minRelayFee": 5});
-        let merged = merged_topology(current.clone(), &serde_json::json!({"rpc": 18080, "listen": 14001})).unwrap();
-        assert_eq!(merged, serde_json::json!({"listen": 14001, "rpc": 18080, "minRelayFee": 5}));
-        let per_chain = serde_json::json!({"rpc": 18080, "listen": 14001, "peers": {"Nexus": [], "Nexus/testnet": ["a"]}});
+    fn the_page_sets_only_ports_peers_and_origins_through_the_cli() {
+        let set = |v: Value| config_assignments(v.as_object().unwrap());
+        let peer = "ab".repeat(32) + "@127.0.0.1:4001";
         assert_eq!(
-            merged_topology(current.clone(), &per_chain).unwrap()["peers"],
-            serde_json::json!({"Nexus": [], "Nexus/testnet": ["a"]})
+            set(serde_json::json!({ "rpc": 18080, "listen": 14001, "peers.Nexus": [peer], "peers.Nexus/testnet": [] })).unwrap(),
+            vec!["listen=14001".to_string(), format!("peers.Nexus=[\"{peer}\"]"), "peers.Nexus/testnet=[]".into(), "rpc=18080".into()],
         );
         for bad in [
-            serde_json::json!({"rpc": 18080, "listen": 14001, "publicRead": 80}),
-            serde_json::json!({"rpc": 18080, "listen": 14001, "publicSubmit": true}),
-            serde_json::json!({"rpc": 18080, "listen": 14001, "mine": {}}),
-            serde_json::json!({"rpc": 18080, "listen": 14001, "hostedChains": ["Nexus/a"]}),
-            serde_json::json!({"rpc": 0, "listen": 14001}),
-            serde_json::json!({"listen": 14001}),
-            serde_json::json!({"rpc": 1, "listen": 2, "peers": "x"}),
-            serde_json::json!({"rpc": 1, "listen": 2, "peers": {"Nexus/testnet": "x"}}),
-            serde_json::json!({"rpc": 1, "listen": 2, "peers": {"not a path": ["a"]}}),
-            serde_json::json!([]),
+            serde_json::json!({ "publicRead": 80 }),
+            serde_json::json!({ "publicSubmit": true }),
+            serde_json::json!({ "hostedChains": ["Nexus/a"] }),
+            serde_json::json!({ "mine": {} }),
+            serde_json::json!({ "rpc": 0 }),
+            serde_json::json!({ "rpc": 70000 }),
+            serde_json::json!({ "rpc": "18080" }),
+            serde_json::json!({ "peers": [] }),
+            serde_json::json!({ "peers.Other": [] }),
+            serde_json::json!({ "peers.Nexus": "x" }),
+            serde_json::json!({ "peers.Nexus/a b": [] }),
         ] {
-            assert!(merged_topology(current.clone(), &bad).is_err(), "{bad}");
+            assert!(set(bad.clone()).is_err(), "{bad}");
         }
+        let origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+        assert_eq!(set(serde_json::json!({ "rpcAllowedOrigins": [origin] })).unwrap(), vec![format!("rpcAllowedOrigins=[\"{origin}\"]")]);
+        for bad in ["*", "null", "https://a.example", "chrome-extension://x/y", "https://a.example/", "http://a b", "x://", "://x", "https://u@h", "a"] {
+            assert!(set(serde_json::json!({ "rpcAllowedOrigins": [bad] })).is_err(), "{bad}");
+        }
+        assert!(config_removals(&["peers.Nexus".into(), "peers.Nexus/a".into()]).is_ok());
+        for bad in ["rpc", "peers", "hostedChains", "operatorTokens", "peers.Other"] {
+            assert!(config_removals(&[bad.to_string()]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_rpc_port_is_the_merged_configurations() {
+        fake_cli();
+        let root = std::env::temp_dir().join(format!("lattice-desktop-rpc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // No lattice.json yet: no configuration, and no port.
+        assert_eq!(merged_config(&root).unwrap(), None);
+        assert_eq!(configured_rpc(&root), None);
+        // The port the CLI's merged configuration names, not lattice.json's:
+        // a fragment may set another.
+        fs::write(root.join("lattice.json"), r#"{"rpc": 8080, "listen": 4001}"#).unwrap();
+        assert_eq!(configured_rpc(&root), Some(8080));
+        fs::write(root.join("merged.json"), r#"{"rpc": 18080, "listen": 14001}"#).unwrap();
+        assert_eq!(configured_rpc(&root), Some(18080));
+        assert_eq!(merged_config(&root).unwrap().unwrap()["listen"], 14001);
+        fs::write(root.join("merged.json"), r#"{"rpc": 0}"#).unwrap();
+        assert_eq!(configured_rpc(&root), None);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -1235,17 +1169,6 @@ mod tests {
     }
 
     #[test]
-    fn allowed_origins_are_bare_origins() {
-        let current = serde_json::json!({"listen": 4001, "rpc": 8080});
-        let ok = serde_json::json!({"rpc": 8080, "listen": 4001, "rpcAllowedOrigins": ["chrome-extension://abcdefghijklmnopabcdefghijklmnop"]});
-        assert_eq!(merged_topology(current.clone(), &ok).unwrap()["rpcAllowedOrigins"], ok["rpcAllowedOrigins"]);
-        for bad in ["*", "null", "https://a.example", "chrome-extension://x/y", "https://a.example/", "http://a b", "x://", "://x", "https://u@h", "a"] {
-            let update = serde_json::json!({"rpc": 8080, "listen": 4001, "rpcAllowedOrigins": [bad]});
-            assert!(merged_topology(current.clone(), &update).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
     fn the_cookie_is_read_fresh_as_basic_auth() {
         let root = std::env::temp_dir().join(format!("lattice-desktop-cookie-{}", std::process::id()));
         assert_eq!(cookie_authorization(&root), None);
@@ -1257,11 +1180,4 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn rpc_port_comes_from_lattice_json() {
-        assert_eq!(rpc_port(&Some(serde_json::json!({"rpc": 18080}))), Ok(18080));
-        for bad in [None, Some(serde_json::json!({})), Some(serde_json::json!({"rpc": 0})), Some(serde_json::json!({"rpc": 70000}))] {
-            assert!(rpc_port(&bad).is_err());
-        }
-    }
 }

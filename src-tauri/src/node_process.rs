@@ -11,10 +11,11 @@
 //!   up to a minute, and starts over at one second once a run lasted a minute.
 //!
 //! Stopping marks the node unwanted before it signals it, so an exit that
-//! follows is never taken for one to restart. Its standard output and error go
+//! follows is never taken for one to restart; a start while it stops starts
+//! it again once it has exited. Its standard output and error go
 //! to `<root>/log/lattice-node.log`, moved to `lattice-node.log.1` at 8 MiB.
 
-use super::{err, host_root, lattice_command, node_accepts_cookie, read_topology_at, rpc_port, run_lattice, sync_swaps, topology_path, PinnedPort, Result};
+use super::{configured_rpc, err, host_root, lattice_command, node_accepts_cookie, run_lattice, sync_swaps, PinnedPort, Result};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fs;
@@ -50,6 +51,10 @@ struct State {
     supervised: bool,
     /// Set by `start` during a delay: run it again now.
     hurry: bool,
+    /// Set when `stop` asked the running node to exit, until it has: that
+    /// exit is the stop's, whatever its code.
+    stopping: bool,
+    /// The running node; taken in the same lock that sees it has exited.
     child: Option<Child>,
     /// Why it stopped by itself, for the page.
     error: Option<String>,
@@ -59,7 +64,11 @@ struct State {
 
 #[derive(Serialize, Debug, PartialEq)]
 pub struct Report {
+    /// Whether the node's process is running now.
     pub running: bool,
+    /// Whether the app keeps it running: started, and not stopped since
+    /// (between a restart's exit and its start it is wanted, not running).
+    pub wanted: bool,
     pub error: Option<String>,
 }
 
@@ -93,11 +102,12 @@ fn next_delay(last: Option<Duration>, ran: Duration) -> Duration {
 impl NodeProcess {
     pub fn report(&self) -> Result<Report> {
         let state = self.state.lock().map_err(err)?;
-        Ok(Report { running: state.wanted, error: state.error.clone() })
+        Ok(Report { running: state.child.is_some(), wanted: state.wanted, error: state.error.clone() })
     }
 }
 
-/// Starts the node, or does nothing while it runs. A node this app did not
+/// Starts the node, or does nothing while it runs (while it stops, it is
+/// started again once it has exited). A node this app did not
 /// start (left by one that crashed) is stopped first, so the one running is
 /// always this app's own child.
 pub fn start(app: &AppHandle) -> Result<()> {
@@ -114,8 +124,7 @@ pub fn start(app: &AppHandle) -> Result<()> {
     }
     let root = host_root(app)?;
     let spawned = (|| {
-        let port = rpc_port(&read_topology_at(&topology_path(app)?)?).ok();
-        if port.is_some_and(|port| node_accepts_cookie(port, &root)) {
+        if configured_rpc(&root).is_some_and(|port| node_accepts_cookie(port, &root)) {
             run_lattice(&root, "down")?;
         }
         spawn(app, &root)
@@ -126,7 +135,7 @@ pub fn start(app: &AppHandle) -> Result<()> {
             let late_stop = adopt(&mut state, child);
             drop(state);
             if let Some(pid) = late_stop {
-                ask_to_stop(pid, &root);
+                ask_to_stop(app, pid, &root);
             }
             let app = app.clone();
             std::thread::spawn(move || supervise(app, root, readers));
@@ -146,25 +155,61 @@ pub fn start(app: &AppHandle) -> Result<()> {
 fn adopt(state: &mut State, child: Child) -> Option<u32> {
     let pid = child.id();
     state.child = Some(child);
-    (!state.wanted).then_some(pid)
+    state.stopping = !state.wanted;
+    state.stopping.then_some(pid)
+}
+
+/// Takes `child` from the state once it has exited, in the lock that saw
+/// it: its exit code (None: killed by a signal), or None while it runs.
+fn reap(state: &mut State) -> Option<Option<i32>> {
+    let code = match state.child.as_mut().map(Child::try_wait) {
+        Some(Ok(None)) => return None,
+        Some(Ok(Some(status))) => status.code(),
+        _ => None,
+    };
+    state.child = None;
+    Some(code)
+}
+
+/// After an exit with `code`: whether the node is started again, and how.
+/// A stop's exit (`stopped`) leaves it stopped unless a start came since.
+fn after_exit(state: &mut State, code: Option<i32>, stopped: bool) -> Option<Next> {
+    if !state.wanted {
+        return None;
+    }
+    if stopped {
+        return Some(Next::Again);
+    }
+    match next_after(code) {
+        Next::Stay => None,
+        Next::Fault => {
+            let said: Vec<String> = state.tail.iter().cloned().collect();
+            state.error = Some(format!("The node's configuration does not check, so it stays stopped:\n{}", said.join("\n")));
+            None
+        }
+        next => Some(next),
+    }
 }
 
 /// Stops the node and waits until it has exited (killing it if it is still
-/// there after `STOP_PATIENCE`); it is not started again.
+/// there after `STOP_PATIENCE`); it is not started again unless a start
+/// comes meanwhile.
 pub fn stop(app: &AppHandle) -> Result<()> {
     let process = app.state::<NodeProcess>();
     let pid = {
         let mut state = process.state.lock().map_err(err)?;
         state.wanted = false;
         process.changed.notify_all();
-        state.child.as_ref().map(Child::id)
+        let pid = state.child.as_ref().map(Child::id);
+        state.stopping |= pid.is_some();
+        pid
     };
     if let Some(pid) = pid {
-        ask_to_stop(pid, &host_root(app)?);
+        ask_to_stop(app, pid, &host_root(app)?);
     }
     let deadline = Instant::now() + STOP_PATIENCE;
     let mut state = process.state.lock().map_err(err)?;
-    while state.supervised {
+    while state.supervised && (state.stopping || !state.wanted) {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             if let Some(child) = state.child.as_mut() {
@@ -179,7 +224,7 @@ pub fn stop(app: &AppHandle) -> Result<()> {
 
 /// SIGTERM, which the node takes as `POST /stop`.
 #[cfg(unix)]
-fn ask_to_stop(pid: u32, _root: &Path) {
+fn ask_to_stop(_app: &AppHandle, pid: u32, _root: &Path) {
     // `lattice up` became the node, so this is the node's own process.
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
@@ -187,10 +232,25 @@ fn ask_to_stop(pid: u32, _root: &Path) {
 }
 
 /// `lattice down` (`POST /stop`): the child is wsl.exe, which passes no
-/// signal on to the node.
+/// signal on to the node. A node still starting has no RPC to ask yet, and
+/// `down` then finds none running: asked again each second, on a thread of
+/// its own, until the node has exited.
 #[cfg(windows)]
-fn ask_to_stop(_pid: u32, root: &Path) {
-    let _ = run_lattice(root, "down");
+fn ask_to_stop(app: &AppHandle, _pid: u32, root: &Path) {
+    let app = app.clone();
+    let root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + STOP_PATIENCE;
+        let process = app.state::<NodeProcess>();
+        while Instant::now() < deadline {
+            let stopped = run_lattice(&root, "down").is_ok_and(|said| said.code == 0 && said.stdout.trim() == "stopped");
+            let Ok(state) = process.state.lock() else { return };
+            if stopped || !state.stopping {
+                return;
+            }
+            let _ = process.changed.wait_timeout(state, Duration::from_secs(1));
+        }
+    });
 }
 
 /// `lattice up --root <root>` as this app's child, its output going to the
@@ -198,7 +258,7 @@ fn ask_to_stop(_pid: u32, root: &Path) {
 /// pinned for `node_http`.
 fn spawn(app: &AppHandle, root: &Path) -> Result<(Child, Vec<JoinHandle<()>>)> {
     fs::create_dir_all(root).map_err(err)?;
-    let port = rpc_port(&read_topology_at(&topology_path(app)?)?).ok();
+    let port = configured_rpc(root);
     let (mut command, linux_root) = lattice_command(root)?;
     command.args(["up", "--root"]).arg(linux_root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|e| format!("could not run the bundled lattice: {e}"))?;
@@ -252,12 +312,11 @@ fn supervise(app: AppHandle, root: PathBuf, mut readers: Vec<JoinHandle<()>>) {
     let mut delay = None;
     let mut began = Instant::now();
     loop {
-        let code = loop {
+        let (code, stopped) = loop {
             let Ok(mut state) = process.state.lock() else { return };
-            match state.child.as_mut().map(Child::try_wait) {
-                Some(Ok(Some(status))) => break status.code(),
-                Some(Ok(None)) => {}
-                _ => break None,
+            if let Some(code) = reap(&mut state) {
+                // The exit is seen: a stop or start from now on is about no process.
+                break (code, std::mem::take(&mut state.stopping));
             }
             let _ = process.changed.wait_timeout(state, Duration::from_millis(200));
         };
@@ -266,20 +325,15 @@ fn supervise(app: AppHandle, root: PathBuf, mut readers: Vec<JoinHandle<()>>) {
             let _ = reader.join();
         }
         let Ok(mut state) = process.state.lock() else { return };
-        state.child = None;
-        let next = next_after(code);
-        if !state.wanted || matches!(next, Next::Stay | Next::Fault) {
-            if next == Next::Fault && state.wanted {
-                let said: Vec<String> = state.tail.iter().cloned().collect();
-                state.error = Some(format!("The node's configuration does not check, so it stays stopped:\n{}", said.join("\n")));
-            }
+        process.changed.notify_all();
+        let Some(next) = after_exit(&mut state, code, stopped) else {
             state.wanted = false;
             state.supervised = false;
             process.changed.notify_all();
             drop(state);
             pin(&app, None);
             return;
-        }
+        };
         if next == Next::Later {
             let wait = next_delay(delay, began.elapsed());
             delay = Some(wait);
@@ -309,7 +363,7 @@ fn supervise(app: AppHandle, root: PathBuf, mut readers: Vec<JoinHandle<()>>) {
                 began = Instant::now();
                 let late_stop = process.state.lock().ok().and_then(|mut state| adopt(&mut state, child));
                 if let Some(pid) = late_stop {
-                    ask_to_stop(pid, &root);
+                    ask_to_stop(&app, pid, &root);
                 }
             }
             Err(e) => {
@@ -381,6 +435,52 @@ mod tests {
         }
         assert_eq!(seen, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
         assert_eq!(next_delay(Some(LONGEST_DELAY), Duration::from_secs(600)), FIRST_DELAY);
+    }
+
+    #[test]
+    fn a_stops_exit_leaves_it_stopped_unless_a_start_came_since() {
+        let wanted = |wanted| State { wanted, supervised: true, ..State::default() };
+        // A stop's exit, whatever its code: stopped, or, started meanwhile, run again.
+        for code in [Some(0), Some(1), None] {
+            assert_eq!(after_exit(&mut wanted(false), code, true), None);
+            assert_eq!(after_exit(&mut wanted(true), code, true), Some(Next::Again));
+        }
+        // An exit of its own: as the code says.
+        assert_eq!(after_exit(&mut wanted(true), Some(0), false), None);
+        assert_eq!(after_exit(&mut wanted(true), Some(75), false), Some(Next::Again));
+        assert_eq!(after_exit(&mut wanted(true), Some(1), false), Some(Next::Later));
+        assert_eq!(after_exit(&mut wanted(false), Some(75), false), None);
+        let mut fault = wanted(true);
+        fault.tail.push_back("unknown key publicRead".into());
+        assert_eq!(after_exit(&mut fault, Some(78), false), None);
+        assert!(fault.error.unwrap().ends_with("unknown key publicRead"));
+    }
+
+    #[test]
+    fn a_stop_during_its_start_is_passed_on_and_its_exit_reaped_in_one_lock() {
+        let mut state = State { wanted: false, supervised: true, ..State::default() };
+        let child = std::process::Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        let pid = child.id();
+        // Stopped while it was being started: its pid is to be signalled, and its exit is the stop's.
+        assert_eq!(adopt(&mut state, child), Some(pid));
+        assert!(state.stopping);
+        let code = loop {
+            if let Some(code) = reap(&mut state) {
+                break code;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(code, Some(3));
+        assert!(state.child.is_none());
+        // Wanted when it is adopted: nothing to pass on.
+        let mut state = State { wanted: true, supervised: true, ..State::default() };
+        let child = std::process::Command::new("sh").args(["-c", "sleep 5"]).spawn().unwrap();
+        assert_eq!(adopt(&mut state, child), None);
+        assert!(!state.stopping);
+        assert_eq!(reap(&mut state), None);
+        assert!(state.child.is_some());
+        state.child.as_mut().unwrap().kill().unwrap();
+        let _ = state.child.as_mut().unwrap().wait();
     }
 
     #[test]

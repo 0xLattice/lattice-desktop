@@ -9,10 +9,11 @@
 import type { NodeHTTP } from "./loopback.ts";
 
 /**
- * lattice.json: the node's base configuration, which the node never writes
- * (fields the app does not manage are kept). The chains the app hosts are in
- * the `operator` fragment (`config.d/operator.json`), not here; an older
- * file's `hostedChains` is moved there by the next change of them.
+ * The node's configuration as `lattice config get` prints it: lattice.json,
+ * then each fragment of config.d, merged (hosted chains and peers are the
+ * union of every layer's, with the ancestors hosted chains need). The app
+ * changes only the `operator` fragment, one key or chain at a time, through
+ * the CLI; what lattice.json or another fragment says stays theirs.
  */
 export interface Topology {
   listen: number;
@@ -47,16 +48,17 @@ export type LifecycleVerb = "init" | "status" | "mine-start" | "mine-stop" | "mi
 
 /** The node process as its host runs it. */
 export interface NodeProcess {
-  /** Whether the host runs it: started, and not stopped since (it starts it again after a restart or a crash). */
+  /** Whether its process is running now. */
   running: boolean;
+  /** Whether the host keeps it running: started, and not stopped since (it starts it again after a restart or a crash). */
+  wanted: boolean;
   /** Why it stopped by itself: its configuration does not check (exit 78), in its own last words. */
   error?: string | null;
 }
 
 /** What `GET /config` answers, as far as the app reads it. */
 interface NodeConfig {
-  spec: { hostedChains?: string[] };
-  status: { chains: { path: string; from: string[]; impliedBy?: string[] }[] };
+  status: { pendingRestart?: string[] };
 }
 
 export interface CommandResult {
@@ -79,16 +81,17 @@ export interface HostOps {
   /** Stops the node and resolves once it has exited; it is not started again. */
   stopNode(): Promise<void>;
   nodeProcess(): Promise<NodeProcess>;
-  readTopology(): Promise<Topology | null>;
-  writeTopology(topology: Topology): Promise<void>;
-  /** The chains `config.d/operator.json` lists, read from the file. */
-  operatorChains(): Promise<string[]>;
+  /** The merged configuration (`lattice config get`); null before `lattice init`. */
+  readConfig(): Promise<Topology | null>;
   /**
-   * Sets the chains `config.d/operator.json` lists: through the running node
-   * (which hosts them at once), or in the file while it is stopped. A list
-   * lattice.json still holds is moved into it.
+   * `lattice config set` of `set` (`rpc`, `listen`, `peers.<chain>`,
+   * `rpcAllowedOrigins`, each to a JSON value), then `lattice config unset`
+   * of `unset` (`peers.<chain>`): the operator fragment, through a running
+   * node or in the file while it is stopped.
    */
-  hostChains(chains: string[]): Promise<void>;
+  setConfig(set: Record<string, unknown>, unset: string[]): Promise<CommandResult>;
+  /** `lattice child host <chain>`, or `unhost`: in the operator fragment, which a running node takes at once. */
+  hostChain(chain: string, hosted: boolean): Promise<CommandResult>;
   readMiner(): Promise<MinerSettings | null>;
   writeMiner(settings: MinerSettings): Promise<void>;
   /** The bundled GPU mining worker's path, or null in a build without one. */
@@ -114,7 +117,7 @@ export interface NodePrefs {
   hostedChains: string[];
 }
 
-/** The settings lattice.json holds, for a node hosting `hosted` beside Nexus. */
+/** The settings a configuration holds. */
 export function prefsOf(topology: Topology, hosted: string[] = topology.hostedChains ?? []): NodePrefs {
   // An array is Nexus's list, as in every file written before chains had their own.
   const byChain = Array.isArray(topology.peers) ? { Nexus: topology.peers } : topology.peers ?? {};
@@ -131,29 +134,31 @@ export function prefsOf(topology: Topology, hosted: string[] = topology.hostedCh
 }
 
 /**
- * The topology with the app's settings applied; every other field is kept.
- * Hosted chains are not lattice.json's to say (see `HostOps.hostChains`).
+ * The CLI's changes that take the configuration from `current` to `wanted`:
+ * keys of the operator fragment to set and to unset, and chains to host and
+ * to stop hosting, each one path (an ancestor a hosted chain needs stays
+ * implied). Peers are the union of every layer's, so a chain's list is set
+ * whole in the operator fragment, or unset to leave the others'.
  */
-export function withPrefs(topology: Topology, prefs: NodePrefs): Topology {
-  const next: Topology = { ...topology, rpc: prefs.rpc, listen: prefs.listen };
-  delete next.peers;
-  const nexus = prefs.peers === "default" ? undefined : prefs.peers === "none" ? [] : [...prefs.peers];
-  // Only for chains still hosted: the node refuses a list for any other.
-  const children = prefs.hostedChains.filter((chain) => (prefs.chainPeers[chain]?.length ?? 0) > 0).map((chain) => [chain, [...prefs.chainPeers[chain]!]]);
-  // With no child lists, Nexus's list is written as the array it always was.
-  if (children.length > 0) next.peers = { ...(nexus ? { Nexus: nexus } : {}), ...Object.fromEntries(children) };
-  else if (nexus) next.peers = nexus;
-  return next;
-}
-
-/** `chains` with every ancestor they need, parent first: the tree the node hosts for them. */
-export function withAncestors(chains: string[]): string[] {
-  const tree = new Set<string>();
-  for (const chain of chains) {
-    const parts = chain.split("/");
-    for (let depth = 2; depth <= parts.length; depth++) tree.add(parts.slice(0, depth).join("/"));
+export function changesOf(current: NodePrefs, wanted: NodePrefs) {
+  const set: Record<string, unknown> = {};
+  const unset: string[] = [];
+  if (wanted.rpc !== current.rpc) set.rpc = wanted.rpc;
+  if (wanted.listen !== current.listen) set.listen = wanted.listen;
+  if (canonical(wanted.peers) !== canonical(current.peers)) {
+    if (wanted.peers === "default") unset.push("peers.Nexus");
+    else set["peers.Nexus"] = wanted.peers === "none" ? [] : [...wanted.peers];
   }
-  return [...tree].sort((a, b) => a.split("/").length - b.split("/").length || (a < b ? -1 : a > b ? 1 : 0));
+  const host = wanted.hostedChains.filter((chain) => !current.hostedChains.includes(chain));
+  const unhost = current.hostedChains.filter((chain) => !wanted.hostedChains.includes(chain)).reverse();
+  for (const chain of new Set([...Object.keys(current.chainPeers), ...Object.keys(wanted.chainPeers)])) {
+    // Only for chains still hosted: the node takes no list for any other.
+    const list = wanted.hostedChains.includes(chain) ? wanted.chainPeers[chain] ?? [] : [];
+    if (canonical(list) === canonical(current.chainPeers[chain] ?? [])) continue;
+    if (list.length > 0) set[`peers.${chain}`] = [...list];
+    else unset.push(`peers.${chain}`);
+  }
+  return { set, unset, host, unhost };
 }
 
 const PEER = /^[0-9a-f]{64}@[^\s@]+:[0-9]{1,5}$/;
@@ -329,25 +334,30 @@ export class NodeManager {
     return result;
   }
 
+  /** Runs a CLI change, or says why the CLI refused it. */
+  async #change(result: Promise<CommandResult>): Promise<void> {
+    const said = await result;
+    if (said.code !== 0) throw new Error((said.stderr || said.stdout).trim().replace(/^Error: /, ""));
+  }
+
   /**
-   * The host's topology, scaffolding the host root with `lattice init` on
-   * first run. The app's node then takes its own ports (APP_PORTS), so it
-   * does not collide with a CLI-managed host on the same machine, which
-   * `lattice init` puts on 8080/4001.
+   * The host's merged configuration, scaffolding the host root with `lattice
+   * init` on first run. The app's node then takes its own ports (APP_PORTS),
+   * so it does not collide with a CLI-managed host on the same machine,
+   * which `lattice init` puts on 8080/4001.
    */
   async ensureHost(): Promise<Topology> {
-    const existing = await this.#host.readTopology();
+    const existing = await this.#host.readConfig();
     if (existing) return existing;
     await this.#run("init");
-    const created = await this.#host.readTopology();
+    await this.#change(this.#host.setConfig({ ...APP_PORTS }, []));
+    const created = await this.#host.readConfig();
     if (!created) throw new Error("lattice init wrote no lattice.json");
-    const topology = { ...created, ...APP_PORTS };
-    await this.#host.writeTopology(topology);
-    return topology;
+    return created;
   }
 
   async prefs(): Promise<NodePrefs> {
-    return prefsOf(await this.ensureHost(), await this.#hosted());
+    return prefsOf(await this.ensureHost());
   }
 
   /** The configuration the running node uses; undefined while none answers. */
@@ -361,71 +371,66 @@ export class NodeManager {
   }
 
   /**
-   * The chains hosted beside Nexus, parent first. While the node runs, as it
-   * hosts them: what every configuration layer lists, and the ancestors that
-   * needs. While it is stopped, as lattice.json and the operator fragment
-   * (the layers the app writes) list them.
-   */
-  async #hosted(config?: NodeConfig): Promise<string[]> {
-    const running = config ?? (await this.#config());
-    if (running) return [...(running.spec.hostedChains ?? [])];
-    return withAncestors([...((await this.ensureHost()).hostedChains ?? []), ...(await this.#host.operatorChains())]);
-  }
-
-  /**
-   * Saves the settings. The hosted chains are the operator fragment's, which
-   * a running node takes at once; the rest is lattice.json's, which a running
-   * node takes by restarting.
+   * Saves the settings: each change one key or chain of the operator
+   * fragment, through the CLI. A running node hosts chains and takes a child
+   * chain's peers at once, and restarts when it says the rest waits for one.
+   * What lattice.json or another fragment sets stays: a chain or peer they
+   * list cannot be removed here, and the CLI says where it is.
    */
   async configure(prefs: NodePrefs): Promise<void> {
     const problem = checkPrefs(prefs);
     if (problem) throw new Error(problem);
-    const topology = await this.ensureHost();
-    const config = await this.#config();
-    const hosted = await this.#hosted(config);
-    const next = withPrefs(topology, prefs);
-    const restart = (["rpc", "listen", "peers"] as const).some((key) => canonical(next[key]) !== canonical(topology[key]));
+    const current = prefsOf(await this.ensureHost());
     // A chain no longer hosted is no longer paid. An operator's tuning entry
     // for it is theirs to remove: say so, and write nothing.
     const kept = new Set(["Nexus", ...prefs.hostedChains]);
     const mine = await this.#host.readMiner();
     const tuned = Object.keys((mine?.minWork as Record<string, unknown> | undefined) ?? {}).find((chain) => !kept.has(chain));
     if (tuned !== undefined) throw new Error(`miner.json's minWork names ${tuned}. Remove that entry there before you stop hosting it.`);
-    if (restart) await this.#host.writeTopology(next);
-    if (topology.hostedChains !== undefined || canonical(prefs.hostedChains) !== canonical(hosted)) await this.#hostChains(prefs.hostedChains, hosted, config);
+    const { set, unset, host, unhost } = changesOf(current, prefs);
+    for (const chain of host) await this.#change(this.#host.hostChain(chain, true));
+    if (Object.keys(set).length + unset.length > 0) await this.#change(this.#host.setConfig(set, unset));
+    // Deepest first; a chain still hosted afterwards is said below, with why.
+    const refused = new Map<string, string>();
+    for (const chain of unhost) {
+      const said = await this.#host.hostChain(chain, false);
+      if (said.code !== 0) refused.set(chain, (said.stderr || said.stdout).trim().replace(/^Error: /, ""));
+    }
+    const after = prefsOf((await this.#host.readConfig()) ?? {} as Topology);
     const paid = mine?.recipients ?? {};
+    const hosted = new Set(["Nexus", ...after.hostedChains]);
     // The loop reads its settings again each round.
-    if (Object.keys(paid).some((chain) => !kept.has(chain))) {
-      await this.#host.writeMiner({ ...mine, recipients: Object.fromEntries(Object.entries(paid).filter(([chain]) => kept.has(chain))) });
+    if (Object.keys(paid).some((chain) => !hosted.has(chain))) {
+      await this.#host.writeMiner({ ...mine, recipients: Object.fromEntries(Object.entries(paid).filter(([chain]) => hosted.has(chain))) });
     }
-    if (restart) await this.#restart();
+    await this.#restartIfPending([...Object.keys(set), ...unset].some((key) => !key.startsWith("peers.Nexus/")));
+    const stillHosted = unhost.find((chain) => after.hostedChains.includes(chain));
+    if (stillHosted !== undefined) throw new Error(`${stillHosted} is still hosted: ${refused.get(stillHosted) ?? "a chain under it needs it"}.`);
+    const chainPeers = Object.fromEntries(Object.entries(prefs.chainPeers).filter(([chain]) => prefs.hostedChains.includes(chain)));
+    if (canonical(after.peers) !== canonical(prefs.peers) || canonical(after.chainPeers) !== canonical(chainPeers)) {
+      throw new Error("Saved, but lattice.json or another configuration fragment lists more peers; change them there.");
+    }
   }
 
   /**
-   * Hosts `wanted` and no other chain the app lists. A chain another
-   * configuration layer lists stays that layer's; one that is still hosted
-   * after it was asked away (another layer lists it, or a chain under it
-   * needs it) is said, with why.
+   * Restarts a running node when it says a change waits for a restart
+   * (`GET /config`'s pendingRestart). One not answering yet may have read its
+   * configuration before a change that waits (`changed`): it is stopped and
+   * started again.
    */
-  async #hostChains(wanted: string[], hosted: string[], config: NodeConfig | undefined): Promise<void> {
-    const others = new Set((config?.status.chains ?? []).filter((c) => c.from.some((layer) => layer !== "operator" && layer !== "lattice")).map((c) => c.path));
-    await this.#host.hostChains(wanted.filter((chain) => !others.has(chain)));
-    if (!config) return;
-    const kept = (await this.#config())?.status.chains.find((c) => hosted.includes(c.path) && !wanted.includes(c.path));
-    if (kept) {
-      throw new Error(`${kept.path} is still hosted: ${kept.from.length ? `the ${kept.from.join(", ")} configuration lists it` : `${kept.impliedBy?.join(", ")} runs under it`}.`);
-    }
+  async #restartIfPending(changed: boolean): Promise<void> {
+    if (!(await this.#host.nodeProcess()).wanted) return;
+    const config = await this.#config();
+    if (config ? (config.status.pendingRestart?.length ?? 0) > 0 : changed) await this.#restart();
   }
 
   /**
-   * A running node restarts to take lattice.json: asked to (it exits for the
-   * host to start it again), then waited for until a new process answers.
+   * Restarts the node: asked to (it exits for the host to start it again),
+   * then waited for until a new process answers.
    */
   async #restart(): Promise<void> {
-    if (!(await this.#host.nodeProcess()).running) return;
     const before = await this.#startedAt();
     if (before === undefined) {
-      // Not answering yet: it may have read lattice.json before the change.
       await this.#host.stopNode();
       return this.#host.startNode();
     }
@@ -437,7 +442,7 @@ export class NodeManager {
       const now = await this.#startedAt();
       if (now !== undefined && now !== before) return;
       const process = await this.#host.nodeProcess();
-      if (!process.running) throw new Error(process.error ?? "The node stopped instead of restarting.");
+      if (!process.wanted) throw new Error(process.error ?? "The node stopped instead of restarting.");
     }
     throw new Error("The node did not come back within three minutes of its restart.");
   }
@@ -457,7 +462,7 @@ export class NodeManager {
    * the node's, for the node and the wallet alike.
    */
   async chains(): Promise<string[]> {
-    return ["Nexus", ...(await this.#hosted())];
+    return ["Nexus", ...(await this.prefs()).hostedChains];
   }
 
   /** Hosts `chain` too (its parent must be hosted already); a running node starts it at once. */
@@ -469,11 +474,10 @@ export class NodeManager {
 
   /** Lets a browser extension's origin reach the operator port (it still needs the cookie); a running node restarts. */
   async allowOrigin(origin: string): Promise<void> {
-    const topology = await this.ensureHost();
-    const origins = topology.rpcAllowedOrigins ?? [];
+    const origins = (await this.ensureHost()).rpcAllowedOrigins ?? [];
     if (origins.includes(origin)) return;
-    await this.#host.writeTopology({ ...topology, rpcAllowedOrigins: [...origins, origin] });
-    await this.#restart();
+    await this.#change(this.#host.setConfig({ rpcAllowedOrigins: [...origins, origin] }, []));
+    await this.#restartIfPending(true);
   }
 
   async allowedOrigins(): Promise<string[]> {

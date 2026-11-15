@@ -522,7 +522,8 @@ function connectForm(manager: NodeManager, prefs: NodePrefs, chain: string, save
   const err = h("div", { class: "toast", role: "status" });
   return h("div", { class: "stack" },
     h("label", { class: "k" }, "Connect to"), mode, peers,
-    h("p", { class: "muted" }, "Saving restarts the node if it is running."),
+    // A child chain's peers are taken at once; Nexus's at the node's next start.
+    h("p", { class: "muted" }, root ? "Saving restarts the node if it is running." : "Saved, a running node takes them at once."),
     err,
     h("button", { class: "btn block", "aria-label": `Save peers of ${chain}`, onclick: async (event: Event) => {
       const button = event.currentTarget as HTMLButtonElement;

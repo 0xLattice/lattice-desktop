@@ -3,13 +3,13 @@
 // the app's real page in a DOM. Nothing here touches a live chain.
 
 import assert from "node:assert/strict";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AppHost } from "../../src/app.ts";
-import type { HostOps, MinerSettings, Topology } from "../../src/node-manager.ts";
+import type { CommandResult, HostOps, MinerSettings, Topology } from "../../src/node-manager.ts";
 
 /** The directory holding lattice, lattice-node and lattice-mining-coordinator. */
 export const bin = process.env.LATTICE_NODE_BIN;
@@ -53,18 +53,32 @@ const readJSON = <T>(file: string): T | null => {
   }
 };
 
+/** `lattice <args> --root <root>`, answered as the shell answers a CLI run. */
+async function cli(root: string, args: string[]): Promise<CommandResult> {
+  try {
+    const { stdout, stderr } = await run(join(bin!, "lattice"), [...args, "--root", root]);
+    return { code: 0, stdout, stderr };
+  } catch (e) {
+    const failed = e as { code?: number; stdout?: string; stderr?: string };
+    return { code: typeof failed.code === "number" ? failed.code : 1, stdout: failed.stdout ?? "", stderr: failed.stderr ?? String(e) };
+  }
+}
+
 /**
  * The node as the shell runs it: `lattice up` as this process's child,
  * started again when it exits 75, left stopped on any other exit (the shell
  * also starts it again after a crash, which no test here needs), its output
- * appended to `<root>/log/lattice-node.log`.
+ * appended to `<root>/log/lattice-node.log`, and the RPC port the merged
+ * configuration names when it starts pinned for `nodeHTTP`.
  */
-function nodeProcess(root: string): Pick<HostOps, "startNode" | "stopNode" | "nodeProcess"> {
+function nodeProcess(root: string): Pick<HostOps, "startNode" | "stopNode" | "nodeProcess"> & { port(): number | undefined } {
   let child: ChildProcess | undefined;
   let wanted = false;
   let error: string | undefined;
   let exited = Promise.resolve();
+  let port: number | undefined;
   const up = () => {
+    port = Number(execFileSync(join(bin!, "lattice"), ["config", "get", "rpc", "--root", root], { encoding: "utf8" }).trim());
     mkdirSync(join(root, "log"), { recursive: true });
     const log = openSync(join(root, "log", "lattice-node.log"), "a");
     const running = spawn(join(bin!, "lattice"), ["up", "--root", root], { stdio: ["ignore", log, log] });
@@ -94,14 +108,14 @@ function nodeProcess(root: string): Pick<HostOps, "startNode" | "stopNode" | "no
         await exited;
       }
     },
-    nodeProcess: async () => ({ running: wanted, error: error ?? null }),
+    nodeProcess: async () => ({ running: child !== undefined, wanted, error: error ?? null }),
+    port: () => port,
   };
 }
 
 /** The shell, in Node, over the host root `root`. The wallet's files live beside it, as in the app. */
 export function harnessHost(root: string): AppHost {
   const topologyFile = join(root, "lattice.json");
-  const operatorFile = join(root, "config.d", "operator.json");
   const minerFile = join(root, "miner.json");
   const walletDir = join(root, "wallet");
   const file = (key: string) => join(walletDir, `${key}.json`);
@@ -112,8 +126,7 @@ export function harnessHost(root: string): AppHost {
   };
   const node = nodeProcess(root);
   const nodeHTTP: AppHost["nodeHTTP"] = async (method, path, body) => {
-    const { rpc } = JSON.parse(readFileSync(topologyFile, "utf8")) as Topology;
-    const response = await fetch(`http://127.0.0.1:${rpc}${path}`, {
+    const response = await fetch(`http://127.0.0.1:${node.port()}${path}`, {
       method,
       headers: {
         Authorization: "Basic " + btoa(readFileSync(cookieFile(root), "utf8").trim()),
@@ -126,56 +139,20 @@ export function harnessHost(root: string): AppHost {
   return {
     ops: {
       ...node,
-      async lattice(verb) {
-        try {
-          // "mine-start" is `lattice mine start`, as the shell maps it.
-          const { stdout, stderr } = await run(join(bin!, "lattice"), [...verb.split("-"), "--root", root]);
-          return { code: 0, stdout, stderr };
-        } catch (e) {
-          const failed = e as { code?: number; stdout?: string; stderr?: string };
-          return { code: typeof failed.code === "number" ? failed.code : 1, stdout: failed.stdout ?? "", stderr: failed.stderr ?? String(e) };
-        }
+      // "mine-start" is `lattice mine start`, as the shell maps it.
+      lattice: (verb) => cli(root, verb.split("-")),
+      async readConfig() {
+        if (!existsSync(topologyFile)) return null;
+        const said = await cli(root, ["config", "get"]);
+        if (said.code !== 0) throw new Error(said.stderr);
+        return JSON.parse(said.stdout) as Topology;
       },
-      readTopology: async () => readJSON<Topology>(topologyFile),
-      async writeTopology(topology) {
-        writeFileSync(topologyFile, JSON.stringify(topology, null, 2));
+      async setConfig(set, unset) {
+        const assignments = Object.entries(set).map(([key, value]) => `${key}=${JSON.stringify(value)}`);
+        const said = assignments.length ? await cli(root, ["config", "set", ...assignments]) : { code: 0, stdout: "", stderr: "" };
+        return said.code !== 0 || unset.length === 0 ? said : cli(root, ["config", "unset", ...unset]);
       },
-      operatorChains: async () => readJSON<{ hostedChains?: string[] }>(operatorFile)?.hostedChains ?? [],
-      // As the shell does: lattice.json's list moved into the operator
-      // fragment, through the node while it runs (written only while still
-      // the version read), or into the file while it is stopped.
-      async hostChains(chains) {
-        const topology = readJSON<Topology>(topologyFile)!;
-        const { hostedChains: _, ...rest } = topology;
-        writeFileSync(topologyFile, JSON.stringify(rest, null, 2));
-        const set = (fragment: Record<string, unknown> | null) => {
-          const { hostedChains: _old, ...others } = fragment ?? {};
-          return chains.length ? { ...others, hostedChains: chains } : others;
-        };
-        if (!(await node.nodeProcess()).running) {
-          mkdirSync(join(root, "config.d"), { recursive: true });
-          writeFileSync(operatorFile, JSON.stringify(set(readJSON(operatorFile)), null, 2));
-          return;
-        }
-        const { rpc } = topology;
-        const url = `http://127.0.0.1:${rpc}/config/fragments/operator`;
-        const authorization = "Basic " + btoa(readFileSync(cookieFile(root), "utf8").trim());
-        for (;;) {
-          const current = await fetch(url, { headers: { Authorization: authorization } });
-          const precondition: Record<string, string> = current.status === 200 ? { "If-Match": current.headers.get("ETag")! } : { "If-None-Match": "*" };
-          const written = await fetch(url, {
-            method: "PUT",
-            headers: { Authorization: authorization, "Content-Type": "application/json", ...precondition },
-            body: JSON.stringify(set(current.status === 200 ? await current.json() : null)),
-          });
-          if (written.status === 412) continue;
-          if (written.status !== 200) {
-            writeFileSync(topologyFile, JSON.stringify(topology, null, 2));
-            throw new Error(`the node refused the hosted chains (${written.status}): ${await written.text()}`);
-          }
-          return;
-        }
-      },
+      hostChain: (path, hosted) => cli(root, ["child", hosted ? "host" : "unhost", path]),
       readMiner: async () => readJSON<MinerSettings>(minerFile) ?? readJSON<Topology & { mine?: MinerSettings }>(topologyFile)?.mine ?? null,
       async writeMiner(settings) {
         writeFileSync(minerFile, JSON.stringify(settings, null, 2));

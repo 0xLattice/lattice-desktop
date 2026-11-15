@@ -16,19 +16,10 @@ export const hostOps: HostOps = {
   startNode: () => invoke<void>("node_start"),
   stopNode: () => invoke<void>("node_stop"),
   nodeProcess: () => invoke<NodeProcess>("node_process"),
-  readTopology: () => invoke<Topology | null>("read_topology"),
-  // Only the fields the app manages; the shell merges them and refuses others.
-  writeTopology: async ({ rpc, listen, peers, rpcAllowedOrigins }: Topology) => {
-    await invoke<void>("write_topology", {
-      topology: {
-        rpc, listen,
-        ...(peers ? { peers } : {}),
-        ...(rpcAllowedOrigins ? { rpcAllowedOrigins } : {}),
-      },
-    });
-  },
-  operatorChains: () => invoke<string[]>("operator_chains"),
-  hostChains: (chains: string[]) => invoke<void>("host_chains", { chains }),
+  readConfig: () => invoke<Topology | null>("read_config"),
+  // The shell runs `lattice config set|unset` of only the keys it checks.
+  setConfig: (set: Record<string, unknown>, unset: string[]) => invoke<CommandResult>("set_config", { set, unset }),
+  hostChain: (path: string, hosted: boolean) => invoke<CommandResult>("host_chain", { path, hosted }),
   readMiner: () => invoke<MinerSettings | null>("read_miner"),
   // Who is paid, the worker count, and the worker only when it is one bundled
   // with the app (the shell refuses any other, and keeps the rest).

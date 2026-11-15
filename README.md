@@ -32,13 +32,21 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   sync: stopped (with a Start button), starting, or how far along it is.
   Stopping it from the app, or quitting the app, stops the node cleanly
   (SIGTERM, which the node takes as `POST /stop`; `lattice down` on Windows,
-  where the child is `wsl.exe`), which can take a few seconds. A node left
+  where the child is `wsl.exe`, asked again each second while a node still
+  starting has no RPC to take it), which can take a few seconds. Starting it
+  while it stops starts it again once it has exited. A node left
   running by an app that was killed or crashed is stopped when the app next
-  starts its node, so the node running is always the app's own child. The app
-  may change only `rpc`, `listen`, `peers` and `rpcAllowedOrigins` in
-  `lattice.json`, the hosted chains in the `operator` configuration fragment
-  (`config.d/operator.json`, the layer `lattice child host` writes too), and
-  of the miner's settings (`miner.json`) only `workers`, `recipients`, and
+  starts its node, so the node running is always the app's own child. The
+  app's node settings have one home, the `operator` configuration fragment
+  (`config.d/operator.json`), changed only through the bundled CLI, one key
+  or chain at a time: `lattice config set|unset` of `rpc`, `listen`,
+  `peers.<chain>` and `rpcAllowedOrigins`, and `lattice child host|unhost`
+  of one chain path, so an ancestor a hosted chain needs stays implied. The
+  app reads the merged configuration (`lattice config get`). It never writes
+  `lattice.json`: what an older install set there stays, as the base layer,
+  and a chain or peer listed there or in another fragment is not removed by
+  the app (the CLI says where it is). Of the miner's settings (`miner.json`)
+  the app changes only `workers`, `recipients`, and
   `worker` as one of the two bundled workers. Other fields, such as public
   listeners and mining's tuning, are left to the operator.
 - **Mining** (a button beside Send and Receive) runs the bundled `lattice mine` loop on this node,
@@ -63,8 +71,8 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   stops mining first. The page can choose only between the two bundled workers:
   a custom `worker` set by hand in `miner.json` is shown and kept, but
   set only by hand. Settings an older `lattice.json` holds under `mine` are
-  read until the app first saves mining's settings, which writes them to
-  `miner.json` and drops them from `lattice.json` (the node ignores them).
+  read until the app first saves mining's settings to `miner.json`; they are
+  left in `lattice.json`, which neither the miner nor the node then reads.
 - **The Lattice Wallet, shared.** The UI and signer come from
   [selfhold-wallet](https://github.com/adalinxx/selfhold-wallet) (pinned submodule
   `vendor/nexus-wallet`, which pins the lattice-sdk). Keys use BIP39 +
@@ -74,9 +82,9 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   `lattice key generate` key files import as standalone accounts.
 - **Loopback only.** The webview has no network access: its CSP allows Tauri
   IPC only. Every node call goes through the shell's `node_http` command, which
-  connects only to `127.0.0.1` on the RPC port the node was started on (read
-  from `lattice.json` at launch and each time the app starts the node, never what the page
-  writes later) and attaches the node's cookie: the node's operator port
+  connects only to `127.0.0.1` on the RPC port the node was started on (the
+  merged configuration's, read at launch and each time the app starts the
+  node, never what the page sets later) and attaches the node's cookie: the node's operator port
   requires its bitcoind-style cookie (`<root>/chains/Nexus/.cookie`, rewritten
   at every node start) on everything but `/health`. Sends are
   signed in the app and submitted to the node's loopback operator route
@@ -91,17 +99,13 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   when a fee is below the node's `minRelayFee` but never clamps it.
 - **Status** comes from an inclusion lookup (block height), and **balances**
   are shown for Nexus and for the child chains the node hosts. There is one
-  chain list, the chains the node hosts: while it runs, as it reports them
-  (`GET /config`: every configuration layer's, and the ancestors they need);
-  while it is stopped, as `lattice.json` and the operator fragment list them.
-  Adding a chain in the wallet's chain picker hosts it, and a chain added on
-  the Node page appears in the picker. The app writes hosted chains to the
-  operator fragment only: through the running node (`PUT
-  /config/fragments/operator`, written only while it is still the version
-  read), which hosts them at once with no restart, or into the file while the
-  node is stopped. A list an older `lattice.json` holds is moved into the
-  fragment the first time. A chain another fragment lists stays that
-  fragment's: the app says so when asked to drop it.
+  chain list, the chains the node hosts: the merged configuration's, every
+  layer's and the ancestors they need. Adding a chain in the wallet's chain
+  picker hosts it, and a chain added on the Node page appears in the picker.
+  Hosting is `lattice child host` of that one path (through a running node,
+  which hosts it at once with no restart, or in the file while it is
+  stopped). A chain `lattice.json` or another fragment lists stays theirs:
+  the app says so, in the CLI's words, when asked to drop it.
 - **The Node page**, in Settings, is the node alone: whether it runs, with
   Start or Stop, and its chains as a tree, a child under its parent. Each row
   is a chain's name, block and peers; a chain says something only when there
@@ -110,9 +114,11 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   Pressing a row opens that chain's own page: its block and peers, the chains
   under it and a name to host another there, whom it connects to, and the way
   to stop hosting it, which asks first. Ports and pairing are folded away
-  under Advanced. Hosting or dropping a chain takes effect at once; changing
-  ports or peers restarts a running node (`POST /restart`, then the app waits
-  for the new process's `startedAt`).
+  under Advanced. Hosting or dropping a chain, or a child chain's peers, takes
+  effect at once; when the node says a change waits for a restart (`GET
+  /config`'s `pendingRestart`: ports, Nexus's peers, allowed origins) a
+  running node is restarted (`POST /restart`, then the app waits for the new
+  process's `startedAt`).
   Mining is not on this page.
 - **Settings** open from the mark at the top left, which says so, and hold
   what is set, in three groups of rows: the wallet (backup, lock), the chain
@@ -179,15 +185,17 @@ publish artifacts or create a project signing key.
 ## Tests
 
 - `npm test`: unit tests for node management (first-run scaffolding, how
-  settings map to `lattice.json` and the operator fragment, hosting at once
-  and restart-to-apply, parsing `lattice status`),
+  settings map to single CLI changes of the operator fragment, hosting one
+  path at once, restarting only when the node says a change waits for it,
+  parsing `lattice status`),
   the loopback-only fetch, and node panel wording. The keystore, fee and status
   logic is tested in nexus-wallet.
 - `cargo test --manifest-path src-tauri/Cargo.toml`: the shell only runs the
-  lifecycle verbs, only accepts loopback paths, only uses the RPC port from
-  `lattice.json`, moves hosted chains into the operator fragment and mining's
-  settings into `miner.json`, and takes the node's exits as a process manager
-  does.
+  lifecycle verbs and checked `lattice config`/`lattice child` changes, only
+  accepts loopback paths, only uses the RPC port of the merged
+  configuration, keeps mining's settings in `miner.json`, and takes the
+  node's exits as a process manager does (a stop's exit, and a start during
+  it).
 - End-to-end tests, headless:
   `LATTICE_NODE_BIN=<lattice-node>/.build/debug npm test`. They use the real
   CLI and node on throwaway storage with no peers, and nothing touches a live

@@ -58,7 +58,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::{
-    app_root, cookie_path, err, host_root, read_topology_at, rpc_port, write_atomically,
+    app_root, configured_rpc, cookie_path, err, host_root, merged_config, read_topology_at, write_atomically,
     write_new, PinnedPort, Result,
 };
 
@@ -444,7 +444,7 @@ fn wallet_exists(root: &Path, network: Network) -> bool {
         .exists()
 }
 
-/// The app's RPC port when lattice.json names none (node-manager.ts's
+/// The app's RPC port when the configuration names none (node-manager.ts's
 /// `APP_PORTS`).
 const APP_RPC_PORT: u16 = 18080;
 
@@ -453,12 +453,10 @@ const NODE_DOWN: &str =
     "Your node is not running: a new swap waits for it; a running swap's Bitcoin side goes on.";
 
 /// The app's node: on the pinned port, the one its cookie is known to go
-/// to; none pinned (the node is down), on the port `<host>/lattice.json`
-/// names, or the app's default, where it will run.
+/// to; none pinned (the node is down), on the port its merged
+/// configuration names, or the app's default, where it will run.
 fn own_node(host: &Path, pinned: Option<u16>) -> String {
-    let port = pinned
-        .or_else(|| rpc_port(&read_topology_at(&host.join("lattice.json")).ok()?).ok())
-        .unwrap_or(APP_RPC_PORT);
+    let port = pinned.or_else(|| configured_rpc(host)).unwrap_or(APP_RPC_PORT);
     format!("http://127.0.0.1:{port}")
 }
 
@@ -1650,9 +1648,11 @@ fn directory_nodes(settings: &Settings, host: &Path, pinned: Option<u16>) -> Res
     let Some(directory) = settings.relay_directory() else {
         return Ok(None);
     };
-    let hosted = read_topology_at(&host.join("lattice.json"))?
-        .and_then(|topology| topology.get("hostedChains").cloned())
-        .is_some_and(|chains| chains.as_array().is_some_and(|c| c.contains(&json!(directory.chain))));
+    // Only while it runs: then its configuration is the running node's.
+    let hosted = pinned.is_some()
+        && merged_config(host)?
+            .and_then(|config| config.get("hostedChains").cloned())
+            .is_some_and(|chains| chains.as_array().is_some_and(|c| c.contains(&json!(directory.chain))));
     let mut nodes = vec![];
     if hosted && pinned.is_some() {
         nodes.push(Client::from_cookie_file(&own_node(host, pinned), cookie_path(host), DIRECTORY_TIMEOUT));
@@ -2160,10 +2160,11 @@ mod tests {
 
     #[test]
     fn the_relay_directory_is_read_on_this_apps_node_then_the_settings_node() {
+        crate::fake_cli();
         let host = temp("directory");
         fs::create_dir_all(&host).unwrap();
         // This app's node down: nothing listens on its port, pinned as if it
-        // had just stopped answering. lattice.json's port answers, as
+        // had just stopped answering. The configuration's port answers, as
         // another chain's node, so a read sent there would be seen.
         let down = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let pinned = Some(down);
@@ -2201,7 +2202,7 @@ mod tests {
         // This app's node hosts it: read there first, and on its failure on
         // the settings' node.
         hosting(json!(["Nexus/testnet", RELAY_DIRECTORY]));
-        // Unless it runs: no port pinned, lattice.json's port is never read
+        // Unless it runs: no port pinned, the configuration's port is never read
         // with its cookie.
         assert!(directory_nodes(&signet(""), &host, None).unwrap().is_none());
         assert_eq!(directory_nodes(&signet(&theirs), &host, None).unwrap().unwrap().0.len(), 1);
@@ -2450,6 +2451,7 @@ mod tests {
 
     #[test]
     fn nex_is_read_publicly_by_default_and_a_new_swap_on_ones_own_node_only_on_the_pinned_port() {
+        crate::fake_cli();
         let root = temp("config");
         let host = root.join("host");
         // Public: no node needed, and no cookie sent.
@@ -2470,7 +2472,7 @@ mod tests {
         assert_eq!(config.dir, root.join("swap").join("bitcoin"));
         assert_eq!(start_config_at(&root, &host, Some(18555), &own).unwrap().nexus, config.nexus);
         // None pinned (the node is down): the wallet opens on the port the
-        // node will run on, lattice.json's or the app's default, but no new
+        // node will run on, the configuration's or the app's default, but no new
         // swap starts.
         assert_eq!(config_at(&root, &host, None, &own).unwrap().nexus, "http://127.0.0.1:18080");
         fs::create_dir_all(&host).unwrap();
@@ -2595,6 +2597,7 @@ mod tests {
 
     #[test]
     fn a_taken_swap_is_driven_on_ones_own_node_while_it_is_down_and_moves_to_the_servers_saved() {
+        crate::fake_cli();
         let root = temp("own-down");
         let host = root.join("host");
         let engine = Mutex::new(Engine::default());

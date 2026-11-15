@@ -9,6 +9,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,9 +28,11 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
   const host = { ...harnessHost(root), reload: () => { reloads += 1; } };
   // On the processor here, whatever this machine has; e2e-mining covers the graphics chip.
   host.ops.gpuWorker = async () => null;
-  const topology = () => JSON.parse(readFileSync(join(root, "lattice.json"), "utf8")) as Topology;
-  // The chains the app hosts are the operator fragment's; mining's settings are miner.json.
-  const operator = () => JSON.parse(readFileSync(join(root, "config.d", "operator.json"), "utf8")) as { hostedChains?: string[] };
+  // The configuration the node starts on: lattice.json and config.d, merged.
+  const topology = () => JSON.parse(execFileSync(join(bin!, "lattice"), ["config", "get", "--root", root], { encoding: "utf8" })) as Topology;
+  // The app changes only the operator fragment (through the CLI), never
+  // lattice.json; mining's settings are miner.json.
+  const operator = () => JSON.parse(readFileSync(join(root, "config.d", "operator.json"), "utf8")) as Topology;
   const miner = () => JSON.parse(readFileSync(join(root, "miner.json"), "utf8")) as MinerSettings;
   try {
     const setup = new NodeManager(host.ops, host.nodeHTTP);
@@ -60,7 +63,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await press("Start node");
     await shows(/Your nodeRunning/);
     await shows(/Local API port/);
-    const before = readFileSync(join(root, "lattice.json"), "utf8");
+    const before = readFileSync(join(root, "config.d", "operator.json"), "utf8");
     const rpc = () => document.querySelector('input[aria-label="Local API port"]') as HTMLInputElement;
     const listen = () => document.querySelector('input[aria-label="Peer port"]') as HTMLInputElement;
     // Whom a chain connects to, the chains under it and the way to stop hosting it are on the chain's own page.
@@ -100,7 +103,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     childName("Nexus").value = "testnet/payments";
     button("Add").click();
     await shows(/Type the chain's name: letters, digits, - and _\./);
-    assert.equal(readFileSync(join(root, "lattice.json"), "utf8"), before);
+    assert.equal(readFileSync(join(root, "config.d", "operator.json"), "utf8"), before);
 
     // ---- typed right: a new RPC port and a peer of the user's own; the app reloads onto the new port ----
     const newRPC = String(await freePort());
@@ -118,6 +121,8 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     button("Save").click();
     await until(() => (reloads === 1 ? true : undefined), "the app to reload for the new RPC port");
     assert.deepEqual([topology().rpc, topology().peers], [Number(newRPC), [peer]]);
+    // In the operator fragment: lattice.json's own port is another, and the node runs on the merged one.
+    assert.deepEqual([operator().rpc, (JSON.parse(readFileSync(join(root, "lattice.json"), "utf8")) as Topology).rpc === Number(newRPC)], [Number(newRPC), false]);
     document.body.replaceChildren();
     await installPage();
     app = await startApp(host);
@@ -155,7 +160,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await shows(/Balance/);
     openNode();
     await stopHosting(CHILD);
-    await until(() => (operator().hostedChains === undefined ? true : undefined), "the child no longer hosted");
+    await until(() => (topology().hostedChains === undefined ? true : undefined), "the child no longer hosted");
     await shows(/Your nodeRunning/);
     button("Back to wallet").click();
     await shows(/Balance/);
@@ -257,7 +262,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await until(() => (mined().join() === "Nexus" ? true : undefined), "Nexus alone on the Mining page");
     await shows(/MiningMining on the (graphics chip|processor)/);
     assert.deepEqual(miner().recipients, { Nexus: second });
-    assert.equal(operator().hostedChains, undefined);
+    assert.equal(topology().hostedChains, undefined);
     assert.deepEqual(topology().peers, [peer], "a chain no longer hosted takes its peers with it");
     assert.deepEqual((await app.manager.status()).map((chain) => chain.path), ["Nexus"]);
     const unhostedAt = await until(async () => nexusHeight(), "the node back up");

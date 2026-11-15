@@ -32,7 +32,7 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
     const prefs = await manager.prefs();
     assert.equal(prefs.peers, "default", "init leaves the node's built-in peers");
     await manager.configure({ ...prefs, rpc: await freePort(), listen: await freePort(), peers: "none" });
-    assert.deepEqual((await host.ops.readTopology())?.peers, [], "peers: [] = --no-default-peers");
+    assert.deepEqual((await host.ops.readConfig())?.peers, [], "peers: [] = --no-default-peers");
     assert.deepEqual(await manager.status(), [{ path: "Nexus", state: "down" }]);
     await manager.start();
     const active = await until(async () => {
