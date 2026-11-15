@@ -2418,6 +2418,7 @@ dependencies = [
  "bitcoin",
  "corepc-node",
  "ed25519-dalek",
+ "libc",
  "objc2",
  "serde",
  "serde_json",

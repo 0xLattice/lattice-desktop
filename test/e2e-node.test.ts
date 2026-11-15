@@ -26,13 +26,13 @@ import type { Vault } from "../vendor/nexus-wallet/src/lib/crypto/keystore.ts";
 test("the app's node layer: init, start, fund by mining, send with a custom fee, see inclusion, stop", { skip: !bin, timeout: 600_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "lattice-desktop-e2e-"));
   const host = harnessHost(root);
-  const manager = new NodeManager(host.ops);
+  const manager = new NodeManager(host.ops, host.nodeHTTP);
   try {
     // First run: `lattice init`, then a private node (no peers) on free ports.
     const prefs = await manager.prefs();
     assert.equal(prefs.peers, "default", "init leaves the node's built-in peers");
     await manager.configure({ ...prefs, rpc: await freePort(), listen: await freePort(), peers: "none" });
-    assert.deepEqual((await host.ops.readTopology())?.peers, [], "peers: [] = --no-default-peers");
+    assert.deepEqual((await host.ops.readConfig())?.peers, [], "peers: [] = --no-default-peers");
     assert.deepEqual(await manager.status(), [{ path: "Nexus", state: "down" }]);
     await manager.start();
     const active = await until(async () => {
@@ -91,8 +91,12 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
     // against the tip: the bundled node serves that read on the operator port.
     assert.deepEqual(await activeDeposits(url, ["Nexus"], loopback), []);
 
-    const [nexus] = await manager.status();
-    assert.ok(nexus!.height! >= included.height, "status reports the synced height");
+    // `lattice status` reads the node's published view, which follows the
+    // tip a moment later.
+    await until(async () => {
+      const [nexus] = await manager.status();
+      return nexus?.height !== undefined && nexus.height >= included.height ? nexus : undefined;
+    }, "status reports the synced height");
 
     // Pairing an extension: its origin is allowed (the node restarts with a
     // fresh cookie); with that cookie, requests from that origin are served,
@@ -117,7 +121,7 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
     } catch {}
     throw e;
   } finally {
-    await host.ops.lattice("down");
+    await host.ops.stopNode();
     rmSync(root, { recursive: true, force: true });
   }
 });

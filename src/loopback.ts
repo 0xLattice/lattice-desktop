@@ -1,7 +1,7 @@
 // Node HTTP for the webview. The page has no network reach of its own (its
 // CSP allows only Tauri IPC): every node call goes through the shell's
-// `node_http` command, which dials only 127.0.0.1 on the RPC port in
-// lattice.json. This adapts that command to the SDK's fetch.
+// `node_http` command, which dials only 127.0.0.1 on the RPC port the node
+// was started on. This adapts that command to the SDK's fetch.
 
 import type { Fetch } from "../vendor/nexus-wallet/vendor/lattice-sdk/packages/client/src/index.ts";
 

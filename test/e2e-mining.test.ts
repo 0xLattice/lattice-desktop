@@ -17,7 +17,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startApp } from "../src/app.ts";
-import { NodeManager, type Topology } from "../src/node-manager.ts";
+import { NodeManager, type MinerSettings } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import { bin, button, freePort, funded, gpuMiner, harnessHost, input, installPage, pageText, press, run, shows, until, openNode } from "./helpers/real-node.ts";
@@ -40,9 +40,9 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
   const host = harnessHost(root);
   // The app offers the graphics chip only when it carries a worker that works here.
   if (!onGPU) host.ops.gpuWorker = async () => null;
-  const topology = () => JSON.parse(readFileSync(join(root, "lattice.json"), "utf8")) as Topology;
+  const miner = () => JSON.parse(readFileSync(join(root, "miner.json"), "utf8")) as MinerSettings;
   try {
-    const setup = new NodeManager(host.ops);
+    const setup = new NodeManager(host.ops, host.nodeHTTP);
     await setup.configure({ ...(await setup.prefs()), rpc: await freePort(), listen: await freePort(), peers: "none" });
     const dom = await installPage();
     const { manager, ownNode } = await startApp(host);
@@ -99,7 +99,7 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     await shows(/MiningNot mining/);
     button("Start mining").click();
     await shows(/MiningMining on the (graphics chip|processor)/);
-    assert.deepEqual(topology().mine, { worker: onGPU ? gpuMiner : "cpu", workers: 1, recipients: { Nexus: first } });
+    assert.deepEqual(miner(), { worker: onGPU ? gpuMiner : "cpu", workers: 1, recipients: { Nexus: first } });
     console.log(`[desktop e2e] mining on the ${onGPU ? "graphics chip" : "processor"}`);
     // Proof it is working, on the screen that started it: blocks found, and when.
     await shows(/[\d,]+ blocks? found, the last at /);
@@ -136,9 +136,9 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
     workers().value = "2";
     // One Save for the lot, and it says what saving costs while mining.
     button("Save and restart mining").click();
-    await until(() => (topology().mine?.recipients?.Nexus === second ? true : undefined), "the new recipient saved");
+    await until(() => (miner().recipients?.Nexus === second ? true : undefined), "the new recipient saved");
     await shows(/MiningMining on the (graphics chip|processor)/);
-    assert.deepEqual(topology().mine, { worker: "cpu", workers: 2, recipients: { Nexus: second } });
+    assert.deepEqual(miner(), { worker: "cpu", workers: 2, recipients: { Nexus: second } });
     await until(async () => ((await balance(second)) > 0n ? true : undefined), "blocks paying the second account");
 
     // ---- stop: no more blocks ----
@@ -168,7 +168,7 @@ test("the app: mine to the wallet, change who is paid and what searches, stop", 
   } finally {
     globalThis.document?.body.replaceChildren();
     await host.ops.lattice("mine-stop");
-    await host.ops.lattice("down");
+    await host.ops.stopNode();
     rmSync(root, { recursive: true, force: true });
   }
 });

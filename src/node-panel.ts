@@ -110,7 +110,9 @@ export function peersLine(peers: number): string {
 export async function nodeNotices(manager: NodeManager, reads: Pick<NodeReads, "health" | "peers">, chain: string): Promise<Notice[]> {
   const chains = await withSync(await manager.status(), reads);
   if (chains.every((c) => c.state === "down")) {
-    return [{ text: "Your node is stopped, so nothing can be read or sent.", action: { label: "Start node", run: () => manager.start() } }];
+    // Stopped by itself: its configuration does not check, and it says why.
+    const { error } = await manager.nodeProcess();
+    return [{ text: error ?? "Your node is stopped, so nothing can be read or sent.", action: { label: "Start node", run: () => manager.start() } }];
   }
   const notices: Notice[] = [];
   const shown = chains.find((c) => c.path === chain);
@@ -218,7 +220,7 @@ async function treeRows(chains: ChainStatus[], hosted: string[], reads: NodeRead
 }
 
 /**
- * Changes which chains are hosted (the node restarts to take it), then goes
+ * Changes which chains are hosted (a running node takes it at once), then goes
  * on: to `pages.saved` when there is one, otherwise to `then`. Whoever left
  * `screen` meanwhile is not pulled back.
  */
@@ -279,7 +281,10 @@ function nodePage(pages: NodePages) {
         : rows.filter((r) => r.status?.state === "active" && r.peers === 0 && (count(parentOf(r.path)) ?? 0) > 0).map((r) => aloneOn(r.path));
       lonely.hidden = alones.length === 0;
       lonely.textContent = alones.join(" ");
-      problem.hidden = true;
+      // Stopped by itself: its configuration does not check, and it says why.
+      const { error } = await manager.nodeProcess();
+      problem.textContent = error ?? "";
+      problem.hidden = !error;
     } catch (e) {
       // A read that failed is said on its own line: what an action said stays.
       problem.textContent = (e as Error).message;
@@ -390,16 +395,16 @@ function chainPage(pages: NodePages, path: string) {
       if (!/^[A-Za-z0-9_-]{1,64}$/.test(typed)) { toast.textContent = "Type the chain's name: letters, digits, - and _."; return; }
       // Already hosted, it is only opened: nothing restarts for nothing.
       if (prefs.hostedChains.includes(`${path}/${typed}`)) return leave(() => chainPage(pages, `${path}/${typed}`))();
-      void change((hosted) => chosenChains(hosted, `${path}/${typed}`), `adding ${path}/${typed} (the node restarts)…`, () => chainPage(pages, path));
+      void change((hosted) => chosenChains(hosted, `${path}/${typed}`), `adding ${path}/${typed}…`, () => chainPage(pages, path));
     };
     other.addEventListener("keydown", (event) => { if ((event as KeyboardEvent).key === "Enter") add(); });
     const confirm = h("div", { class: "warn stack", hidden: "true" });
     const stop = h("button", { class: "btn block", onclick: () => {
       const under = prefs.hostedChains.filter((chain) => chain.startsWith(path + "/")).length;
       confirm.replaceChildren(
-        h("p", {}, `Stop hosting ${name}${under ? ` and the ${under === 1 ? "chain" : `${under} chains`} under it` : ""}? The wallet can no longer use ${under ? "them" : "it"}, and mining stops paying there. The node restarts.`),
+        h("p", {}, `Stop hosting ${name}${under ? ` and the ${under === 1 ? "chain" : `${under} chains`} under it` : ""}? The wallet can no longer use ${under ? "them" : "it"}, and mining stops paying there.`),
         h("div", { class: "row-actions" },
-          h("button", { class: "btn", "aria-label": `Stop hosting ${path}`, onclick: () => { void change((list) => list.filter((chain) => chain !== path && !chain.startsWith(path + "/")), `removing ${path} (the node restarts)…`, () => nodePage(pages)); } }, "Stop hosting"),
+          h("button", { class: "btn", "aria-label": `Stop hosting ${path}`, onclick: () => { void change((list) => list.filter((chain) => chain !== path && !chain.startsWith(path + "/")), `removing ${path}…`, () => nodePage(pages)); } }, "Stop hosting"),
           h("button", { class: "btn", onclick: () => { confirm.hidden = true; stop.hidden = false; stop.focus(); } }, "Keep it"),
         ),
       );
@@ -427,8 +432,7 @@ function chainPage(pages: NodePages, path: string) {
   const buildSeen = () => {
     body.replaceChildren(
       h("p", {}, `Your node sees ${name} under ${parent} and does not host it. Hosting it lets the wallet use it, and lets you mine it.`),
-      h("p", { class: "muted" }, "The node restarts to take it."),
-      h("button", { class: "block", "aria-label": `Host ${path}`, onclick: () => { void change((hosted) => chosenChains(hosted, path), `adding ${path} (the node restarts)…`, () => chainPage(pages, path)); } }, `Host ${name}`),
+      h("button", { class: "block", "aria-label": `Host ${path}`, onclick: () => { void change((hosted) => chosenChains(hosted, path), `adding ${path}…`, () => chainPage(pages, path)); } }, `Host ${name}`),
     );
   };
 
@@ -518,7 +522,8 @@ function connectForm(manager: NodeManager, prefs: NodePrefs, chain: string, save
   const err = h("div", { class: "toast", role: "status" });
   return h("div", { class: "stack" },
     h("label", { class: "k" }, "Connect to"), mode, peers,
-    h("p", { class: "muted" }, "Saving restarts the node if it is running."),
+    // A child chain's peers are taken at once; Nexus's at the node's next start.
+    h("p", { class: "muted" }, root ? "Saving restarts the node if it is running." : "Saved, a running node takes them at once."),
     err,
     h("button", { class: "btn block", "aria-label": `Save peers of ${chain}`, onclick: async (event: Event) => {
       const button = event.currentTarget as HTMLButtonElement;
@@ -585,7 +590,7 @@ export function miningChoices(searcher: Searcher, workers: string, chosen: Recor
   };
 }
 
-const SEARCHERS: Record<Searcher, string> = { gpu: "the graphics chip", cpu: "the processor", custom: "the worker set in lattice.json" };
+const SEARCHERS: Record<Searcher, string> = { gpu: "the graphics chip", cpu: "the processor", custom: "the worker set in miner.json" };
 
 /** An account as mining names it: its label, or its address when it is not this wallet's. */
 function payee(address: string | undefined, accounts: { label: string; address: string }[]): string {
@@ -716,7 +721,7 @@ async function miningSettings(
   const searcher = h("select", { class: "picker", "aria-label": "Search with" },
     ...(gpu ? [h("option", { value: "gpu" }, "This computer's graphics chip")] : []),
     h("option", { value: "cpu" }, "This computer's processor"),
-    ...(prefs.searcher === "custom" ? [h("option", { value: "custom" }, "The worker set in lattice.json")] : []),
+    ...(prefs.searcher === "custom" ? [h("option", { value: "custom" }, "The worker set in miner.json")] : []),
   ) as HTMLSelectElement;
   // Saved for a graphics chip this computer cannot use (now): the processor, until it is saved otherwise.
   searcher.value = prefs.searcher !== "gpu" || gpu ? prefs.searcher : "cpu";

@@ -24,7 +24,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
   const host = harnessHost(root);
   try {
     // A private node on free ports (the app's defaults may be taken on this machine).
-    const setup = new NodeManager(host.ops);
+    const setup = new NodeManager(host.ops, host.nodeHTTP);
     await setup.configure({ ...(await setup.prefs()), rpc: await freePort(), listen: await freePort(), peers: "none" });
 
     // ---- first run: no wallet, node stopped ----
@@ -119,7 +119,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
 
     // ---- a child chain exists on Nexus, but this node does not host it ----
     await run(join(bin!, "lattice"), ["child", "create", "Nexus/testnet", "--root", root, "--reward", "100000"]);
-    // `child create` restarts the node; the child's genesis is mined with the next Nexus block.
+    // A running node hosts what `child create` adds at once; the child's genesis is mined with the next Nexus block.
     await until(async () => ((await manager.status())[0]?.state === "active" ? true : undefined), "the node back up");
     await mine(root, ownNode, { Nexus: address, "Nexus/testnet": address }, 3, height);
     await until(async () => ((await manager.status()).every((c) => c.state === "active") ? true : undefined), "both chains active");
@@ -167,7 +167,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     await menuShows("Nexus/testnet", "└ testnet");
     menuItem("Nexus/testnet")!.click();
     await until(() => (badge.textContent === "Nexus/testnet▾" ? true : undefined), "the wallet on Nexus/testnet");
-    // The node restarted to take the chain: the balance reads once it is back.
+    // The node started the chain: the balance reads once it has synced.
     await until(() => {
       if (funded()) return true;
       button("Refresh balance").click();
@@ -212,7 +212,7 @@ test("the app: first run, send, lock, relaunch, host a child chain from the menu
     throw e;
   } finally {
     document.body.replaceChildren(); // the node screen stops polling once it is off the page
-    await host.ops.lattice("down");
+    await host.ops.stopNode();
     rmSync(root, { recursive: true, force: true });
   }
 });

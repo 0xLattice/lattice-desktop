@@ -18,7 +18,7 @@ test("the app starts its node when it opens: a new wallet lands on a balance, no
   const root = mkdtempSync(join(tmpdir(), "lattice-desktop-first-run-"));
   const host = { ...harnessHost(root), autoStart: true };
   try {
-    const setup = new NodeManager(host.ops);
+    const setup = new NodeManager(host.ops, host.nodeHTTP);
     await setup.configure({ ...(await setup.prefs()), rpc: await freePort(), listen: await freePort(), peers: "none" });
     await installPage();
     const { manager } = await startApp(host);
@@ -47,7 +47,7 @@ test("the app starts its node when it opens: a new wallet lands on a balance, no
     throw e;
   } finally {
     globalThis.document?.body.replaceChildren();
-    await host.ops.lattice("down");
+    await host.ops.stopNode();
     rmSync(root, { recursive: true, force: true });
   }
 });

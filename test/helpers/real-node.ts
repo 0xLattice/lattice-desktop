@@ -3,13 +3,13 @@
 // the app's real page in a DOM. Nothing here touches a live chain.
 
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AppHost } from "../../src/app.ts";
-import type { Topology } from "../../src/node-manager.ts";
+import type { CommandResult, HostOps, MinerSettings, Topology } from "../../src/node-manager.ts";
 
 /** The directory holding lattice, lattice-node and lattice-mining-coordinator. */
 export const bin = process.env.LATTICE_NODE_BIN;
@@ -45,9 +45,80 @@ export async function until<T>(probe: () => Promise<T | undefined> | T | undefin
 
 export const cookieFile = (root: string) => join(root, "chains", "Nexus", ".cookie");
 
+const readJSON = <T>(file: string): T | null => {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as T;
+  } catch {
+    return null;
+  }
+};
+
+/** `lattice <args> --root <root>`, answered as the shell answers a CLI run. */
+async function cli(root: string, args: string[]): Promise<CommandResult> {
+  try {
+    const { stdout, stderr } = await run(join(bin!, "lattice"), [...args, "--root", root]);
+    return { code: 0, stdout, stderr };
+  } catch (e) {
+    const failed = e as { code?: number; stdout?: string; stderr?: string };
+    return { code: typeof failed.code === "number" ? failed.code : 1, stdout: failed.stdout ?? "", stderr: failed.stderr ?? String(e) };
+  }
+}
+
+/**
+ * The node as the shell runs it: `lattice up` as this process's child,
+ * started again when it exits 75, left stopped on any other exit (the shell
+ * also starts it again after a crash, which no test here needs), its output
+ * appended to `<root>/log/lattice-node.log`, and the RPC port the merged
+ * configuration names when it starts pinned for `nodeHTTP`.
+ */
+function nodeProcess(root: string): Pick<HostOps, "startNode" | "stopNode" | "nodeProcess"> & { port(): number | undefined } {
+  let child: ChildProcess | undefined;
+  let wanted = false;
+  let error: string | undefined;
+  let exited = Promise.resolve();
+  let port: number | undefined;
+  const up = () => {
+    port = Number(execFileSync(join(bin!, "lattice"), ["config", "get", "rpc", "--root", root], { encoding: "utf8" }).trim());
+    mkdirSync(join(root, "log"), { recursive: true });
+    const log = openSync(join(root, "log", "lattice-node.log"), "a");
+    const running = spawn(join(bin!, "lattice"), ["up", "--root", root], { stdio: ["ignore", log, log] });
+    closeSync(log);
+    child = running;
+    exited = new Promise((done) => running.once("exit", (code) => {
+      child = undefined;
+      if (wanted && code === 75) up();
+      // A crash is started again after a pause, as the app does (its first backoff step).
+      else if (wanted && code !== 0 && code !== 78) setTimeout(() => { if (wanted && !child) up(); }, 1000);
+      else {
+        if (wanted && code === 78) error = `The node's configuration does not check (exit 78); see ${join(root, "log", "lattice-node.log")}`;
+        wanted = false;
+      }
+      done();
+    }));
+  };
+  return {
+    async startNode() {
+      wanted = true;
+      error = undefined;
+      if (!child) up();
+    },
+    async stopNode() {
+      wanted = false;
+      // Through each restart it may be in.
+      while (child) {
+        child.kill("SIGTERM");
+        await exited;
+      }
+    },
+    nodeProcess: async () => ({ running: child !== undefined, wanted, error: error ?? null }),
+    port: () => port,
+  };
+}
+
 /** The shell, in Node, over the host root `root`. The wallet's files live beside it, as in the app. */
 export function harnessHost(root: string): AppHost {
   const topologyFile = join(root, "lattice.json");
+  const minerFile = join(root, "miner.json");
   const walletDir = join(root, "wallet");
   const file = (key: string) => join(walletDir, `${key}.json`);
   const load = (key: string): unknown => (existsSync(file(key)) ? JSON.parse(readFileSync(file(key), "utf8")) : null);
@@ -55,27 +126,38 @@ export function harnessHost(root: string): AppHost {
     mkdirSync(walletDir, { recursive: true });
     writeFileSync(file(key), JSON.stringify(value));
   };
+  const node = nodeProcess(root);
+  const nodeHTTP: AppHost["nodeHTTP"] = async (method, path, body) => {
+    const response = await fetch(`http://127.0.0.1:${node.port()}${path}`, {
+      method,
+      headers: {
+        Authorization: "Basic " + btoa(readFileSync(cookieFile(root), "utf8").trim()),
+        ...(body === null ? {} : { "Content-Type": "application/json" }),
+      },
+      ...(body === null ? {} : { body }),
+    });
+    return { status: response.status, body: await response.text() };
+  };
   return {
     ops: {
-      async lattice(verb) {
-        try {
-          // "mine-start" is `lattice mine start`, as the shell maps it.
-          const { stdout, stderr } = await run(join(bin!, "lattice"), [...verb.split("-"), "--root", root]);
-          return { code: 0, stdout, stderr };
-        } catch (e) {
-          const failed = e as { code?: number; stdout?: string; stderr?: string };
-          return { code: typeof failed.code === "number" ? failed.code : 1, stdout: failed.stdout ?? "", stderr: failed.stderr ?? String(e) };
-        }
+      ...node,
+      // "mine-start" is `lattice mine start`, as the shell maps it.
+      lattice: (verb) => cli(root, verb.split("-")),
+      async readConfig() {
+        if (!existsSync(topologyFile)) return null;
+        const said = await cli(root, ["config", "get"]);
+        if (said.code !== 0) throw new Error(said.stderr);
+        return JSON.parse(said.stdout) as Topology;
       },
-      async readTopology() {
-        try {
-          return JSON.parse(readFileSync(topologyFile, "utf8")) as Topology;
-        } catch {
-          return null;
-        }
+      async setConfig(set, unset) {
+        const assignments = Object.entries(set).map(([key, value]) => `${key}=${JSON.stringify(value)}`);
+        const said = assignments.length ? await cli(root, ["config", "set", ...assignments]) : { code: 0, stdout: "", stderr: "" };
+        return said.code !== 0 || unset.length === 0 ? said : cli(root, ["config", "unset", ...unset]);
       },
-      async writeTopology(topology) {
-        writeFileSync(topologyFile, JSON.stringify(topology, null, 2));
+      hostChain: (path, hosted) => cli(root, ["child", hosted ? "host" : "unhost", path]),
+      readMiner: async () => readJSON<MinerSettings>(minerFile) ?? readJSON<Topology & { mine?: MinerSettings }>(topologyFile)?.mine ?? null,
+      async writeMiner(settings) {
+        writeFileSync(minerFile, JSON.stringify(settings, null, 2));
       },
       gpuWorker: async () => gpuMiner ?? null,
       gpuWorkerUsable: async () => gpuMiner !== undefined,
@@ -87,18 +169,7 @@ export function harnessHost(root: string): AppHost {
         }
       },
     },
-    async nodeHTTP(method, path, body) {
-      const { rpc } = JSON.parse(readFileSync(topologyFile, "utf8")) as Topology;
-      const response = await fetch(`http://127.0.0.1:${rpc}${path}`, {
-        method,
-        headers: {
-          Authorization: "Basic " + btoa(readFileSync(cookieFile(root), "utf8").trim()),
-          ...(body === null ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(body === null ? {} : { body }),
-      });
-      return { status: response.status, body: await response.text() };
-    },
+    nodeHTTP,
     async nodeCookie() {
       try {
         return readFileSync(cookieFile(root), "utf8").trim();

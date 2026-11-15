@@ -13,8 +13,16 @@ node in WSL (`src-tauri/src/wsl.rs`). The graphics-chip mining worker is each
 platform's own: Metal on macOS, OpenCL on Linux and Windows.
 
 - **Your own full node.** The app runs the bundled, unmodified `lattice-node`
-  through the bundled `lattice` CLI (`init` / `up` / `down` / `status`), exactly
-  as an operator would. The host root is
+  through the bundled `lattice` CLI (`init` / `up` / `status`), exactly
+  as an operator would, and is the node's process manager: it runs
+  `lattice up` (which becomes `lattice-node --root <root>`) as its own child
+  and acts on how it exits, as systemd's `Restart=on-failure` with
+  `RestartPreventExitStatus=78` would. A restart (exit 75) starts it again at
+  once; a stop (exit 0) leaves it stopped; a configuration that does not check
+  (exit 78) leaves it stopped, and the app shows the node's own last lines;
+  any other exit starts it again after a delay that doubles up to a minute.
+  The node's output goes to `<root>/log/lattice-node.log`, moved aside to
+  `lattice-node.log.1` at 8 MiB. The host root is
   `~/Library/Application Support/Lattice/host`. On first run the app scaffolds it
   with `lattice init` and gives the node its own ports (RPC 18080, peers 14001)
   so that it doesn't clash with a CLI-managed host on 8080/4001. Nexus bootstrap
@@ -22,13 +30,25 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   page in Settings (built-in, your own list, or none). Opening the app starts
   the node, and the wallet's home screen says what it is doing until it is in
   sync: stopped (with a Start button), starting, or how far along it is.
-  Quitting the app stops the node cleanly (`lattice down`, which can take a
-  few seconds). If the app is
-  killed or crashes, the node keeps running; the next launch finds it by its
-  pidfile. The app may change only `rpc`, `listen`, `peers` and `hostedChains`
-  in `lattice.json`, and of `mine` only `workers`, `recipients`, and `worker`
-  as one of the two bundled workers. Other fields, such as public listeners
-  and mining's tuning, are left to the operator.
+  Stopping it from the app, or quitting the app, stops the node cleanly
+  (SIGTERM, which the node takes as `POST /stop`; `lattice down` on Windows,
+  where the child is `wsl.exe`, asked again each second while a node still
+  starting has no RPC to take it), which can take a few seconds. Starting it
+  while it stops starts it again once it has exited. A node left
+  running by an app that was killed or crashed is stopped when the app next
+  starts its node, so the node running is always the app's own child. The
+  app's node settings have one home, the `operator` configuration fragment
+  (`config.d/operator.json`), changed only through the bundled CLI, one key
+  or chain at a time: `lattice config set|unset` of `rpc`, `listen`,
+  `peers.<chain>` and `rpcAllowedOrigins`, and `lattice child host|unhost`
+  of one chain path, so an ancestor a hosted chain needs stays implied. The
+  app reads the merged configuration (`lattice config get`). It never writes
+  `lattice.json`: what an older install set there stays, as the base layer,
+  and a chain or peer listed there or in another fragment is not removed by
+  the app (the CLI says where it is). Of the miner's settings (`miner.json`)
+  the app changes only `workers`, `recipients`, and
+  `worker` as one of the two bundled workers. Other fields, such as public
+  listeners and mining's tuning, are left to the operator.
 - **Mining** (a button beside Send and Receive) runs the bundled `lattice mine` loop on this node,
   searching on this computer's graphics chip (the bundled worker from
   [lattice-miner-gpu](https://github.com/0xLattice/lattice-miner-gpu), the
@@ -49,8 +69,10 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   says so. A chain set to pay no one is warned about on both pages. The wallet's
   home screen says when it is mining. Stopping the node or quitting the app
   stops mining first. The page can choose only between the two bundled workers:
-  a custom `mine.worker` set by hand in `lattice.json` is shown and kept, but
-  set only by hand.
+  a custom `worker` set by hand in `miner.json` is shown and kept, but
+  set only by hand. Settings an older `lattice.json` holds under `mine` are
+  read until the app first saves mining's settings to `miner.json`; they are
+  left in `lattice.json`, which neither the miner nor the node then reads.
 - **The Lattice Wallet, shared.** The UI and signer come from
   [selfhold-wallet](https://github.com/adalinxx/selfhold-wallet) (pinned submodule
   `vendor/nexus-wallet`, which pins the lattice-sdk). Keys use BIP39 +
@@ -60,9 +82,9 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   `lattice key generate` key files import as standalone accounts.
 - **Loopback only.** The webview has no network access: its CSP allows Tauri
   IPC only. Every node call goes through the shell's `node_http` command, which
-  connects only to `127.0.0.1` on the RPC port the node was started on (read
-  from `lattice.json` at launch and at each `lattice up`, never what the page
-  writes later) and attaches the node's cookie: the node's operator port
+  connects only to `127.0.0.1` on the RPC port the node was started on (the
+  merged configuration's, read at launch and each time the app starts the
+  node, never what the page sets later) and attaches the node's cookie: the node's operator port
   requires its bitcoind-style cookie (`<root>/chains/Nexus/.cookie`, rewritten
   at every node start) on everything but `/health`. Sends are
   signed in the app and submitted to the node's loopback operator route
@@ -77,9 +99,13 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   when a fee is below the node's `minRelayFee` but never clamps it.
 - **Status** comes from an inclusion lookup (block height), and **balances**
   are shown for Nexus and for the child chains the node hosts. There is one
-  chain list, `hostedChains` in `lattice.json`: adding a chain in the wallet's
-  chain picker hosts it, and a chain added on the Node page appears in the
-  picker (a running node restarts to take either).
+  chain list, the chains the node hosts: the merged configuration's, every
+  layer's and the ancestors they need. Adding a chain in the wallet's chain
+  picker hosts it, and a chain added on the Node page appears in the picker.
+  Hosting is `lattice child host` of that one path (through a running node,
+  which hosts it at once with no restart, or in the file while it is
+  stopped). A chain `lattice.json` or another fragment lists stays theirs:
+  the app says so, in the CLI's words, when asked to drop it.
 - **The Node page**, in Settings, is the node alone: whether it runs, with
   Start or Stop, and its chains as a tree, a child under its parent. Each row
   is a chain's name, block and peers; a chain says something only when there
@@ -88,7 +114,11 @@ platform's own: Metal on macOS, OpenCL on Linux and Windows.
   Pressing a row opens that chain's own page: its block and peers, the chains
   under it and a name to host another there, whom it connects to, and the way
   to stop hosting it, which asks first. Ports and pairing are folded away
-  under Advanced. Hosting or dropping a chain restarts a running node.
+  under Advanced. Hosting or dropping a chain, or a child chain's peers, takes
+  effect at once; when the node says a change waits for a restart (`GET
+  /config`'s `pendingRestart`: ports, Nexus's peers, allowed origins) a
+  running node is restarted (`POST /restart`, then the app waits for the new
+  process's `startedAt`).
   Mining is not on this page.
 - **Settings** open from the mark at the top left, which says so, and hold
   what is set, in three groups of rows: the wallet (backup, lock), the chain
@@ -155,18 +185,24 @@ publish artifacts or create a project signing key.
 ## Tests
 
 - `npm test`: unit tests for node management (first-run scaffolding, how
-  settings map to `lattice.json`, restart-to-apply, parsing `lattice status`),
+  settings map to single CLI changes of the operator fragment, hosting one
+  path at once, restarting only when the node says a change waits for it,
+  parsing `lattice status`),
   the loopback-only fetch, and node panel wording. The keystore, fee and status
   logic is tested in nexus-wallet.
 - `cargo test --manifest-path src-tauri/Cargo.toml`: the shell only runs the
-  lifecycle verbs, only accepts loopback paths, and only uses the RPC port from
-  `lattice.json`.
+  lifecycle verbs and checked `lattice config`/`lattice child` changes, only
+  accepts loopback paths, only uses the RPC port of the merged
+  configuration, keeps mining's settings in `miner.json`, and takes the
+  node's exits as a process manager does (a stop's exit, and a start during
+  it).
 - End-to-end tests, headless:
   `LATTICE_NODE_BIN=<lattice-node>/.build/debug npm test`. They use the real
   CLI and node on throwaway storage with no peers, and nothing touches a live
   chain. `e2e-node` drives the node-management layer alone. The others run the
   app itself (`src/app.ts` on its own page) with a Node harness standing in
-  for the shell, and click through it as a person would:
+  for the shell (and for its process management: it starts the node again on
+  exit 75), and click through it as a person would:
   - `e2e-app`: first run with the node stopped, a send with a custom fee, a
     wrong password, a relaunch, hosting a child chain from the chain menu, and
     the node being killed under the app.
