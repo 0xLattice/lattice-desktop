@@ -31,6 +31,10 @@ tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 
+# SIGTERM for the node the app runs (see `node_process`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Holds the Dock's Quit (see `background::terminate`); the version tao uses.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

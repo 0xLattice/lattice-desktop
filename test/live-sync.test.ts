@@ -22,7 +22,7 @@ test("live: the app's node syncs Nexus from its built-in peers, and the wallet r
   const host = harnessHost(root);
   try {
     // Free ports only: the peers stay the node's built-in ones, as on a first run.
-    const setup = new NodeManager(host.ops);
+    const setup = new NodeManager(host.ops, host.nodeHTTP);
     const prefs = await setup.prefs();
     assert.equal(prefs.peers, "default");
     await setup.configure({ ...prefs, rpc: await freePort(), listen: await freePort() });
@@ -66,7 +66,7 @@ test("live: the app's node syncs Nexus from its built-in peers, and the wallet r
     throw e;
   } finally {
     document.body?.replaceChildren();
-    await host.ops.lattice("down");
+    await host.ops.stopNode();
     rmSync(root, { recursive: true, force: true });
   }
 });

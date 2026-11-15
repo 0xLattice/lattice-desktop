@@ -51,7 +51,7 @@ export interface AppHost {
 }
 
 export async function startApp(host: AppHost) {
-  const manager = new NodeManager(host.ops);
+  const manager = new NodeManager(host.ops, host.nodeHTTP);
   // First run scaffolds the host root (`lattice init`); the node is started by the user.
   const ownNode = await manager.rpcURL();
 
@@ -139,8 +139,8 @@ export async function startApp(host: AppHost) {
     camera: true,
     saveFile: host.saveBackup,
     print: host.print,
-    // One chain list: the chains this node hosts (lattice.json). Adding one in
-    // the wallet hosts it (a running node restarts).
+    // One chain list: the chains this node hosts. Adding one in the wallet
+    // hosts it (a running node starts it at once).
     chains: {
       list: () => manager.chains(),
       add: (chain) => manager.addHostedChain(chain),

@@ -25,7 +25,7 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
   let autoLockMs = 10 * 60 * 1000;
   const host = { ...harnessHost(root), get autoLockMs() { return autoLockMs; } };
   try {
-    const setup = new NodeManager(host.ops);
+    const setup = new NodeManager(host.ops, host.nodeHTTP);
     await setup.configure({ ...(await setup.prefs()), rpc: await freePort(), listen: await freePort(), peers: "none" });
     const dom = await installPage();
     const { manager, ownNode } = await startApp(host);
@@ -196,8 +196,8 @@ test("the app: key file import, auto-lock mid-send, fee replacement, backup and 
     throw e;
   } finally {
     document.body.replaceChildren();
-    await host.ops.lattice("down");
-    await harnessHost(other).ops.lattice("down");
+    await host.ops.stopNode();
+    await harnessHost(other).ops.stopNode();
     rmSync(root, { recursive: true, force: true });
     rmSync(other, { recursive: true, force: true });
   }

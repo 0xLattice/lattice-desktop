@@ -36,7 +36,7 @@ test("the app: sell on the child chain, buy on the parent, withdraw", { skip: !b
   const root = mkdtempSync(join(tmpdir(), "lattice-desktop-trade-"));
   const host = harnessHost(root);
   try {
-    const setup = new NodeManager(host.ops);
+    const setup = new NodeManager(host.ops, host.nodeHTTP);
     await setup.configure({ ...(await setup.prefs()), rpc: await freePort(), listen: await freePort(), peers: "none" });
     const dom = await installPage();
     const { manager, ownNode } = await startApp(host);
@@ -187,7 +187,7 @@ test("the app: sell on the child chain, buy on the parent, withdraw", { skip: !b
     throw e;
   } finally {
     document.body.replaceChildren();
-    await host.ops.lattice("down");
+    await host.ops.stopNode();
     rmSync(root, { recursive: true, force: true });
   }
 });

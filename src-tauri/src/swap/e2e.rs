@@ -117,12 +117,6 @@ impl Nexus {
             .args(["--websocket-port", "0", "--no-default-peers"])
             .args(["--public-read-port", &public.to_string(), "--public-submit"])
             // No rate limits: the engine polls fast here.
-            .args([
-                "--public-read-rate",
-                "0",
-                "--public-read-expensive-rate",
-                "0",
-            ])
             .args(["--public-read-max-rate", "0", "--public-submit-rate", "0"])
             .stdout(out.try_clone().unwrap())
             .stderr(out)

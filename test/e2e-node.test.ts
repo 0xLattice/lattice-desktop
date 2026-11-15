@@ -26,7 +26,7 @@ import type { Vault } from "../vendor/nexus-wallet/src/lib/crypto/keystore.ts";
 test("the app's node layer: init, start, fund by mining, send with a custom fee, see inclusion, stop", { skip: !bin, timeout: 600_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "lattice-desktop-e2e-"));
   const host = harnessHost(root);
-  const manager = new NodeManager(host.ops);
+  const manager = new NodeManager(host.ops, host.nodeHTTP);
   try {
     // First run: `lattice init`, then a private node (no peers) on free ports.
     const prefs = await manager.prefs();
@@ -117,7 +117,7 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
     } catch {}
     throw e;
   } finally {
-    await host.ops.lattice("down");
+    await host.ops.stopNode();
     rmSync(root, { recursive: true, force: true });
   }
 });

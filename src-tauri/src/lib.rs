@@ -1,16 +1,23 @@
 //! The Lattice Desktop shell. Everything privileged lives here, behind a few
 //! narrow commands the page invokes:
 //!
-//! - `lattice`: the bundled `lattice` CLI's lifecycle verbs (init/up/down/
-//!   status) against the app's host root. `lattice up` spawns the bundled
-//!   `lattice-node`; the app never runs the node any other way.
+//! - `lattice`: the bundled `lattice` CLI's verbs (init/status, and the
+//!   mining loop's) against the app's host root.
+//! - `node_start` / `node_stop` / `node_process`: the node itself, which the
+//!   app runs as its own child (`lattice up`, which becomes the bundled
+//!   `lattice-node`) and starts again as a process manager would (see
+//!   `node_process`); the app never runs the node any other way.
 //! - `read_topology` / `write_topology`: the host's `lattice.json`.
+//! - `operator_chains` / `host_chains`: the chains the app hosts, in the
+//!   `operator` configuration fragment (`config.d/operator.json`).
+//! - `read_miner` / `write_miner`: the mining loop's settings (`miner.json`).
 //! - `store_get` / `store_set` / `store_remove`: the wallet's vault and
 //!   settings, as 0600 files.
 //! - `node_http`: HTTP to 127.0.0.1 on the RPC port the node was started on
-//!   (pinned at app launch and at each `lattice up`, never whatever the page
-//!   writes later), and nowhere else (the page's CSP gives it no network of
-//!   its own). It attaches the node's cookie: the operator port requires it.
+//!   (pinned at app launch and each time the app starts the node, never
+//!   whatever the page writes later), and nowhere else (the page's CSP gives
+//!   it no network of its own). It attaches the node's cookie: the operator
+//!   port requires it.
 //! - `node_cookie`: that cookie, for pairing a browser extension.
 //! - `save_backup`: an encrypted wallet backup as a new 0600 text file in
 //!   ~/Downloads (the webview has no downloads of its own).
@@ -18,7 +25,7 @@
 //! - `swap_*`: buying NEX with BTC, on lattice-swap's native engine (see
 //!   `swap`), its status sent to the page as events.
 //!
-//! On quit the shell stops the node with `lattice down`. While a swap needs
+//! On quit the shell stops the mining loop and the node. While a swap needs
 //! the app, it keeps running in the tray, and a quit asks first (see
 //! `background`).
 //!
@@ -26,6 +33,7 @@
 //! default distribution, and the CLI is run there.
 
 mod background;
+mod node_process;
 mod swap;
 mod wsl;
 
@@ -40,17 +48,18 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow, WindowEvent};
 
 /// The RPC port the node was started on: read from lattice.json at launch
-/// (a node left running by an earlier session) and at each successful
-/// `lattice up`. The page can rewrite lattice.json, but `node_http` and the
+/// (a node left running by an earlier session) and each time the app starts
+/// the node. The page can rewrite lattice.json, but `node_http` and the
 /// cookie go only to this port.
 struct PinnedPort(Mutex<Option<u16>>);
 
-/// The CLI invocations the page may ask for, by name: the node's lifecycle,
-/// and the mining loop's (`lattice mine start|stop|status`).
+/// The CLI invocations the shell runs, by name: the host's setup and status,
+/// stopping a node (`POST /stop`), and the mining loop's (`lattice mine
+/// start|stop|status`). Never `lattice up`: it runs until the node exits, and
+/// only `node_process` runs the node.
 fn verb_arguments(verb: &str) -> Option<&'static [&'static str]> {
     match verb {
         "init" => Some(&["init"]),
-        "up" => Some(&["up"]),
         "down" => Some(&["down"]),
         "status" => Some(&["status"]),
         "mine-start" => Some(&["mine", "start"]),
@@ -151,38 +160,43 @@ fn run_lattice(root: &Path, verb: &str) -> Result<CommandResult> {
 }
 
 #[tauri::command]
-async fn lattice(app: AppHandle, pinned: State<'_, PinnedPort>, verb: String) -> Result<CommandResult> {
+async fn lattice(app: AppHandle, verb: String) -> Result<CommandResult> {
     let root = host_root(&app)?;
-    let verb_name = verb.clone();
     if verb == "mine-start" {
-        let topology = topology_path(&app)?;
+        let miner_root = root.clone();
         // Settings saved when the graphics chip worked (or copied from a
         // machine where it did) must not start a loop that finds nothing.
         let usable = tauri::async_runtime::spawn_blocking(move || -> Result<bool> {
-            Ok(!mines_on_gpu(&topology)? || gpu_searches())
+            Ok(!mines_on_gpu(&miner_root)? || gpu_searches())
         })
         .await
         .map_err(err)??;
         if !usable {
             return Err(NO_GPU.into());
         }
-        repoint_gpu_worker(&topology_path(&app)?, gpu_worker_path().as_deref())?;
+        repoint_gpu_worker(&root, gpu_worker_path().as_deref())?;
     }
-    let result = tauri::async_runtime::spawn_blocking(move || run_lattice(&root, &verb))
+    tauri::async_runtime::spawn_blocking(move || run_lattice(&root, &verb))
         .await
-        .map_err(err)??;
-    if result.code == 0 {
-        let mut pin = pinned.0.lock().map_err(err)?;
-        let configured = rpc_port(&read_topology_at(&topology_path(&app)?)?).ok();
-        let before = *pin;
-        *pin = next_pin(*pin, &verb_name, configured);
-        // The swap wallet reaches NEX on the pinned port: opened on one, and
-        // again on a new one.
-        if pin.is_some() && *pin != before {
-            sync_swaps(&app);
-        }
-    }
-    Ok(result)
+        .map_err(err)?
+}
+
+/// Starts the node (see `node_process`); resolves once it is running.
+#[tauri::command]
+async fn node_start(app: AppHandle) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || node_process::start(&app)).await.map_err(err)?
+}
+
+/// Stops the node; resolves once it has exited.
+#[tauri::command]
+async fn node_stop(app: AppHandle) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || node_process::stop(&app)).await.map_err(err)?
+}
+
+/// Whether the app runs the node, and why it stopped by itself when it did.
+#[tauri::command]
+fn node_process(process: State<'_, node_process::NodeProcess>) -> Result<node_process::Report> {
+    process.report()
 }
 
 /// Opens the swap wallet on the pinned port, off this thread, its swaps
@@ -196,17 +210,6 @@ fn sync_swaps(app: &AppHandle) {
     });
 }
 
-/// The pin after a successful lifecycle verb. `lattice up` against a running
-/// node exits 0 without restarting it, so a pin is only taken while none is
-/// held: the port moves only across a `down` (which clears it) and `up`.
-fn next_pin(current: Option<u16>, verb: &str, configured: Option<u16>) -> Option<u16> {
-    match verb {
-        "down" => None,
-        "up" => current.or(configured),
-        _ => current,
-    }
-}
-
 /// The GPU mining worker is this platform's own program everywhere: Metal on
 /// macOS, OpenCL on Linux and on Windows, where it is the one bundled binary
 /// that is not a Linux one (WSL offers Linux programs no graphics chip the
@@ -218,14 +221,14 @@ fn gpu_worker_file() -> Option<PathBuf> {
     bundled(GPU_WORKER).ok().filter(|path| path.is_file())
 }
 
-/// The bundled GPU worker's path as lattice.json names it, which is how the
+/// The bundled GPU worker's path as miner.json names it, which is how the
 /// mining loop reaches it.
 #[cfg(not(windows))]
 fn gpu_worker_path() -> Option<String> {
     gpu_worker_file().map(|path| path.to_string_lossy().into_owned())
 }
 
-/// The bundled GPU worker's path as lattice.json names it, which is how the
+/// The bundled GPU worker's path as miner.json names it, which is how the
 /// mining loop reaches it: from inside WSL, where Windows' drives are mounted.
 #[cfg(windows)]
 fn gpu_worker_path() -> Option<String> {
@@ -284,16 +287,16 @@ fn gpu_searches() -> bool {
     *SEARCHES.get_or_init(|| gpu_worker_searches(&file, GPU_PROBE_PATIENCE))
 }
 
-/// Whether lattice.json has mining search with a GPU worker (by file name:
-/// the path is repointed at this build's before it is used).
-fn mines_on_gpu(topology: &Path) -> Result<bool> {
-    let current = read_topology_at(topology)?;
-    let worker = current.as_ref().and_then(|t| t.pointer("/mine/worker")).and_then(Value::as_str);
+/// Whether the miner's settings have it search with a GPU worker (by file
+/// name: the path is repointed at this build's before it is used).
+fn mines_on_gpu(root: &Path) -> Result<bool> {
+    let current = miner_settings(root)?;
+    let worker = current.as_ref().and_then(|t| t.get("worker")).and_then(Value::as_str);
     Ok(worker.is_some_and(|worker| Path::new(worker).file_name().is_some_and(|name| name == GPU_WORKER)))
 }
 
 /// The bundled GPU worker's path, the only worker path the page may name
-/// back to `write_topology`: None in a build that carries none.
+/// back to `write_miner`: None in a build that carries none.
 #[tauri::command]
 async fn gpu_worker() -> Option<String> {
     tauri::async_runtime::spawn_blocking(gpu_worker_path).await.ok().flatten()
@@ -319,16 +322,55 @@ fn tail(path: &Path, most: usize) -> String {
     String::from_utf8_lossy(&bytes[start..]).into_owned()
 }
 
-/// lattice.json names the GPU worker by its path inside this app. If the app
-/// was moved since, point it at where the worker is now, so mining does not
-/// fail on (or run) a file at the old place.
-fn repoint_gpu_worker(topology: &Path, bundled: Option<&str>) -> Result<()> {
-    let Some(mut current) = read_topology_at(topology)? else { return Ok(()) };
-    let Some(worker) = current.pointer("/mine/worker").and_then(Value::as_str) else { return Ok(()) };
+/// The miner's settings name the GPU worker by its path inside this app. If
+/// the app was moved since, point them at where the worker is now, so mining
+/// does not fail on (or run) a file at the old place.
+fn repoint_gpu_worker(root: &Path, bundled: Option<&str>) -> Result<()> {
+    let Some(mut current) = miner_settings(root)? else { return Ok(()) };
+    let Some(worker) = current.get("worker").and_then(Value::as_str) else { return Ok(()) };
     let names_gpu = Path::new(worker).file_name().is_some_and(|name| name == GPU_WORKER);
     let Some(bundled) = bundled.filter(|path| names_gpu && *path != worker) else { return Ok(()) };
-    current["mine"]["worker"] = Value::from(bundled);
-    write_atomically(topology, &serde_json::to_vec_pretty(&current).map_err(err)?, 0o644)
+    current["worker"] = Value::from(bundled);
+    write_miner_settings(root, &current)
+}
+
+/// The mining loop's settings, as it reads them: `<root>/miner.json`, or,
+/// while there is none, the `mine` object an older lattice.json holds (which
+/// the miner copies to miner.json, without its `enabled`, when it starts).
+fn miner_settings(root: &Path) -> Result<Option<Value>> {
+    if let Some(settings) = read_topology_at(&root.join("miner.json"))? {
+        return Ok(Some(settings));
+    }
+    let mut mine = read_topology_at(&root.join("lattice.json"))?.and_then(|mut t| t.get_mut("mine").map(Value::take));
+    if let Some(Value::Object(fields)) = mine.as_mut() {
+        fields.remove("enabled");
+    }
+    Ok(mine)
+}
+
+/// Writes miner.json, and drops the `mine` object an older lattice.json
+/// still holds: the miner reads miner.json from now on, and the node ignores it.
+fn write_miner_settings(root: &Path, settings: &Value) -> Result<()> {
+    write_atomically(&root.join("miner.json"), &serde_json::to_vec_pretty(settings).map_err(err)?, 0o644)?;
+    let topology = root.join("lattice.json");
+    if let Some(mut current) = read_topology_at(&topology)? {
+        if current.as_object_mut().and_then(|fields| fields.remove("mine")).is_some() {
+            write_atomically(&topology, &serde_json::to_vec_pretty(&current).map_err(err)?, 0o644)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn read_miner(app: AppHandle) -> Result<Option<Value>> {
+    miner_settings(&host_root(&app)?)
+}
+
+#[tauri::command]
+fn write_miner(app: AppHandle, settings: Value) -> Result<()> {
+    let root = host_root(&app)?;
+    let merged = merged_mine(miner_settings(&root)?.as_ref(), &settings, gpu_worker_path().as_deref())?;
+    write_miner_settings(&root, &merged)
 }
 
 /// The cookie the node writes at every start (`lattice up` gives it
@@ -424,14 +466,16 @@ fn synced(file: &fs::File, path: &Path) -> Result<()> {
 /// The lattice.json fields the page may set. Everything else (public
 /// listeners, external address, ...) is the operator's, edited by hand: the
 /// page cannot expose the node or point `node_http` elsewhere beyond choosing
-/// the node's own loopback RPC port. Of `mine` it may set only who is paid,
-/// how many workers search, and which bundled worker does (see `merged_mine`).
-const MANAGED: [&str; 5] = ["rpc", "listen", "peers", "hostedChains", "rpcAllowedOrigins"];
+/// the node's own loopback RPC port. Hosted chains are in the `operator`
+/// fragment (`host_chains`), and mining's settings in miner.json, of which
+/// the page may set only who is paid, how many workers search, and which
+/// bundled worker does (see `merged_mine`).
+const MANAGED: [&str; 4] = ["rpc", "listen", "peers", "rpcAllowedOrigins"];
 
 /// The most CPU workers the page may ask for.
 const MAX_WORKERS: u64 = 64;
 
-/// A chain path as lattice.json keys mining maps: `Nexus` or `Nexus/a/b`.
+/// A chain path as configuration names one: `Nexus` or `Nexus/a/b`.
 fn is_chain_path(value: &str) -> bool {
     let mut parts = value.split('/');
     parts.next() == Some("Nexus")
@@ -445,7 +489,7 @@ fn is_address(value: &str) -> bool {
         && value.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
-/// `current`'s mining section with the page's choices applied: the worker
+/// `current` mining settings with the page's choices applied: the worker
 /// count, each chain's recipient, and optionally which bundled worker
 /// searches. `mine.worker` is a program the CLI runs, so the page may name
 /// only `cpu` (the CLI's own bundled worker) or `gpu_worker`, the GPU worker
@@ -499,10 +543,10 @@ fn is_origin(value: &str) -> bool {
 }
 
 /// `current` with the page's managed fields applied (an absent `peers` or
-/// `hostedChains` removes it); anything else from the page is refused.
-fn merged_topology(current: Value, update: &Value, gpu_worker: Option<&str>) -> Result<Value> {
+/// `rpcAllowedOrigins` removes it); anything else from the page is refused.
+fn merged_topology(current: Value, update: &Value) -> Result<Value> {
     let update = update.as_object().ok_or("lattice.json must be an object")?;
-    if let Some(key) = update.keys().find(|k| !MANAGED.contains(&k.as_str()) && k.as_str() != "mine") {
+    if let Some(key) = update.keys().find(|k| !MANAGED.contains(&k.as_str())) {
         return Err(format!("refused: lattice.json field {key}"));
     }
     for port in ["rpc", "listen"] {
@@ -510,10 +554,8 @@ fn merged_topology(current: Value, update: &Value, gpu_worker: Option<&str>) -> 
             .map_err(|_| format!("{port} must be a port"))?;
     }
     let strings = |v: &Value| v.as_array().is_some_and(|a| a.iter().all(Value::is_string));
-    for list in ["hostedChains", "rpcAllowedOrigins"] {
-        if update.get(list).is_some_and(|v| !strings(v)) {
-            return Err(format!("{list} must be a list of strings"));
-        }
+    if update.get("rpcAllowedOrigins").is_some_and(|v| !strings(v)) {
+        return Err("rpcAllowedOrigins must be a list of strings".into());
     }
     // Nexus's list, or a list per chain path.
     if let Some(v) = update.get("peers") {
@@ -538,11 +580,6 @@ fn merged_topology(current: Value, update: &Value, gpu_worker: Option<&str>) -> 
             }
         }
     }
-    // Mining is left as it is unless the page sends its part of it.
-    if let Some(mine) = update.get("mine") {
-        let merged = merged_mine(out.get("mine"), mine, gpu_worker)?;
-        out.insert("mine".into(), merged);
-    }
     Ok(Value::Object(out))
 }
 
@@ -550,9 +587,115 @@ fn merged_topology(current: Value, update: &Value, gpu_worker: Option<&str>) -> 
 fn write_topology(app: AppHandle, topology: Value) -> Result<()> {
     let path = topology_path(&app)?;
     let current = read_topology_at(&path)?.ok_or("no lattice.json; run lattice init first")?;
-    let merged = merged_topology(current, &topology, gpu_worker_path().as_deref())?;
+    let merged = merged_topology(current, &topology)?;
     let bytes = serde_json::to_vec_pretty(&merged).map_err(err)?;
     write_atomically(&path, &bytes, 0o644)
+}
+
+/// The `operator` fragment, the configuration layer that holds the chains
+/// the app hosts (and that `lattice child host` writes too).
+fn operator_fragment(root: &Path) -> PathBuf {
+    root.join("config.d").join("operator.json")
+}
+
+/// `fragment` with `hostedChains` set to `chains` (none: left out), its other keys kept.
+fn with_hosted(fragment: Option<Value>, chains: &[String]) -> Result<Value> {
+    let mut fields = match fragment {
+        None => serde_json::Map::new(),
+        Some(Value::Object(fields)) => fields,
+        Some(_) => return Err("config.d/operator.json is not a JSON object".into()),
+    };
+    fields.remove("hostedChains");
+    if !chains.is_empty() {
+        fields.insert("hostedChains".into(), Value::from(chains.to_vec()));
+    }
+    Ok(Value::Object(fields))
+}
+
+/// The chains the operator fragment lists, from its file.
+#[tauri::command]
+fn operator_chains(app: AppHandle) -> Result<Vec<String>> {
+    let fragment = read_topology_at(&operator_fragment(&host_root(&app)?))?;
+    let listed = fragment.as_ref().and_then(|f| f.get("hostedChains")).and_then(Value::as_array);
+    Ok(listed.map(|chains| chains.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default())
+}
+
+/// Sets the chains the operator fragment lists. A running node is told
+/// through its API, and hosts them (and their ancestors) at once; a stopped
+/// one's file is written, for its next start. A list lattice.json still holds
+/// from before is moved into the fragment, so the app's chains are in one place.
+#[tauri::command]
+async fn host_chains(app: AppHandle, pinned: State<'_, PinnedPort>, process: State<'_, node_process::NodeProcess>, chains: Vec<String>) -> Result<()> {
+    if let Some(bad) = chains.iter().find(|c| !is_chain_path(c) || c.as_str() == "Nexus") {
+        return Err(format!("not a child chain path: {bad}"));
+    }
+    let root = host_root(&app)?;
+    let port = *pinned.0.lock().map_err(err)?;
+    let node = port.filter(|_| process.report().is_ok_and(|p| p.running)).map(|port| (port, cookie_authorization(&root)));
+    tauri::async_runtime::spawn_blocking(move || set_hosted(&root, node, &chains)).await.map_err(err)?
+}
+
+fn set_hosted(root: &Path, node: Option<(u16, Option<String>)>, chains: &[String]) -> Result<()> {
+    let topology = root.join("lattice.json");
+    let before = read_topology_at(&topology)?;
+    // Out of lattice.json first, so a running node, re-reading its layers
+    // once the fragment changes, drops a chain only lattice.json listed.
+    let mut without = before.clone();
+    let moved = without.as_mut().and_then(Value::as_object_mut).and_then(|fields| fields.remove("hostedChains")).is_some();
+    if moved {
+        write_atomically(&topology, &serde_json::to_vec_pretty(&without).map_err(err)?, 0o644)?;
+    }
+    let written = match node {
+        Some((port, authorization)) => put_hosted(port, authorization.as_deref(), chains),
+        None => {
+            let path = operator_fragment(root);
+            let fragment = with_hosted(read_topology_at(&path)?, chains)?;
+            fs::create_dir_all(path.parent().ok_or("no config.d")?).map_err(err)?;
+            write_atomically(&path, &serde_json::to_vec_pretty(&fragment).map_err(err)?, 0o644)
+        }
+    };
+    if written.is_err() && moved {
+        if let Some(before) = before {
+            write_atomically(&topology, &serde_json::to_vec_pretty(&before).map_err(err)?, 0o644)?;
+        }
+    }
+    written
+}
+
+/// The operator fragment's `hostedChains`, through the node: read, changed,
+/// and written only while it is still the version read, read again otherwise.
+fn put_hosted(port: u16, authorization: Option<&str>, chains: &[String]) -> Result<()> {
+    let url = format!("http://127.0.0.1:{port}/config/fragments/operator");
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).redirects(0).build();
+    let with_auth = |request: ureq::Request| match authorization {
+        Some(value) => request.set("Authorization", value),
+        None => request,
+    };
+    let answer = |result: std::result::Result<ureq::Response, ureq::Error>| match result {
+        Ok(r) | Err(ureq::Error::Status(_, r)) => Ok(r),
+        Err(e) => Err(format!("the node is not answering (it may still be starting): {e}")),
+    };
+    for _ in 0..5 {
+        let current = answer(with_auth(agent.get(&url)).call())?;
+        let (fragment, precondition) = match current.status() {
+            200 => {
+                let etag = current.header("ETag").ok_or("the node gave the operator fragment no version")?.to_string();
+                (Some(serde_json::from_str::<Value>(&current.into_string().map_err(err)?).map_err(err)?), ("If-Match", etag))
+            }
+            404 => (None, ("If-None-Match", "*".to_string())),
+            status => return Err(format!("the node did not give the operator fragment ({status}): {}", current.into_string().unwrap_or_default())),
+        };
+        let body = serde_json::to_string(&with_hosted(fragment, chains)?).map_err(err)?;
+        let put = with_auth(agent.put(&url)).set("Content-Type", "application/json").set(precondition.0, &precondition.1);
+        let written = answer(put.send_string(&body))?;
+        match written.status() {
+            200 => return Ok(()),
+            // Changed by someone else since it was read.
+            412 => continue,
+            status => return Err(format!("the node refused the hosted chains ({status}): {}", written.into_string().unwrap_or_default())),
+        }
+    }
+    Err("the operator fragment kept changing; try again".into())
 }
 
 fn store_path(app: &AppHandle, key: &str) -> Result<PathBuf> {
@@ -762,6 +905,7 @@ pub fn run() {
                 .and_then(|t| rpc_port(&t).ok())
                 .filter(|p| root.as_deref().is_some_and(|r| node_accepts_cookie(*p, r)));
             app.manage(PinnedPort(Mutex::new(port)));
+            app.manage(node_process::NodeProcess::default());
             app.manage(swap::Swaps::default());
             // Before any swap reports.
             background::start(handle)?;
@@ -772,8 +916,15 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             lattice,
+            node_start,
+            node_stop,
+            node_process,
             read_topology,
             write_topology,
+            operator_chains,
+            host_chains,
+            read_miner,
+            write_miner,
             store_get,
             store_set,
             store_remove,
@@ -815,12 +966,12 @@ pub fn run() {
             RunEvent::Reopen { .. } => background::show(app),
             RunEvent::Exit => {
                 // A clean stop for the mining loop and the node this app
-                // runs (SIGTERM, then the CLI's own grace); each is a no-op
-                // when it is not running. Mining first: it mines on the node.
+                // runs; each is a no-op when it is not running. Mining
+                // first: it mines on the node.
                 if let Ok(root) = host_root(app) {
                     let _ = run_lattice(&root, "mine-stop");
-                    let _ = run_lattice(&root, "down");
                 }
+                let _ = node_process::stop(app);
                 #[cfg(windows)]
                 wsl::release();
             }
@@ -855,16 +1006,12 @@ mod tests {
     #[test]
     fn the_page_sets_only_who_mining_pays_and_how_many_workers() {
         let address = "bafyreifrbp6x4ncfbqakwfcwfqkl7qhbsdeygsakjxixekwkdprbomyut4";
-        let current = serde_json::json!({ "rpc": 1, "listen": 2, "mine": { "worker": "/opt/gpu-miner", "batchSize": 5, "workers": 9, "recipients": { "Nexus": "old" } } });
-        let update = serde_json::json!({ "rpc": 1, "listen": 2, "mine": { "workers": 2, "recipients": { "Nexus": address, "Nexus/testnet": address } } });
-        let merged = merged_topology(current.clone(), &update, None).unwrap();
-        assert_eq!(merged["mine"], serde_json::json!({
+        let current = serde_json::json!({ "worker": "/opt/gpu-miner", "batchSize": 5, "workers": 9, "recipients": { "Nexus": "old" } });
+        let update = serde_json::json!({ "workers": 2, "recipients": { "Nexus": address, "Nexus/testnet": address } });
+        assert_eq!(merged_mine(Some(&current), &update, None).unwrap(), serde_json::json!({
             "worker": "/opt/gpu-miner", "batchSize": 5, "workers": 2,
             "recipients": { "Nexus": address, "Nexus/testnet": address },
         }));
-        // Left out, mining is untouched.
-        let untouched = merged_topology(current.clone(), &serde_json::json!({ "rpc": 1, "listen": 2 }), None).unwrap();
-        assert_eq!(untouched["mine"], current["mine"]);
         // The page never names the program the CLI runs, nor tunes the search.
         for bad in [
             serde_json::json!({ "workers": 1, "recipients": {}, "worker": "/tmp/evil" }),
@@ -876,22 +1023,21 @@ mod tests {
             serde_json::json!({ "workers": 1, "recipients": { "../etc": address } }),
             serde_json::json!({ "workers": 1, "recipients": { "Other": address } }),
         ] {
-            let update = serde_json::json!({ "rpc": 1, "listen": 2, "mine": bad });
-            assert!(merged_topology(current.clone(), &update, None).is_err(), "{update}");
+            assert!(merged_mine(Some(&current), &bad, None).is_err(), "{bad}");
         }
     }
 
     #[test]
     fn the_page_names_only_a_bundled_worker() {
         let gpu = "/Applications/Lattice.app/Contents/MacOS/lattice-miner-gpu";
-        let current = serde_json::json!({ "rpc": 1, "listen": 2, "mine": { "worker": "/opt/custom-miner", "workers": 1, "recipients": {} } });
-        let choose = |worker: &str, bundled: Option<&str>| merged_topology(
-            current.clone(),
-            &serde_json::json!({ "rpc": 1, "listen": 2, "mine": { "workers": 1, "recipients": {}, "worker": worker } }),
+        let current = serde_json::json!({ "worker": "/opt/custom-miner", "workers": 1, "recipients": {} });
+        let choose = |worker: &str, bundled: Option<&str>| merged_mine(
+            Some(&current),
+            &serde_json::json!({ "workers": 1, "recipients": {}, "worker": worker }),
             bundled,
         );
-        assert_eq!(choose(gpu, Some(gpu)).unwrap()["mine"]["worker"], gpu);
-        assert_eq!(choose("cpu", Some(gpu)).unwrap()["mine"]["worker"], "cpu");
+        assert_eq!(choose(gpu, Some(gpu)).unwrap()["worker"], gpu);
+        assert_eq!(choose("cpu", Some(gpu)).unwrap()["worker"], "cpu");
         // Not the operator's own worker, not a look-alike elsewhere, and not the GPU worker in a build without one.
         for bad in ["/opt/custom-miner", "/tmp/lattice-miner-gpu", "gpu", ""] {
             assert!(choose(bad, Some(gpu)).is_err(), "{bad}");
@@ -925,12 +1071,11 @@ mod tests {
         let began = std::time::Instant::now();
         assert!(!gpu_worker_searches(&worker("hangs", "exec sleep 60"), Duration::from_millis(300)));
         assert!(began.elapsed() < Duration::from_secs(10));
-        // Mining is on the graphics chip when lattice.json names a GPU worker, wherever it was.
-        let topology = dir.join("lattice.json");
-        assert!(!mines_on_gpu(&topology).unwrap(), "no settings yet");
+        // Mining is on the graphics chip when miner.json names a GPU worker, wherever it was.
+        assert!(!mines_on_gpu(&dir).unwrap(), "no settings yet");
         for (worker, on_gpu) in [(format!("/moved/{GPU_WORKER}"), true), ("cpu".to_string(), false), ("/opt/custom-miner".to_string(), false)] {
-            fs::write(&topology, serde_json::to_vec(&serde_json::json!({ "rpc": 1, "mine": { "worker": worker } })).unwrap()).unwrap();
-            assert_eq!(mines_on_gpu(&topology).unwrap(), on_gpu, "{worker}");
+            fs::write(dir.join("miner.json"), serde_json::to_vec(&serde_json::json!({ "worker": worker })).unwrap()).unwrap();
+            assert_eq!(mines_on_gpu(&dir).unwrap(), on_gpu, "{worker}");
         }
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -939,23 +1084,60 @@ mod tests {
     fn a_moved_app_repoints_its_gpu_worker_and_nothing_else() {
         let dir = std::env::temp_dir().join(format!("lattice-repoint-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("lattice.json");
-        let write = |worker: &str| fs::write(&file, serde_json::to_vec(&serde_json::json!({ "rpc": 1, "mine": { "worker": worker, "workers": 1 } })).unwrap()).unwrap();
-        let worker = || read_topology_at(&file).unwrap().unwrap()["mine"]["worker"].as_str().unwrap().to_string();
+        let file = dir.join("miner.json");
+        let write = |worker: &str| fs::write(&file, serde_json::to_vec(&serde_json::json!({ "worker": worker, "workers": 1 })).unwrap()).unwrap();
+        let worker = || read_topology_at(&file).unwrap().unwrap()["worker"].as_str().unwrap().to_string();
         // The worker's file name is the platform's (`.exe` on Windows).
         let (now, before, old) = (format!("/app/now/{GPU_WORKER}"), format!("/app/before/{GPU_WORKER}"), format!("/old/{GPU_WORKER}"));
         let now = now.as_str();
         write(&before);
-        repoint_gpu_worker(&file, Some(now)).unwrap();
+        repoint_gpu_worker(&dir, Some(now)).unwrap();
         assert_eq!(worker(), now);
         for kept in ["cpu", "/opt/custom-miner"] {
             write(kept);
-            repoint_gpu_worker(&file, Some(now)).unwrap();
+            repoint_gpu_worker(&dir, Some(now)).unwrap();
             assert_eq!(worker(), kept);
         }
         write(&old);
-        repoint_gpu_worker(&file, None).unwrap();
+        repoint_gpu_worker(&dir, None).unwrap();
         assert_eq!(worker(), old, "a build without the worker changes nothing");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mining_settings_are_miner_json_or_an_older_lattice_json_mine() {
+        let dir = std::env::temp_dir().join(format!("lattice-miner-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(miner_settings(&dir).unwrap(), None);
+        let topology = dir.join("lattice.json");
+        fs::write(&topology, serde_json::to_vec(&serde_json::json!({ "rpc": 1, "mine": { "enabled": true, "workers": 2 } })).unwrap()).unwrap();
+        // As the miner copies it: without `enabled`, which miner.json does not take.
+        assert_eq!(miner_settings(&dir).unwrap(), Some(serde_json::json!({ "workers": 2 })));
+        write_miner_settings(&dir, &serde_json::json!({ "workers": 3 })).unwrap();
+        assert_eq!(miner_settings(&dir).unwrap(), Some(serde_json::json!({ "workers": 3 })));
+        assert_eq!(read_topology_at(&topology).unwrap(), Some(serde_json::json!({ "rpc": 1 })), "lattice.json no longer holds mining");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stopped_nodes_hosted_chains_move_into_the_operator_fragment() {
+        let dir = std::env::temp_dir().join(format!("lattice-hosted-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let topology = dir.join("lattice.json");
+        fs::write(&topology, serde_json::to_vec(&serde_json::json!({ "rpc": 1, "hostedChains": ["Nexus/a"] })).unwrap()).unwrap();
+        set_hosted(&dir, None, &["Nexus/a".to_string(), "Nexus/a/b".to_string()]).unwrap();
+        assert_eq!(read_topology_at(&topology).unwrap(), Some(serde_json::json!({ "rpc": 1 })));
+        assert_eq!(read_topology_at(&operator_fragment(&dir)).unwrap(), Some(serde_json::json!({ "hostedChains": ["Nexus/a", "Nexus/a/b"] })));
+        // The fragment's other keys are its writer's; no chains leaves the key out.
+        fs::write(operator_fragment(&dir), serde_json::to_vec(&serde_json::json!({ "relayFee": 2, "hostedChains": ["Nexus/a"] })).unwrap()).unwrap();
+        set_hosted(&dir, None, &[]).unwrap();
+        assert_eq!(read_topology_at(&operator_fragment(&dir)).unwrap(), Some(serde_json::json!({ "relayFee": 2 })));
+        assert!(with_hosted(Some(serde_json::json!([])), &[]).is_err());
+        // Through a node that does not answer: nothing is moved.
+        fs::write(&topology, serde_json::to_vec(&serde_json::json!({ "rpc": 1, "hostedChains": ["Nexus/a"] })).unwrap()).unwrap();
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert!(set_hosted(&dir, Some((free, None)), &[]).is_err());
+        assert_eq!(read_topology_at(&topology).unwrap(), Some(serde_json::json!({ "rpc": 1, "hostedChains": ["Nexus/a"] })));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -985,7 +1167,7 @@ mod tests {
     #[test]
     fn only_lifecycle_verbs_run() {
         let root = std::env::temp_dir().join("lattice-desktop-test-verbs");
-        for verb in ["mine", "mine-run", "mine run", "child", "tx", "wipe", "key", "--help", "init; rm -rf /"] {
+        for verb in ["up", "mine", "mine-run", "mine run", "child", "tx", "wipe", "key", "--help", "init; rm -rf /"] {
             assert!(run_lattice(&root, verb).unwrap_err().starts_with("refused"));
         }
         assert_eq!(verb_arguments("mine-start"), Some(&["mine", "start"][..]));
@@ -1004,17 +1186,18 @@ mod tests {
     #[test]
     fn the_page_sets_only_managed_topology_fields() {
         let current = serde_json::json!({"listen": 4001, "rpc": 8080, "peers": ["a"], "minRelayFee": 5});
-        let merged = merged_topology(current.clone(), &serde_json::json!({"rpc": 18080, "listen": 14001}), None).unwrap();
+        let merged = merged_topology(current.clone(), &serde_json::json!({"rpc": 18080, "listen": 14001})).unwrap();
         assert_eq!(merged, serde_json::json!({"listen": 14001, "rpc": 18080, "minRelayFee": 5}));
         let per_chain = serde_json::json!({"rpc": 18080, "listen": 14001, "peers": {"Nexus": [], "Nexus/testnet": ["a"]}});
         assert_eq!(
-            merged_topology(current.clone(), &per_chain, None).unwrap()["peers"],
+            merged_topology(current.clone(), &per_chain).unwrap()["peers"],
             serde_json::json!({"Nexus": [], "Nexus/testnet": ["a"]})
         );
         for bad in [
             serde_json::json!({"rpc": 18080, "listen": 14001, "publicRead": 80}),
             serde_json::json!({"rpc": 18080, "listen": 14001, "publicSubmit": true}),
             serde_json::json!({"rpc": 18080, "listen": 14001, "mine": {}}),
+            serde_json::json!({"rpc": 18080, "listen": 14001, "hostedChains": ["Nexus/a"]}),
             serde_json::json!({"rpc": 0, "listen": 14001}),
             serde_json::json!({"listen": 14001}),
             serde_json::json!({"rpc": 1, "listen": 2, "peers": "x"}),
@@ -1022,7 +1205,7 @@ mod tests {
             serde_json::json!({"rpc": 1, "listen": 2, "peers": {"not a path": ["a"]}}),
             serde_json::json!([]),
         ] {
-            assert!(merged_topology(current.clone(), &bad, None).is_err(), "{bad}");
+            assert!(merged_topology(current.clone(), &bad).is_err(), "{bad}");
         }
     }
 
@@ -1052,22 +1235,13 @@ mod tests {
     }
 
     #[test]
-    fn the_pin_moves_only_across_down_then_up() {
-        assert_eq!(next_pin(None, "up", Some(18080)), Some(18080));
-        assert_eq!(next_pin(Some(18080), "up", Some(9999)), Some(18080), "up on a running node keeps the pin");
-        assert_eq!(next_pin(Some(18080), "status", Some(9999)), Some(18080));
-        assert_eq!(next_pin(Some(18080), "down", Some(9999)), None);
-        assert_eq!(next_pin(None, "up", Some(9999)), Some(9999));
-    }
-
-    #[test]
     fn allowed_origins_are_bare_origins() {
         let current = serde_json::json!({"listen": 4001, "rpc": 8080});
         let ok = serde_json::json!({"rpc": 8080, "listen": 4001, "rpcAllowedOrigins": ["chrome-extension://abcdefghijklmnopabcdefghijklmnop"]});
-        assert_eq!(merged_topology(current.clone(), &ok, None).unwrap()["rpcAllowedOrigins"], ok["rpcAllowedOrigins"]);
+        assert_eq!(merged_topology(current.clone(), &ok).unwrap()["rpcAllowedOrigins"], ok["rpcAllowedOrigins"]);
         for bad in ["*", "null", "https://a.example", "chrome-extension://x/y", "https://a.example/", "http://a b", "x://", "://x", "https://u@h", "a"] {
             let update = serde_json::json!({"rpc": 8080, "listen": 4001, "rpcAllowedOrigins": [bad]});
-            assert!(merged_topology(current.clone(), &update, None).is_err(), "{bad}");
+            assert!(merged_topology(current.clone(), &update).is_err(), "{bad}");
         }
     }
 

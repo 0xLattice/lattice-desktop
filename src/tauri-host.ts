@@ -1,9 +1,9 @@
 // The Tauri shell's commands, typed. Everything privileged (running the
-// bundled CLI, files under ~/Library/Application Support/Lattice, loopback
+// bundled CLI and the node, files under ~/Library/Application Support/Lattice, loopback
 // HTTP) lives in the Rust shell; the page only invokes these.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { HostOps, LifecycleVerb, CommandResult, Topology } from "./node-manager.ts";
+import type { HostOps, LifecycleVerb, CommandResult, MinerSettings, NodeProcess, Topology } from "./node-manager.ts";
 import type { LoopbackAnswer, NodeHTTP } from "./loopback.ts";
 import type { VaultStorage } from "../vendor/nexus-wallet/src/lib/wallet/signer.ts";
 import type { KeyValueStore } from "../vendor/nexus-wallet/src/lib/wallet/settings.ts";
@@ -13,20 +13,29 @@ const gpuWorker = () => invoke<string | null>("gpu_worker");
 
 export const hostOps: HostOps = {
   lattice: (verb: LifecycleVerb) => invoke<CommandResult>("lattice", { verb }),
+  startNode: () => invoke<void>("node_start"),
+  stopNode: () => invoke<void>("node_stop"),
+  nodeProcess: () => invoke<NodeProcess>("node_process"),
   readTopology: () => invoke<Topology | null>("read_topology"),
   // Only the fields the app manages; the shell merges them and refuses others.
-  writeTopology: async ({ rpc, listen, peers, hostedChains, rpcAllowedOrigins, mine }: Topology) => {
-    // Of mining: who is paid, the worker count, and the worker only when it is
-    // one bundled with the app (the shell refuses any other, and keeps the rest).
-    const bundledWorker = mine?.worker === "cpu" || (mine?.worker !== undefined && mine.worker === await gpuWorker());
+  writeTopology: async ({ rpc, listen, peers, rpcAllowedOrigins }: Topology) => {
     await invoke<void>("write_topology", {
       topology: {
         rpc, listen,
         ...(peers ? { peers } : {}),
-        ...(hostedChains ? { hostedChains } : {}),
         ...(rpcAllowedOrigins ? { rpcAllowedOrigins } : {}),
-        ...(mine ? { mine: { workers: mine.workers ?? 1, recipients: mine.recipients ?? {}, ...(bundledWorker ? { worker: mine.worker } : {}) } } : {}),
       },
+    });
+  },
+  operatorChains: () => invoke<string[]>("operator_chains"),
+  hostChains: (chains: string[]) => invoke<void>("host_chains", { chains }),
+  readMiner: () => invoke<MinerSettings | null>("read_miner"),
+  // Who is paid, the worker count, and the worker only when it is one bundled
+  // with the app (the shell refuses any other, and keeps the rest).
+  writeMiner: async (mine: MinerSettings) => {
+    const bundledWorker = mine.worker === "cpu" || (mine.worker !== undefined && mine.worker === await gpuWorker());
+    await invoke<void>("write_miner", {
+      settings: { workers: mine.workers ?? 1, recipients: mine.recipients ?? {}, ...(bundledWorker ? { worker: mine.worker } : {}) },
     });
   },
   gpuWorker: () => gpuWorker(),

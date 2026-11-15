@@ -13,7 +13,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startApp } from "../src/app.ts";
-import { NodeManager, type Topology } from "../src/node-manager.ts";
+import { NodeManager, type MinerSettings, type Topology } from "../src/node-manager.ts";
 import { loopbackFetch } from "../src/loopback.ts";
 import { reader } from "../vendor/nexus-wallet/src/lib/wallet/node.ts";
 import { balanceShown, bin, button, freePort, harnessHost, input, installPage, pageText, press, run, shows, until, openNode } from "./helpers/real-node.ts";
@@ -28,8 +28,11 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
   // On the processor here, whatever this machine has; e2e-mining covers the graphics chip.
   host.ops.gpuWorker = async () => null;
   const topology = () => JSON.parse(readFileSync(join(root, "lattice.json"), "utf8")) as Topology;
+  // The chains the app hosts are the operator fragment's; mining's settings are miner.json.
+  const operator = () => JSON.parse(readFileSync(join(root, "config.d", "operator.json"), "utf8")) as { hostedChains?: string[] };
+  const miner = () => JSON.parse(readFileSync(join(root, "miner.json"), "utf8")) as MinerSettings;
   try {
-    const setup = new NodeManager(host.ops);
+    const setup = new NodeManager(host.ops, host.nodeHTTP);
     await setup.configure({ ...(await setup.prefs()), rpc: await freePort(), listen: await freePort(), peers: "none" });
     const dom = await installPage();
     let app = await startApp(host);
@@ -152,7 +155,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await shows(/Balance/);
     openNode();
     await stopHosting(CHILD);
-    await until(() => (topology().hostedChains === undefined ? true : undefined), "the child no longer hosted");
+    await until(() => (operator().hostedChains === undefined ? true : undefined), "the child no longer hosted");
     await shows(/Your nodeRunning/);
     button("Back to wallet").click();
     await shows(/Balance/);
@@ -174,7 +177,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     childName("Nexus").value = "testnet";
     button("Add").click();
     await until(() => (mined().join() === `Nexus,${CHILD}` ? true : undefined), "both chains on the Mining page");
-    assert.deepEqual(topology().hostedChains, [CHILD]);
+    assert.deepEqual(operator().hostedChains, [CHILD]);
     // Each chain pays the active account unless told otherwise.
     await openMiningSettings();
     assert.deepEqual([recipient("Nexus")!.value, recipient(CHILD)!.value], [second, second]);
@@ -191,7 +194,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await shows(/Nexus pays no one: every reward and fee mined there is destroyed\./);
     button("Start mining").click();
     await shows(/MiningMining on the (graphics chip|processor)/);
-    assert.deepEqual(topology().mine?.recipients, { [CHILD]: first });
+    assert.deepEqual(miner().recipients, { [CHILD]: first });
     await until(async () => ((await balance(CHILD, first)) > 0n ? true : undefined), "child-chain rewards for the first account");
     const nexusHeight = async () => (await reads("Nexus").chainInfo()).height ?? 0n;
     assert.ok((await nexusHeight()) > 0n);
@@ -201,7 +204,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await openMiningSettings();
     recipient("Nexus")!.value = second;
     button("Save and restart mining").click();
-    await until(() => (topology().mine?.recipients?.Nexus === second ? true : undefined), "the Nexus recipient saved");
+    await until(() => (miner().recipients?.Nexus === second ? true : undefined), "the Nexus recipient saved");
     await until(async () => ((await balance("Nexus", second)) > 0n ? true : undefined), "Nexus rewards for the second account");
     assert.equal(await balance(CHILD, second), 0n);
 
@@ -250,12 +253,11 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
     await openMiningSettings();
     button("Manage chains on your node").click();
     await stopHosting(CHILD);
-    // The node will not start on a lattice.json whose mining names a chain it
-    // does not host, so the chain stops being paid when it stops being hosted.
+    // The chain stops being paid when it stops being hosted.
     await until(() => (mined().join() === "Nexus" ? true : undefined), "Nexus alone on the Mining page");
     await shows(/MiningMining on the (graphics chip|processor)/);
-    assert.deepEqual(topology().mine?.recipients, { Nexus: second });
-    assert.equal(topology().hostedChains, undefined);
+    assert.deepEqual(miner().recipients, { Nexus: second });
+    assert.equal(operator().hostedChains, undefined);
     assert.deepEqual(topology().peers, [peer], "a chain no longer hosted takes its peers with it");
     assert.deepEqual((await app.manager.status()).map((chain) => chain.path), ["Nexus"]);
     const unhostedAt = await until(async () => nexusHeight(), "the node back up");
@@ -302,7 +304,7 @@ test("the app: node settings, a hosted child chain, and mining both", { skip: !b
   } finally {
     globalThis.document?.body.replaceChildren();
     await host.ops.lattice("mine-stop");
-    await host.ops.lattice("down");
+    await host.ops.stopNode();
     rmSync(root, { recursive: true, force: true });
   }
 });
