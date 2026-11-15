@@ -40,7 +40,6 @@ mod wsl;
 
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -571,15 +570,12 @@ fn merged_config(root: &Path) -> Result<Option<Value>> {
 }
 
 /// How long `lattice config get` may take. It asks a running node, and a
-/// node that holds the storage but does not answer (one exiting, one between
-/// a restart's exit and its start, or one whose new RPC port is saved but
-/// not yet in use) would keep it waiting for minutes.
+/// node that holds the storage but does not answer (one exiting, or one
+/// between a restart's exit and its start) would keep it waiting for minutes.
+#[cfg_attr(test, allow(dead_code))]
 const CONFIG_PATIENCE: Duration = Duration::from_secs(5);
 
 /// `lattice config get`, given up after `CONFIG_PATIENCE`.
-// Once the CLI reaches a running node on the port it listens on (not the
-// one saved for its next start), a node that answers no longer keeps it
-// waiting, and only a node exiting still needs this bound.
 #[cfg(not(test))]
 fn config_get(root: &Path) -> Result<CommandResult> {
     run_cli_within(root, &["config", "get"], CONFIG_PATIENCE)
@@ -636,32 +632,24 @@ fn output_within(mut command: Command, patience: Duration) -> Result<CommandResu
 /// starts, the lock of a swap wallet another test has just closed.
 #[cfg(test)]
 fn config_get(root: &Path) -> Result<CommandResult> {
-    if root.join("unanswered").exists() {
-        return Err(format!("lattice gave no answer in {}s", CONFIG_PATIENCE.as_secs()));
-    }
     let stdout = fs::read_to_string(root.join("merged.json")).or_else(|_| fs::read_to_string(root.join("lattice.json"))).map_err(err)?;
     Ok(CommandResult { code: 0, stdout, stderr: String::new() })
 }
 
 /// The RPC port the merged configuration names: the one the node starts on.
-/// When the configuration cannot be read in time, the last port it named
-/// for `root`.
 fn configured_rpc(root: &Path) -> Option<u16> {
-    static LAST: Mutex<Option<HashMap<PathBuf, u16>>> = Mutex::new(None);
-    let config = merged_config(root);
-    let mut last = LAST.lock().ok()?;
-    let last = last.get_or_insert_with(HashMap::new);
-    match config {
-        Ok(config) => {
-            let rpc = config.as_ref().and_then(|c| c.get("rpc")?.as_u64());
-            let port = rpc.and_then(|rpc| u16::try_from(rpc).ok()).filter(|p| *p != 0);
-            match port {
-                Some(port) => last.insert(root.to_path_buf(), port),
-                None => last.remove(root),
-            };
-            port
-        }
-        Err(_) => last.get(root).copied(),
+    let rpc = merged_config(root).ok()??.get("rpc")?.as_u64()?;
+    u16::try_from(rpc).ok().filter(|p| *p != 0)
+}
+
+/// The RPC port a running node listens on: from the address it writes
+/// beside its cookie at each start (and removes at exit), else, with none
+/// written, the one its configuration names. A node that crashed leaves
+/// it: whether a node answers there is the caller's to find out.
+fn live_rpc(root: &Path) -> Option<u16> {
+    match fs::read_to_string(root.join("chains").join("Nexus").join(".rpc-address")) {
+        Ok(address) => address.trim().rsplit_once(':')?.1.trim_end_matches('/').parse().ok().filter(|p| *p != 0),
+        Err(_) => configured_rpc(root),
     }
 }
 
@@ -919,7 +907,7 @@ pub fn run() {
             let launched = handle.clone();
             std::thread::spawn(move || {
                 let Ok(root) = host_root(&launched) else { return };
-                let Some(port) = configured_rpc(&root).filter(|p| node_accepts_cookie(*p, &root)) else { return };
+                let Some(port) = live_rpc(&root).filter(|p| node_accepts_cookie(*p, &root)) else { return };
                 let state = launched.state::<PinnedPort>();
                 let Ok(mut pinned) = state.0.lock() else { return };
                 // An `up` since launch pinned its own port: that one stands.
@@ -1232,20 +1220,18 @@ mod tests {
     }
 
     #[test]
-    fn an_unanswered_read_of_the_port_falls_back_to_the_last_one() {
-        let root = std::env::temp_dir().join(format!("lattice-desktop-last-rpc-{}", std::process::id()));
+    fn a_running_nodes_port_is_the_one_it_wrote_down() {
+        let root = std::env::temp_dir().join(format!("lattice-desktop-live-rpc-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("unanswered"), "").unwrap();
-        // Nothing read yet: nothing to fall back to.
-        fs::write(root.join("lattice.json"), r#"{"rpc": 8080}"#).unwrap();
-        assert_eq!(configured_rpc(&root), None);
-        fs::remove_file(root.join("unanswered")).unwrap();
-        assert_eq!(configured_rpc(&root), Some(8080));
+        fs::create_dir_all(root.join("chains").join("Nexus")).unwrap();
+        // A new port saved, not yet in use: the configuration's is the next start's.
         fs::write(root.join("lattice.json"), r#"{"rpc": 9090}"#).unwrap();
-        fs::write(root.join("unanswered"), "").unwrap();
-        assert_eq!(configured_rpc(&root), Some(8080));
-        fs::remove_file(root.join("unanswered")).unwrap();
+        assert_eq!(live_rpc(&root), Some(9090));
+        let address = root.join("chains").join("Nexus").join(".rpc-address");
+        fs::write(&address, "http://127.0.0.1:8080\n").unwrap();
+        assert_eq!(live_rpc(&root), Some(8080));
+        fs::write(&address, "http://[::1]:8081\n").unwrap();
+        assert_eq!(live_rpc(&root), Some(8081));
         assert_eq!(configured_rpc(&root), Some(9090));
         fs::remove_dir_all(root).unwrap();
     }

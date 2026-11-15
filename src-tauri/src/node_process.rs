@@ -16,10 +16,12 @@
 //! to `<root>/log/lattice-node.log`, moved to `lattice-node.log.1` at 8 MiB.
 
 use super::{
-    configured_rpc, err, host_root, lattice_command, node_accepts_cookie, read_topology_at, run_cli_within, run_lattice, sync_swaps,
+    configured_rpc, err, host_root, lattice_command, read_topology_at, run_cli_within, sync_swaps,
     write_atomically, CommandResult, PinnedPort, Result,
 };
 use serde_json::{json, Map, Value};
+#[cfg(windows)]
+use super::run_lattice;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fs;
@@ -128,12 +130,12 @@ pub fn start(app: &AppHandle) -> Result<()> {
     }
     let root = host_root(app)?;
     let spawned = (|| {
-        let port = clear_storage(
-            &root,
-            |port| node_accepts_cookie(port, &root),
-            || run_lattice(&root, "down").map(drop),
-            STOP_PATIENCE,
-        )?;
+        let down = || -> Result<Child> {
+            let (mut command, linux_root) = lattice_command(&root)?;
+            command.args(["down", "--root"]).arg(linux_root).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            command.spawn().map_err(|e| format!("could not run the bundled lattice: {e}"))
+        };
+        let port = clear_storage(&root, down, STOP_PATIENCE)?;
         // The node is stopped here, and nothing else starts it: the move
         // cannot race it (each CLI write, and the rewrite, under its lock).
         let cli = |arguments: &[&str]| run_cli_within(&root, arguments, MOVE_PATIENCE);
@@ -271,32 +273,29 @@ fn ask_to_stop(app: &AppHandle, _pid: u32, root: &Path) {
 
 /// Gets the storage at `root` ready for a node of this app's, and returns
 /// the RPC port that node will start on, read once, before anything stops.
-/// A node already running on it is asked to stop (`down`) when it answers
-/// with the cookie on that port (`answers`); either way the storage's lock
-/// must be let go of within `patience`, else the new node would only fail
-/// on it, again and again.
-// Once the CLI reaches a running node on the port it listens on, `down`
-// stops whatever node holds the storage, and `answers` can go: a node whose
-// new port is saved but not yet in use is stopped too, not waited out.
-fn clear_storage(
-    root: &Path,
-    answers: impl Fn(u16) -> bool,
-    down: impl FnOnce() -> Result<()>,
-    patience: Duration,
-) -> Result<Option<u16>> {
+/// A node already running on it is asked to stop (`down`, which reaches it
+/// wherever it listens), and its storage's lock must be let go of within
+/// `patience`, else the new node would only fail on it, again and again.
+/// `down` is not waited for once the lock is let go of: a node already
+/// exiting no longer answers it, and it would wait on, then stop the new one.
+fn clear_storage(root: &Path, down: impl FnOnce() -> Result<Child>, patience: Duration) -> Result<Option<u16>> {
     let port = configured_rpc(root);
     if !storage_held(root) {
         return Ok(port);
     }
-    if port.is_some_and(answers) {
-        down()?;
-    }
+    let mut asking = down()?;
     let deadline = Instant::now() + patience;
-    while storage_held(root) {
-        if Instant::now() >= deadline {
-            return Err("Another node holds this storage and has not let go of it; stop it (`lattice down`), then start again.".into());
+    let held = loop {
+        let held = storage_held(root);
+        if !held || Instant::now() >= deadline {
+            break held;
         }
         std::thread::sleep(Duration::from_millis(100));
+    };
+    let _ = asking.kill();
+    let _ = asking.wait();
+    if held {
+        return Err("Another node holds this storage and has not let go of it; stop it (`lattice down`), then start again.".into());
     }
     Ok(port)
 }
@@ -312,16 +311,30 @@ const MOVE_PATIENCE: Duration = Duration::from_secs(30);
 /// each hosted chain with `lattice child host`, the peers and origins with
 /// `lattice config set` (joined with what the fragment lists; the layers
 /// join them anyway, so the merged configuration does not change). Only
-/// then are they taken out of lattice.json (kept first, as it was, in
-/// lattice.json.before-operator), each only if it still says what was
-/// moved. Interrupted, it moves again what is left, which changes nothing
-/// already moved; with nothing left it does nothing.
+/// then are they taken out of lattice.json, each only if it still says
+/// what was moved, and lattice.json as it was kept in
+/// lattice.json.before-operator: the mark that the move is done, written
+/// last. With the mark there it does nothing, so keys a person adds to
+/// lattice.json later stay there. Interrupted, it moves again what is left,
+/// which changes nothing already moved.
 fn move_app_keys(root: &Path, mut cli: impl FnMut(&[&str]) -> Result<CommandResult>) -> Result<()> {
     let topology_file = root.join("lattice.json");
+    let backup = root.join("lattice.json.before-operator");
+    // lattice.json as it was, until the move is done.
+    let staged = root.join("lattice.json.before-operator.partial");
+    if backup.exists() {
+        return Ok(());
+    }
     let Some(Value::Object(topology)) = read_topology_at(&topology_file)? else { return Ok(()) };
     let moved: Map<String, Value> = APP_KEYS.iter().filter_map(|k| Some((k.to_string(), topology.get(*k)?.clone()))).collect();
     if moved.is_empty() {
-        return Ok(());
+        // Nothing (left) to move: done, with lattice.json as it was before
+        // an interrupted move took them out, or as it is.
+        let _lock = hold_storage(root)?;
+        if !staged.exists() {
+            write_atomically(&staged, &fs::read(&topology_file).map_err(err)?, file_mode(&topology_file))?;
+        }
+        return fs::rename(&staged, &backup).map_err(err);
     }
     let mut run = |arguments: &[&str]| -> Result<()> {
         let said = cli(arguments)?;
@@ -358,17 +371,24 @@ fn move_app_keys(root: &Path, mut cli: impl FnMut(&[&str]) -> Result<CommandResu
     // Under the node's lock, so no node starts reading it half-changed.
     let _lock = hold_storage(root)?;
     let Some(Value::Object(mut topology)) = read_topology_at(&topology_file)? else { return Ok(()) };
-    let backup = root.join("lattice.json.before-operator");
-    if !backup.exists() {
-        write_atomically(&backup, &fs::read(&topology_file).map_err(err)?, file_mode(&topology_file))?;
+    if !staged.exists() {
+        write_atomically(&staged, &fs::read(&topology_file).map_err(err)?, file_mode(&topology_file))?;
     }
+    let mut changed_meanwhile = false;
     for (key, value) in &moved {
         if topology.get(key) == Some(value) {
             topology.remove(key);
+        } else {
+            changed_meanwhile = true;
         }
     }
     let bytes = serde_json::to_vec_pretty(&Value::Object(topology)).map_err(err)?;
-    write_atomically(&topology_file, &bytes, file_mode(&topology_file))
+    write_atomically(&topology_file, &bytes, file_mode(&topology_file))?;
+    // A key changed while it was moved is moved again at the next start.
+    if changed_meanwhile {
+        return Ok(());
+    }
+    fs::rename(&staged, &backup).map_err(err)
 }
 
 /// Each chain's peers from a `peers` value: a list (Nexus's) or a map.
@@ -713,72 +733,81 @@ mod tests {
         (root, holder)
     }
 
+    /// A `down` that is still waiting when it is let go of: its pid, to
+    /// find out it was stopped and reaped.
+    #[cfg(unix)]
+    fn waiting_down(pid: &Mutex<Option<u32>>) -> Result<Child> {
+        let child = std::process::Command::new("sh").args(["-c", "sleep 30"]).spawn().map_err(err)?;
+        *pid.lock().unwrap() = Some(child.id());
+        Ok(child)
+    }
+
+    #[cfg(unix)]
+    fn gone(pid: &Mutex<Option<u32>>) -> bool {
+        let pid = pid.lock().unwrap().expect("down was run");
+        unsafe { libc::kill(pid as libc::pid_t, 0) != 0 }
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_port_is_read_once_before_the_running_node_is_stopped() {
         let (root, holder) = held_root("port-once", 8080);
-        let holder = Mutex::new(Some(holder));
-        let asked = Mutex::new(Vec::new());
+        let pid = Mutex::new(None);
         let port = clear_storage(
             &root,
-            |port| {
-                asked.lock().unwrap().push(port);
-                true
-            },
             || {
                 // A new port saved while it ran: the stopped node's next
                 // start is on it, not the one this start pins.
                 fs::write(root.join("merged.json"), r#"{"rpc": 9090}"#).unwrap();
-                holder.lock().unwrap().take();
-                Ok(())
+                drop(holder);
+                waiting_down(&pid)
             },
             Duration::from_secs(5),
         );
         assert_eq!(port, Ok(Some(8080)));
-        assert_eq!(*asked.lock().unwrap(), vec![8080]);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_start_waits_until_the_storage_is_let_go_of() {
+    fn a_start_waits_until_the_storage_is_let_go_of_and_no_longer() {
         let (root, holder) = held_root("let-go", 8081);
-        let downs = Mutex::new(0);
+        let pid = Mutex::new(None);
         let began = Instant::now();
         let port = clear_storage(
             &root,
-            |_| true,
             || {
-                // `down` returns once the RPC is gone; the lock goes later.
-                *downs.lock().unwrap() += 1;
+                // The node lets go of its storage a while after it is asked;
+                // `down`, still waiting on it, is not waited for.
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(400));
                     drop(holder);
                 });
-                Ok(())
+                waiting_down(&pid)
             },
             Duration::from_secs(5),
         );
         assert_eq!(port, Ok(Some(8081)));
-        assert_eq!(*downs.lock().unwrap(), 1);
         assert!(began.elapsed() >= Duration::from_millis(400));
+        assert!(began.elapsed() < Duration::from_secs(5));
         assert!(!storage_held(&root));
+        assert!(gone(&pid), "down was stopped, so it cannot stop the new node");
         fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
     fn a_node_that_keeps_the_storage_is_not_started_against() {
-        // Not answering on the port (its new one saved, not yet in use): not
-        // asked to stop, and the start fails once its patience is out.
         let (root, holder) = held_root("kept", 8082);
+        let pid = Mutex::new(None);
         let began = Instant::now();
-        let port = clear_storage(&root, |_| false, || panic!("asked to stop"), Duration::from_millis(300));
+        let port = clear_storage(&root, || waiting_down(&pid), Duration::from_millis(300));
         assert!(port.unwrap_err().contains("holds this storage"));
         assert!(began.elapsed() >= Duration::from_millis(300));
+        assert!(gone(&pid));
         drop(holder);
         // Let go of: the start goes ahead, and stops nothing.
-        assert_eq!(clear_storage(&root, |_| true, || panic!("asked to stop"), Duration::ZERO), Ok(Some(8082)));
+        assert_eq!(clear_storage(&root, || panic!("asked to stop"), Duration::ZERO), Ok(Some(8082)));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -847,7 +876,7 @@ mod tests {
         // Interrupted after the chains moved: lattice.json is as it was.
         assert!(move_app_keys(&root, fake_cli(&root, &calls, &refuse)).unwrap_err().contains("refused"));
         assert_eq!(read_topology_at(&root.join("lattice.json")).unwrap().unwrap(), old);
-        assert!(!root.join("lattice.json.before-operator").exists());
+        assert!(!root.join("lattice.json.before-operator").exists(), "not marked done");
 
         // Run again: what is left moves, then lattice.json loses those keys.
         *refuse.lock().unwrap() = false;
@@ -875,6 +904,42 @@ mod tests {
             .map(|f| fs::read(root.join(f)).unwrap())
             .collect();
         assert_eq!(before, after);
+
+        // Done once: keys a person adds to lattice.json later stay there.
+        let mut topology = read_topology_at(&root.join("lattice.json")).unwrap().unwrap();
+        topology["hostedChains"] = json!(["Nexus/Gamma"]);
+        topology["rpcAllowedOrigins"] = json!(["chrome-extension://def"]);
+        fs::write(root.join("lattice.json"), topology.to_string()).unwrap();
+        move_app_keys(&root, fake_cli(&root, &calls, &refuse)).unwrap();
+        assert_eq!(calls.lock().unwrap().len(), made);
+        assert_eq!(read_topology_at(&root.join("lattice.json")).unwrap().unwrap(), topology);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_move_interrupted_after_lattice_json_was_rewritten_is_marked_done_with_it_as_it_was() {
+        let root = std::env::temp_dir().join(format!("lattice-desktop-move-late-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // The keys moved and lattice.json rewritten; the mark not yet made.
+        let old = json!({"rpc": 8180, "hostedChains": ["Nexus/Alpha"]});
+        fs::write(root.join("lattice.json.before-operator.partial"), old.to_string()).unwrap();
+        fs::write(root.join("lattice.json"), r#"{"rpc": 8180}"#).unwrap();
+        let (calls, refuse) = (Mutex::new(Vec::new()), Mutex::new(false));
+        move_app_keys(&root, fake_cli(&root, &calls, &refuse)).unwrap();
+        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(read_topology_at(&root.join("lattice.json.before-operator")).unwrap().unwrap(), old);
+        assert!(!root.join("lattice.json.before-operator.partial").exists());
+        // Interrupted before lattice.json was rewritten: not marked done,
+        // so the move is made again.
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("lattice.json.before-operator.partial"), old.to_string()).unwrap();
+        fs::write(root.join("lattice.json"), old.to_string()).unwrap();
+        move_app_keys(&root, fake_cli(&root, &calls, &refuse)).unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec!["child host Nexus/Alpha"]);
+        assert_eq!(read_topology_at(&root.join("lattice.json")).unwrap().unwrap(), json!({"rpc": 8180}));
+        assert_eq!(read_topology_at(&root.join("lattice.json.before-operator")).unwrap().unwrap(), old);
         fs::remove_dir_all(root).unwrap();
     }
 
