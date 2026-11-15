@@ -3058,8 +3058,9 @@ mod tests {
         let engine = Mutex::new(Engine::default());
         assert!(open_with(&engine, || Ok(offline(&dir)), &emit).is_err());
         assert!(lock(&engine).unwrap().wallet.is_none());
-        // Nor the directory held.
-        drop(Wallet::open(offline(&dir)).unwrap());
+        // Nor the directory held: patiently, as the app opens it, since a
+        // process another test spawns holds the lock until it starts.
+        drop(open_wallet(&offline(&dir), Duration::from_secs(10)).unwrap());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3425,8 +3426,9 @@ mod tests {
         );
         close(&engine);
         assert!(lock(&engine).unwrap().wallet.is_none());
-        // Closed, the directory is free for another wallet.
-        drop(Wallet::open(offline(&dir)).unwrap());
+        // Closed, the directory is free for another wallet (patiently: a
+        // process another test spawns holds the lock until it starts).
+        drop(open_wallet(&offline(&dir), Duration::from_secs(10)).unwrap());
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

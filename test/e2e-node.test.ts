@@ -91,8 +91,12 @@ test("the app's node layer: init, start, fund by mining, send with a custom fee,
     // against the tip: the bundled node serves that read on the operator port.
     assert.deepEqual(await activeDeposits(url, ["Nexus"], loopback), []);
 
-    const [nexus] = await manager.status();
-    assert.ok(nexus!.height! >= included.height, "status reports the synced height");
+    // `lattice status` reads the node's published view, which follows the
+    // tip a moment later.
+    await until(async () => {
+      const [nexus] = await manager.status();
+      return nexus?.height !== undefined && nexus.height >= included.height ? nexus : undefined;
+    }, "status reports the synced height");
 
     // Pairing an extension: its origin is allowed (the node restarts with a
     // fresh cookie); with that cookie, requests from that origin are served,
